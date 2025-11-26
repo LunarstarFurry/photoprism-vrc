@@ -384,15 +384,15 @@ msgstr "모든 원본"
 msgid "All Years"
 msgstr "모든 년도"
 
-#: src/page/settings/general.vue:284
+#: src/page/settings/general.vue:255
 msgid "Allow configuration and use of connected apps and services for remote uploads and sync."
 msgstr "원격 업로드 및 동기화를 위해 연결된 앱과 서비스를 구성하고 사용할 수 있도록 허용합니다."
 
-#: src/page/settings/general.vue:224
+#: src/page/settings/general.vue:209
 msgid "Allow editing of metadata such as title, description, date, and location."
 msgstr "제목, 설명, 날짜, 위치 등의 메타데이터 편집을 허용합니다."
 
-#: src/page/settings/general.vue:239
+#: src/page/settings/general.vue:224
 msgid "Allow editing the metadata, labels, and albums of multiple pictures at once."
 msgstr "여러 사진의 메타데이터, 레이블 및 앨범을 한 번에 편집할 수 있습니다."
 
@@ -400,15 +400,15 @@ msgstr "여러 사진의 메타데이터, 레이블 및 앨범을 한 번에 편
 msgid "Allow files to be copied or moved from the Import to the Originals folder."
 msgstr "가져오기 도구를 활성화하여 가져오기 폴더에서 원본으로 파일을 복사하거나 이동합니다."
 
-#: src/page/settings/general.vue:269
+#: src/page/settings/general.vue:286
 msgid "Allow files to be permanently deleted to free up storage space."
 msgstr "파일을 영구 삭제하여 저장 공간을 확보할 수 있도록 허용합니다."
 
-#: src/page/settings/general.vue:254
+#: src/page/settings/general.vue:271
 msgid "Allow users to archive photos and videos so they are hidden without being deleted."
 msgstr "사용자가 사진과 동영상을 보관하여 삭제되지 않고 숨길 수 있도록 허용합니다."
 
-#: src/page/settings/general.vue:209
+#: src/page/settings/general.vue:239
 msgid "Allow users to create and share links, and enable sharing with connected services."
 msgstr "사용자가 링크를 만들고 공유할 수 있도록 허용하고 연결된 서비스와의 공유를 활성화합니다."
 
@@ -585,7 +585,7 @@ msgstr "기본 경로"
 msgid "Batch"
 msgstr "배치"
 
-#: src/page/settings/general.vue:238
+#: src/page/settings/general.vue:223
 msgid "Batch Edit"
 msgstr "일괄 편집"
 
@@ -1064,7 +1064,7 @@ msgstr "기본 폴더"
 #: src/component/photo/clipboard.vue:140 src/component/photo/edit/files.vue:62
 #: src/component/photo/edit/files.vue:70 src/component/photo/edit/files.vue:94
 #: src/component/service/remove.vue:22 src/component/share/dialog.vue:112
-#: src/locales.js:317 src/page/settings/general.vue:268
+#: src/locales.js:317 src/page/settings/general.vue:285
 msgid "Delete"
 msgstr "삭제"
 
@@ -1306,7 +1306,7 @@ msgstr "이메일"
 
 #: src/component/album/clipboard.vue:43 src/component/album/toolbar.vue:174
 #: src/component/lightbox.vue:1378 src/component/lightbox.vue:1379
-#: src/component/photo/clipboard.vue:68 src/page/settings/general.vue:223
+#: src/component/photo/clipboard.vue:68 src/page/settings/general.vue:208
 msgid "Edit"
 msgstr "편집"
 
@@ -2660,7 +2660,7 @@ msgid "Please copy the following randomly generated app password and keep it in 
 msgstr "무작위로 생성된 다음 앱 비밀번호는 다시 볼 수 없으므로 복사하여 안전한 곳에 보관하시기 바랍니다."
 
 #: src/component/upload/dialog.vue:101
-msgid "Please do not upload any private, unlawful or offensive pictures. "
+msgid "Please do not upload any private, unlawful or offensive pictures."
 msgstr "사적이거나 불법적이거나 불쾌감을 주는 사진은 업로드하지 마세요."
 
 #: src/component/upload/dialog.vue:104
@@ -3135,7 +3135,7 @@ msgid "Service URL"
 msgstr "서비스 URL"
 
 #: src/locales.js:359 src/page/settings.vue:99
-#: src/page/settings/general.vue:282
+#: src/page/settings/general.vue:253
 msgid "Services"
 msgstr "서비스"
 
@@ -3186,7 +3186,7 @@ msgid "Severity"
 msgstr "심각도"
 
 #: src/component/album/clipboard.vue:32 src/component/album/toolbar.vue:183
-#: src/component/photo/clipboard.vue:32 src/page/settings/general.vue:208
+#: src/component/photo/clipboard.vue:32 src/page/settings/general.vue:238
 msgid "Share"
 msgstr "공유"
 
@@ -3999,7 +3999,7 @@ msgstr "콘텐츠"
 #: src/component/navigation.vue:128 src/component/navigation.vue:152
 #: src/component/navigation.vue:158 src/component/navigation.vue:173
 #: src/component/navigation.vue:188 src/component/navigation.vue:240
-#: src/component/navigation.vue:246 src/page/settings/general.vue:253
+#: src/component/navigation.vue:246 src/page/settings/general.vue:270
 msgctxt "Noun"
 msgid "Archive"
 msgstr "보관"

@@ -381,15 +381,15 @@ msgstr "Усе арыгіналы"
 msgid "All Years"
 msgstr "Усе гады"
 
-#: src/page/settings/general.vue:284
+#: src/page/settings/general.vue:255
 msgid "Allow configuration and use of connected apps and services for remote uploads and sync."
 msgstr "Дазволіць канфігурацыю і выкарыстанне падлучаных праграм і сэрвісаў для дыстанцыйнай загрузкі і сінхранізацыі."
 
-#: src/page/settings/general.vue:224
+#: src/page/settings/general.vue:209
 msgid "Allow editing of metadata such as title, description, date, and location."
 msgstr "Дазволіць рэдагаванне метададзеных, такіх як назва, апісанне, дата і месцазнаходжанне."
 
-#: src/page/settings/general.vue:239
+#: src/page/settings/general.vue:224
 msgid "Allow editing the metadata, labels, and albums of multiple pictures at once."
 msgstr "Дазволіць рэдагаваць метададзеныя, цэтлікі і альбомы некалькіх малюнкаў адначасова."
 
@@ -397,15 +397,15 @@ msgstr "Дазволіць рэдагаваць метададзеныя, цэт
 msgid "Allow files to be copied or moved from the Import to the Originals folder."
 msgstr "Уключыце інструмент імпарту, каб капіраваць або перамяшчаць файлы з папкі імпарту ў тэчку «Арыгіналы»."
 
-#: src/page/settings/general.vue:269
+#: src/page/settings/general.vue:286
 msgid "Allow files to be permanently deleted to free up storage space."
 msgstr "Дазволіць выдаленне файлаў назаўсёды, каб вызваліць месца для захоўвання."
 
-#: src/page/settings/general.vue:254
+#: src/page/settings/general.vue:271
 msgid "Allow users to archive photos and videos so they are hidden without being deleted."
 msgstr "Дазволіць карыстальнікам архіваваць фота і відэа, каб яны былі схаваныя, але не выдаленыя."
 
-#: src/page/settings/general.vue:209
+#: src/page/settings/general.vue:239
 msgid "Allow users to create and share links, and enable sharing with connected services."
 msgstr "Дазволіць карыстальнікам ствараць і дзяліцца спасылкамі, а таксама ўключыць абмен з падлучанымі сэрвісамі."
 
@@ -582,7 +582,7 @@ msgstr "Базавы шлях"
 msgid "Batch"
 msgstr "Пакет"
 
-#: src/page/settings/general.vue:238
+#: src/page/settings/general.vue:223
 msgid "Batch Edit"
 msgstr "Пакетнае рэдагаванне"
 
@@ -1061,7 +1061,7 @@ msgstr "Папка па змаўчанні"
 #: src/component/photo/clipboard.vue:140 src/component/photo/edit/files.vue:62
 #: src/component/photo/edit/files.vue:70 src/component/photo/edit/files.vue:94
 #: src/component/service/remove.vue:22 src/component/share/dialog.vue:112
-#: src/locales.js:317 src/page/settings/general.vue:268
+#: src/locales.js:317 src/page/settings/general.vue:285
 msgid "Delete"
 msgstr "Выдаліць"
 
@@ -1303,7 +1303,7 @@ msgstr "Электронная пошта"
 
 #: src/component/album/clipboard.vue:43 src/component/album/toolbar.vue:174
 #: src/component/lightbox.vue:1378 src/component/lightbox.vue:1379
-#: src/component/photo/clipboard.vue:68 src/page/settings/general.vue:223
+#: src/component/photo/clipboard.vue:68 src/page/settings/general.vue:208
 msgid "Edit"
 msgstr "Рэдагаваць"
 
@@ -2657,7 +2657,7 @@ msgid "Please copy the following randomly generated app password and keep it in 
 msgstr "Калі ласка, скапіруйце наступны выпадкова згенераваны пароль праграмы і захавайце яго ў надзейным месцы, бо вы не зможаце ўбачыць яго зноў:"
 
 #: src/component/upload/dialog.vue:101
-msgid "Please do not upload any private, unlawful or offensive pictures. "
+msgid "Please do not upload any private, unlawful or offensive pictures."
 msgstr "Калі ласка, не запампоўвайце прыватныя, незаконныя або абразлівыя фатаграфіі."
 
 #: src/component/upload/dialog.vue:104
@@ -3132,7 +3132,7 @@ msgid "Service URL"
 msgstr "URL службы"
 
 #: src/locales.js:359 src/page/settings.vue:99
-#: src/page/settings/general.vue:282
+#: src/page/settings/general.vue:253
 msgid "Services"
 msgstr "Сэрвісы"
 
@@ -3183,7 +3183,7 @@ msgid "Severity"
 msgstr "Сур'ёзнасць"
 
 #: src/component/album/clipboard.vue:32 src/component/album/toolbar.vue:183
-#: src/component/photo/clipboard.vue:32 src/page/settings/general.vue:208
+#: src/component/photo/clipboard.vue:32 src/page/settings/general.vue:238
 msgid "Share"
 msgstr "падзяліцца"
 
@@ -3996,7 +3996,7 @@ msgstr "Змест"
 #: src/component/navigation.vue:128 src/component/navigation.vue:152
 #: src/component/navigation.vue:158 src/component/navigation.vue:173
 #: src/component/navigation.vue:188 src/component/navigation.vue:240
-#: src/component/navigation.vue:246 src/page/settings/general.vue:253
+#: src/component/navigation.vue:246 src/page/settings/general.vue:270
 msgctxt "Noun"
 msgid "Archive"
 msgstr "Архіў"

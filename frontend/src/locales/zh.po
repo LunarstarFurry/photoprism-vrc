@@ -384,15 +384,15 @@ msgstr "全部源图"
 msgid "All Years"
 msgstr "全部年份"
 
-#: src/page/settings/general.vue:284
+#: src/page/settings/general.vue:255
 msgid "Allow configuration and use of connected apps and services for remote uploads and sync."
 msgstr "允许配置和使用连接的应用程序和服务进行远程上传和同步。"
 
-#: src/page/settings/general.vue:224
+#: src/page/settings/general.vue:209
 msgid "Allow editing of metadata such as title, description, date, and location."
 msgstr "允许编辑标题、描述、日期和地点等元数据。"
 
-#: src/page/settings/general.vue:239
+#: src/page/settings/general.vue:224
 msgid "Allow editing the metadata, labels, and albums of multiple pictures at once."
 msgstr "允许同时编辑多张图片的元数据、标签和相册。"
 
@@ -400,15 +400,15 @@ msgstr "允许同时编辑多张图片的元数据、标签和相册。"
 msgid "Allow files to be copied or moved from the Import to the Originals folder."
 msgstr "启用 \"导入 \"工具，将文件从 \"导入 \"文件夹复制或移动到 \"原始文件\"。"
 
-#: src/page/settings/general.vue:269
+#: src/page/settings/general.vue:286
 msgid "Allow files to be permanently deleted to free up storage space."
 msgstr "允许永久删除文件以释放存储空间。"
 
-#: src/page/settings/general.vue:254
+#: src/page/settings/general.vue:271
 msgid "Allow users to archive photos and videos so they are hidden without being deleted."
 msgstr "允许用户将照片和视频存档，使其隐藏起来而不会被删除。"
 
-#: src/page/settings/general.vue:209
+#: src/page/settings/general.vue:239
 msgid "Allow users to create and share links, and enable sharing with connected services."
 msgstr "允许用户创建和共享链接，并启用与连接服务的共享。"
 
@@ -585,7 +585,7 @@ msgstr "基本路径"
 msgid "Batch"
 msgstr "批次"
 
-#: src/page/settings/general.vue:238
+#: src/page/settings/general.vue:223
 msgid "Batch Edit"
 msgstr "批量编辑"
 
@@ -1064,7 +1064,7 @@ msgstr "默认文件夹"
 #: src/component/photo/clipboard.vue:140 src/component/photo/edit/files.vue:62
 #: src/component/photo/edit/files.vue:70 src/component/photo/edit/files.vue:94
 #: src/component/service/remove.vue:22 src/component/share/dialog.vue:112
-#: src/locales.js:317 src/page/settings/general.vue:268
+#: src/locales.js:317 src/page/settings/general.vue:285
 msgid "Delete"
 msgstr "删除"
 
@@ -1306,7 +1306,7 @@ msgstr "电子邮件"
 
 #: src/component/album/clipboard.vue:43 src/component/album/toolbar.vue:174
 #: src/component/lightbox.vue:1378 src/component/lightbox.vue:1379
-#: src/component/photo/clipboard.vue:68 src/page/settings/general.vue:223
+#: src/component/photo/clipboard.vue:68 src/page/settings/general.vue:208
 msgid "Edit"
 msgstr "编辑"
 
@@ -2661,7 +2661,7 @@ msgid "Please copy the following randomly generated app password and keep it in 
 msgstr "请复制以下随机生成的应用程序密码并将其保存在安全的地方，因为您将无法再次看到它："
 
 #: src/component/upload/dialog.vue:101
-msgid "Please do not upload any private, unlawful or offensive pictures. "
+msgid "Please do not upload any private, unlawful or offensive pictures."
 msgstr "请勿上传任何私人、非法或攻击性图片。"
 
 #: src/component/upload/dialog.vue:104
@@ -3137,7 +3137,7 @@ msgid "Service URL"
 msgstr "服务 URL"
 
 #: src/locales.js:359 src/page/settings.vue:99
-#: src/page/settings/general.vue:282
+#: src/page/settings/general.vue:253
 msgid "Services"
 msgstr "服务"
 
@@ -3188,7 +3188,7 @@ msgid "Severity"
 msgstr "严重性"
 
 #: src/component/album/clipboard.vue:32 src/component/album/toolbar.vue:183
-#: src/component/photo/clipboard.vue:32 src/page/settings/general.vue:208
+#: src/component/photo/clipboard.vue:32 src/page/settings/general.vue:238
 msgid "Share"
 msgstr "分享"
 
@@ -4001,7 +4001,7 @@ msgstr "内容"
 #: src/component/navigation.vue:128 src/component/navigation.vue:152
 #: src/component/navigation.vue:158 src/component/navigation.vue:173
 #: src/component/navigation.vue:188 src/component/navigation.vue:240
-#: src/component/navigation.vue:246 src/page/settings/general.vue:253
+#: src/component/navigation.vue:246 src/page/settings/general.vue:270
 msgctxt "Noun"
 msgid "Archive"
 msgstr "归档"

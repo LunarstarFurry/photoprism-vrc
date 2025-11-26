@@ -384,15 +384,15 @@ msgstr "Alle Ordner durchsuchen"
 msgid "All Years"
 msgstr "Alle Jahre"
 
-#: src/page/settings/general.vue:284
+#: src/page/settings/general.vue:255
 msgid "Allow configuration and use of connected apps and services for remote uploads and sync."
 msgstr "Konfiguration und Nutzung verbundener Apps und Dienste für Remote-Uploads und Synchronisierung zulassen."
 
-#: src/page/settings/general.vue:224
+#: src/page/settings/general.vue:209
 msgid "Allow editing of metadata such as title, description, date, and location."
 msgstr "Erlaube die Bearbeitung von Bild-Metadaten wie Titel, Beschreibung, Datum und Ort."
 
-#: src/page/settings/general.vue:239
+#: src/page/settings/general.vue:224
 msgid "Allow editing the metadata, labels, and albums of multiple pictures at once."
 msgstr "Erlaube die Bearbeitung von Metadaten, Kategorien und Alben für mehrere Bilder gleichzeitig."
 
@@ -400,15 +400,15 @@ msgstr "Erlaube die Bearbeitung von Metadaten, Kategorien und Alben für mehrere
 msgid "Allow files to be copied or moved from the Import to the Originals folder."
 msgstr "Erlaube das Kopieren oder Verschieben von Dateien aus dem Import- in den Originale-Ordner."
 
-#: src/page/settings/general.vue:269
+#: src/page/settings/general.vue:286
 msgid "Allow files to be permanently deleted to free up storage space."
 msgstr "Erlaube das dauerhafte Löschen von Dateien, um Speicherplatz freizugeben."
 
-#: src/page/settings/general.vue:254
+#: src/page/settings/general.vue:271
 msgid "Allow users to archive photos and videos so they are hidden without being deleted."
 msgstr "Benutzern ermöglichen, Bilder und Videos zu archivieren, sodass sie ausgeblendet, aber nicht dauerhaft gelöscht werden."
 
-#: src/page/settings/general.vue:209
+#: src/page/settings/general.vue:239
 msgid "Allow users to create and share links, and enable sharing with connected services."
 msgstr "Erlaube es den Nutzern, Links zu erstellen und zu teilen, und ermögliche das Teilen mit verbundenen Diensten."
 
@@ -585,7 +585,7 @@ msgstr "Basis-Verzeichnis"
 msgid "Batch"
 msgstr "Batch"
 
-#: src/page/settings/general.vue:238
+#: src/page/settings/general.vue:223
 msgid "Batch Edit"
 msgstr "Batch Bearbeitung"
 
@@ -1064,7 +1064,7 @@ msgstr "Standard Ordner"
 #: src/component/photo/clipboard.vue:140 src/component/photo/edit/files.vue:62
 #: src/component/photo/edit/files.vue:70 src/component/photo/edit/files.vue:94
 #: src/component/service/remove.vue:22 src/component/share/dialog.vue:112
-#: src/locales.js:317 src/page/settings/general.vue:268
+#: src/locales.js:317 src/page/settings/general.vue:285
 msgid "Delete"
 msgstr "Löschen"
 
@@ -1306,7 +1306,7 @@ msgstr "E-Mail"
 
 #: src/component/album/clipboard.vue:43 src/component/album/toolbar.vue:174
 #: src/component/lightbox.vue:1378 src/component/lightbox.vue:1379
-#: src/component/photo/clipboard.vue:68 src/page/settings/general.vue:223
+#: src/component/photo/clipboard.vue:68 src/page/settings/general.vue:208
 msgid "Edit"
 msgstr "Bearbeiten"
 
@@ -2660,7 +2660,7 @@ msgid "Please copy the following randomly generated app password and keep it in 
 msgstr "Bitte kopiere das folgende, zufällig generierte App-Passwort und bewahre es an einem sicheren Ort auf, da es nicht noch einmal angezeigt werden kann:"
 
 #: src/component/upload/dialog.vue:101
-msgid "Please do not upload any private, unlawful or offensive pictures. "
+msgid "Please do not upload any private, unlawful or offensive pictures."
 msgstr "Bitte lade keine privaten, illegalen oder anstößigen Bilder hoch. "
 
 #: src/component/upload/dialog.vue:104
@@ -3135,7 +3135,7 @@ msgid "Service URL"
 msgstr "Dienst-URL"
 
 #: src/locales.js:359 src/page/settings.vue:99
-#: src/page/settings/general.vue:282
+#: src/page/settings/general.vue:253
 msgid "Services"
 msgstr "Dienste"
 
@@ -3186,7 +3186,7 @@ msgid "Severity"
 msgstr "Schweregrad"
 
 #: src/component/album/clipboard.vue:32 src/component/album/toolbar.vue:183
-#: src/component/photo/clipboard.vue:32 src/page/settings/general.vue:208
+#: src/component/photo/clipboard.vue:32 src/page/settings/general.vue:238
 msgid "Share"
 msgstr "Teilen"
 
@@ -3999,7 +3999,7 @@ msgstr "Informationen"
 #: src/component/navigation.vue:128 src/component/navigation.vue:152
 #: src/component/navigation.vue:158 src/component/navigation.vue:173
 #: src/component/navigation.vue:188 src/component/navigation.vue:240
-#: src/component/navigation.vue:246 src/page/settings/general.vue:253
+#: src/component/navigation.vue:246 src/page/settings/general.vue:270
 msgctxt "Noun"
 msgid "Archive"
 msgstr "Archiv"

@@ -384,15 +384,15 @@ msgstr "ต้นฉบับทั้งหมด"
 msgid "All Years"
 msgstr "ปีทั้งหมด"
 
-#: src/page/settings/general.vue:284
+#: src/page/settings/general.vue:255
 msgid "Allow configuration and use of connected apps and services for remote uploads and sync."
 msgstr "อนุญาตการตั้งค่าและการใช้งานแอปและบริการที่เชื่อมต่อสำหรับการอัปโหลดและซิงค์ระยะไกล"
 
-#: src/page/settings/general.vue:224
+#: src/page/settings/general.vue:209
 msgid "Allow editing of metadata such as title, description, date, and location."
 msgstr "อนุญาตให้แก้ไขข้อมูลเมตา เช่น ชื่อ คำอธิบาย วันที่ และสถานที่"
 
-#: src/page/settings/general.vue:239
+#: src/page/settings/general.vue:224
 msgid "Allow editing the metadata, labels, and albums of multiple pictures at once."
 msgstr "อนุญาตให้แก้ไขข้อมูลเมตา, ป้ายกำกับ, และอัลบั้มของรูปภาพหลายรูปพร้อมกัน"
 
@@ -400,15 +400,15 @@ msgstr "อนุญาตให้แก้ไขข้อมูลเมตา
 msgid "Allow files to be copied or moved from the Import to the Originals folder."
 msgstr "เปิดใช้งานเครื่องมือการนำเข้าเพื่อคัดลอกหรือย้ายไฟล์จากโฟลเดอร์นำเข้าไปยังไฟล์ต้นฉบับ"
 
-#: src/page/settings/general.vue:269
+#: src/page/settings/general.vue:286
 msgid "Allow files to be permanently deleted to free up storage space."
 msgstr "อนุญาตให้ลบไฟล์ถาวรเพื่อเพิ่มพื้นที่จัดเก็บ"
 
-#: src/page/settings/general.vue:254
+#: src/page/settings/general.vue:271
 msgid "Allow users to archive photos and videos so they are hidden without being deleted."
 msgstr "อนุญาตให้ผู้ใช้เก็บรูปภาพและวิดีโอไว้ในคลังเก็บเพื่อให้ซ่อนอยู่โดยไม่ถูกลบ"
 
-#: src/page/settings/general.vue:209
+#: src/page/settings/general.vue:239
 msgid "Allow users to create and share links, and enable sharing with connected services."
 msgstr "อนุญาตให้ผู้ใช้สร้างและแชร์ลิงก์ และเปิดใช้งานการแชร์กับบริการที่เชื่อมต่อ"
 
@@ -585,7 +585,7 @@ msgstr "เส้นทางฐาน"
 msgid "Batch"
 msgstr "แบตช์"
 
-#: src/page/settings/general.vue:238
+#: src/page/settings/general.vue:223
 msgid "Batch Edit"
 msgstr "แก้ไขแบบกลุ่ม"
 
@@ -1064,7 +1064,7 @@ msgstr "โฟลเดอร์เริ่มต้น"
 #: src/component/photo/clipboard.vue:140 src/component/photo/edit/files.vue:62
 #: src/component/photo/edit/files.vue:70 src/component/photo/edit/files.vue:94
 #: src/component/service/remove.vue:22 src/component/share/dialog.vue:112
-#: src/locales.js:317 src/page/settings/general.vue:268
+#: src/locales.js:317 src/page/settings/general.vue:285
 msgid "Delete"
 msgstr "ลบ"
 
@@ -1306,7 +1306,7 @@ msgstr "อีเมล"
 
 #: src/component/album/clipboard.vue:43 src/component/album/toolbar.vue:174
 #: src/component/lightbox.vue:1378 src/component/lightbox.vue:1379
-#: src/component/photo/clipboard.vue:68 src/page/settings/general.vue:223
+#: src/component/photo/clipboard.vue:68 src/page/settings/general.vue:208
 msgid "Edit"
 msgstr "แก้ไข"
 
@@ -2660,7 +2660,7 @@ msgid "Please copy the following randomly generated app password and keep it in 
 msgstr "โปรดคัดลอกรหัสผ่านสำหรับแอปที่สร้างขึ้นแบบสุ่มต่อไปนี้และเก็บไว้ในที่ปลอดภัย เนื่องจากคุณจะไม่สามารถดูได้อีก:"
 
 #: src/component/upload/dialog.vue:101
-msgid "Please do not upload any private, unlawful or offensive pictures. "
+msgid "Please do not upload any private, unlawful or offensive pictures."
 msgstr "กรุณาอย่าอัพโหลดภาพส่วนตัว ผิดกฎหมาย หรือไม่เหมาะสม"
 
 #: src/component/upload/dialog.vue:104
@@ -3135,7 +3135,7 @@ msgid "Service URL"
 msgstr "URL บริการ"
 
 #: src/locales.js:359 src/page/settings.vue:99
-#: src/page/settings/general.vue:282
+#: src/page/settings/general.vue:253
 msgid "Services"
 msgstr "URL บริการ"
 
@@ -3186,7 +3186,7 @@ msgid "Severity"
 msgstr "ความรุนแรง"
 
 #: src/component/album/clipboard.vue:32 src/component/album/toolbar.vue:183
-#: src/component/photo/clipboard.vue:32 src/page/settings/general.vue:208
+#: src/component/photo/clipboard.vue:32 src/page/settings/general.vue:238
 msgid "Share"
 msgstr "แบ่งปัน"
 
@@ -3999,7 +3999,7 @@ msgstr "เนื้อหา"
 #: src/component/navigation.vue:128 src/component/navigation.vue:152
 #: src/component/navigation.vue:158 src/component/navigation.vue:173
 #: src/component/navigation.vue:188 src/component/navigation.vue:240
-#: src/component/navigation.vue:246 src/page/settings/general.vue:253
+#: src/component/navigation.vue:246 src/page/settings/general.vue:270
 msgctxt "Noun"
 msgid "Archive"
 msgstr "คลังเก็บเอกสารสำคัญ"

@@ -381,15 +381,15 @@ msgstr "Alle oorspronklikes"
 msgid "All Years"
 msgstr "Alle Jare"
 
-#: src/page/settings/general.vue:284
+#: src/page/settings/general.vue:255
 msgid "Allow configuration and use of connected apps and services for remote uploads and sync."
 msgstr "Laat die konfigurasie en gebruik van gekoppelde programme en dienste toe vir oplaaie en sinkronisering op afstand."
 
-#: src/page/settings/general.vue:224
+#: src/page/settings/general.vue:209
 msgid "Allow editing of metadata such as title, description, date, and location."
 msgstr "Laat redigering van metadata soos titel, beskrywing, datum en ligging toe."
 
-#: src/page/settings/general.vue:239
+#: src/page/settings/general.vue:224
 msgid "Allow editing the metadata, labels, and albums of multiple pictures at once."
 msgstr "Laat die redigering van die metadata, etikette en albums van verskeie prente gelyktydig toe."
 
@@ -397,15 +397,15 @@ msgstr "Laat die redigering van die metadata, etikette en albums van verskeie pr
 msgid "Allow files to be copied or moved from the Import to the Originals folder."
 msgstr "Aktiveer die Invoer-instrument om lêers van die Invoer-vouer na Oorspronklikes te kopieer of te skuif."
 
-#: src/page/settings/general.vue:269
+#: src/page/settings/general.vue:286
 msgid "Allow files to be permanently deleted to free up storage space."
 msgstr "Laat toe dat lêers permanent verwyder word om stoorplek vry te maak."
 
-#: src/page/settings/general.vue:254
+#: src/page/settings/general.vue:271
 msgid "Allow users to archive photos and videos so they are hidden without being deleted."
 msgstr "Laat gebruikers toe om foto's en video's te argiveer sodat hulle versteek word sonder om uitgevee te word."
 
-#: src/page/settings/general.vue:209
+#: src/page/settings/general.vue:239
 msgid "Allow users to create and share links, and enable sharing with connected services."
 msgstr "Laat gebruikers toe om skakels te skep en te deel, en aktiveer deling met gekoppelde dienste."
 
@@ -582,7 +582,7 @@ msgstr "Basispad"
 msgid "Batch"
 msgstr "Groep"
 
-#: src/page/settings/general.vue:238
+#: src/page/settings/general.vue:223
 msgid "Batch Edit"
 msgstr "Groepwysiging"
 
@@ -1061,7 +1061,7 @@ msgstr "Verstek gids"
 #: src/component/photo/clipboard.vue:140 src/component/photo/edit/files.vue:62
 #: src/component/photo/edit/files.vue:70 src/component/photo/edit/files.vue:94
 #: src/component/service/remove.vue:22 src/component/share/dialog.vue:112
-#: src/locales.js:317 src/page/settings/general.vue:268
+#: src/locales.js:317 src/page/settings/general.vue:285
 msgid "Delete"
 msgstr "Vee uit"
 
@@ -1303,7 +1303,7 @@ msgstr "E-pos"
 
 #: src/component/album/clipboard.vue:43 src/component/album/toolbar.vue:174
 #: src/component/lightbox.vue:1378 src/component/lightbox.vue:1379
-#: src/component/photo/clipboard.vue:68 src/page/settings/general.vue:223
+#: src/component/photo/clipboard.vue:68 src/page/settings/general.vue:208
 msgid "Edit"
 msgstr "Wysig"
 
@@ -2657,7 +2657,7 @@ msgid "Please copy the following randomly generated app password and keep it in 
 msgstr "Kopieer asseblief die volgende lukraak gegenereerde programwagwoord en hou dit op 'n veilige plek, aangesien jy dit nie weer sal kan sien nie:"
 
 #: src/component/upload/dialog.vue:101
-msgid "Please do not upload any private, unlawful or offensive pictures. "
+msgid "Please do not upload any private, unlawful or offensive pictures."
 msgstr "Moet asseblief geen privaat, onwettige of aanstootlike foto's oplaai nie."
 
 #: src/component/upload/dialog.vue:104
@@ -3132,7 +3132,7 @@ msgid "Service URL"
 msgstr "Diens-URL"
 
 #: src/locales.js:359 src/page/settings.vue:99
-#: src/page/settings/general.vue:282
+#: src/page/settings/general.vue:253
 msgid "Services"
 msgstr "Dienste"
 
@@ -3183,7 +3183,7 @@ msgid "Severity"
 msgstr "Ernstigheid"
 
 #: src/component/album/clipboard.vue:32 src/component/album/toolbar.vue:183
-#: src/component/photo/clipboard.vue:32 src/page/settings/general.vue:208
+#: src/component/photo/clipboard.vue:32 src/page/settings/general.vue:238
 msgid "Share"
 msgstr "Deel"
 
@@ -3996,7 +3996,7 @@ msgstr "Inhoud"
 #: src/component/navigation.vue:128 src/component/navigation.vue:152
 #: src/component/navigation.vue:158 src/component/navigation.vue:173
 #: src/component/navigation.vue:188 src/component/navigation.vue:240
-#: src/component/navigation.vue:246 src/page/settings/general.vue:253
+#: src/component/navigation.vue:246 src/page/settings/general.vue:270
 msgctxt "Noun"
 msgid "Archive"
 msgstr "Argief"

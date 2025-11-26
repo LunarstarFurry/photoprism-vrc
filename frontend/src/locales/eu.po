@@ -381,15 +381,15 @@ msgstr "Jatorrizko guztiak"
 msgid "All Years"
 msgstr "Urte guztiak"
 
-#: src/page/settings/general.vue:284
+#: src/page/settings/general.vue:255
 msgid "Allow configuration and use of connected apps and services for remote uploads and sync."
 msgstr "Baimendu konektatutako aplikazio eta zerbitzuen konfigurazioa eta erabilera urruneko kargatze eta sinkronizaziorako."
 
-#: src/page/settings/general.vue:224
+#: src/page/settings/general.vue:209
 msgid "Allow editing of metadata such as title, description, date, and location."
 msgstr "Baimendu metadatuak editatzea, hala nola izenburua, deskribapena, data eta kokapena."
 
-#: src/page/settings/general.vue:239
+#: src/page/settings/general.vue:224
 msgid "Allow editing the metadata, labels, and albums of multiple pictures at once."
 msgstr "Baimendu hainbat argazkiren metadatuak, etiketak eta albumak aldi berean editatzea."
 
@@ -397,15 +397,15 @@ msgstr "Baimendu hainbat argazkiren metadatuak, etiketak eta albumak aldi berean
 msgid "Allow files to be copied or moved from the Import to the Originals folder."
 msgstr "Gaitu Inportazio tresna fitxategiak Inportazio karpetatik Jatorrizkoak karpetara kopiatu edo mugitzeko."
 
-#: src/page/settings/general.vue:269
+#: src/page/settings/general.vue:286
 msgid "Allow files to be permanently deleted to free up storage space."
 msgstr "Biltegiratze espazioa askatzeko, fitxategiak behin betiko ezabatzea baimendu."
 
-#: src/page/settings/general.vue:254
+#: src/page/settings/general.vue:271
 msgid "Allow users to archive photos and videos so they are hidden without being deleted."
 msgstr "Erabiltzaileei argazkiak eta bideoak artxibatzeko aukera eman, ezabatu gabe ezkutatuta egon daitezen."
 
-#: src/page/settings/general.vue:209
+#: src/page/settings/general.vue:239
 msgid "Allow users to create and share links, and enable sharing with connected services."
 msgstr "Utzi erabiltzaileei estekak sortu eta partekatzen, eta gaitu konektatutako zerbitzuekin partekatzea."
 
@@ -582,7 +582,7 @@ msgstr "Oinarrizko bidea"
 msgid "Batch"
 msgstr "Multzoa"
 
-#: src/page/settings/general.vue:238
+#: src/page/settings/general.vue:223
 msgid "Batch Edit"
 msgstr "Multzoka editatzea"
 
@@ -1061,7 +1061,7 @@ msgstr "Karpeta lehenetsia"
 #: src/component/photo/clipboard.vue:140 src/component/photo/edit/files.vue:62
 #: src/component/photo/edit/files.vue:70 src/component/photo/edit/files.vue:94
 #: src/component/service/remove.vue:22 src/component/share/dialog.vue:112
-#: src/locales.js:317 src/page/settings/general.vue:268
+#: src/locales.js:317 src/page/settings/general.vue:285
 msgid "Delete"
 msgstr "Ezabatu"
 
@@ -1303,7 +1303,7 @@ msgstr "Posta elektronikoa"
 
 #: src/component/album/clipboard.vue:43 src/component/album/toolbar.vue:174
 #: src/component/lightbox.vue:1378 src/component/lightbox.vue:1379
-#: src/component/photo/clipboard.vue:68 src/page/settings/general.vue:223
+#: src/component/photo/clipboard.vue:68 src/page/settings/general.vue:208
 msgid "Edit"
 msgstr "Editatu"
 
@@ -2657,7 +2657,7 @@ msgid "Please copy the following randomly generated app password and keep it in 
 msgstr "Mesedez, kopiatu ausaz sortutako aplikazioaren pasahitza eta gorde leku seguru batean, ezingo baituzu berriro ikusi:"
 
 #: src/component/upload/dialog.vue:101
-msgid "Please do not upload any private, unlawful or offensive pictures. "
+msgid "Please do not upload any private, unlawful or offensive pictures."
 msgstr "Mesedez, ez igo argazki pribatu, legez kanpoko edo iraingarririk."
 
 #: src/component/upload/dialog.vue:104
@@ -3132,7 +3132,7 @@ msgid "Service URL"
 msgstr "Zerbitzuaren URLa"
 
 #: src/locales.js:359 src/page/settings.vue:99
-#: src/page/settings/general.vue:282
+#: src/page/settings/general.vue:253
 msgid "Services"
 msgstr "Zerbitzuak"
 
@@ -3183,7 +3183,7 @@ msgid "Severity"
 msgstr "Larritasuna"
 
 #: src/component/album/clipboard.vue:32 src/component/album/toolbar.vue:183
-#: src/component/photo/clipboard.vue:32 src/page/settings/general.vue:208
+#: src/component/photo/clipboard.vue:32 src/page/settings/general.vue:238
 msgid "Share"
 msgstr "Partekatu"
 
@@ -3996,7 +3996,7 @@ msgstr "Edukia"
 #: src/component/navigation.vue:128 src/component/navigation.vue:152
 #: src/component/navigation.vue:158 src/component/navigation.vue:173
 #: src/component/navigation.vue:188 src/component/navigation.vue:240
-#: src/component/navigation.vue:246 src/page/settings/general.vue:253
+#: src/component/navigation.vue:246 src/page/settings/general.vue:270
 msgctxt "Noun"
 msgid "Archive"
 msgstr "Artxiboa"

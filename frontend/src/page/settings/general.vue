@@ -1,12 +1,6 @@
 <template>
   <div class="p-tab p-settings-general py-2">
-    <v-form
-      ref="form"
-      validate-on="invalid-input"
-      class="p-form-settings"
-      accept-charset="UTF-8"
-      @submit.prevent="onChange"
-    >
+    <v-form ref="form" validate-on="invalid-input" class="p-form-settings" accept-charset="UTF-8" @submit.prevent="onChange">
       <v-card flat tile class="mt-0 px-1 bg-background">
         <v-card-title class="pb-2 text-subtitle-2">
           {{ $gettext(`User Interface`) }}
@@ -144,9 +138,7 @@
                 class="ma-0 pa-0 input-private"
                 density="compact"
                 :label="$gettext('Private')"
-                :hint="
-                  $gettext('Hide private content from global views while keeping it accessible in the Private section.')
-                "
+                :hint="$gettext('Hide private content from global views while keeping it accessible in the Private section.')"
                 prepend-icon="mdi-lock"
                 persistent-hint
                 @update:model-value="onChange"
@@ -201,21 +193,6 @@
 
             <v-col cols="12" sm="6" lg="3" class="px-2 pb-2 pt-2">
               <v-checkbox
-                v-model="settings.features.share"
-                :disabled="busy"
-                class="ma-0 pa-0 input-share"
-                density="compact"
-                :label="$gettext('Share')"
-                :hint="$gettext('Allow users to create and share links, and enable sharing with connected services.')"
-                prepend-icon="mdi-share-variant"
-                persistent-hint
-                @update:model-value="onChange"
-              >
-              </v-checkbox>
-            </v-col>
-
-            <v-col cols="12" sm="6" lg="3" class="px-2 pb-2 pt-2">
-              <v-checkbox
                 v-model="settings.features.edit"
                 :disabled="busy || isDemo"
                 class="ma-0 pa-0 input-edit"
@@ -238,6 +215,36 @@
                 :label="$gettext('Batch Edit')"
                 :hint="$gettext('Allow editing the metadata, labels, and albums of multiple pictures at once.')"
                 prepend-icon="mdi-form-select"
+                persistent-hint
+                @update:model-value="onChange"
+              >
+              </v-checkbox>
+            </v-col>
+
+            <v-col cols="12" sm="6" lg="3" class="px-2 pb-2 pt-2">
+              <v-checkbox
+                v-model="settings.features.share"
+                :disabled="busy"
+                class="ma-0 pa-0 input-share"
+                density="compact"
+                :label="$gettext('Share')"
+                :hint="$gettext('Allow users to create and share links, and enable sharing with connected services.')"
+                prepend-icon="mdi-share-variant"
+                persistent-hint
+                @update:model-value="onChange"
+              >
+              </v-checkbox>
+            </v-col>
+
+            <v-col cols="12" sm="6" lg="3" class="px-2 pb-2 pt-2">
+              <v-checkbox
+                v-model="settings.features.services"
+                :disabled="busy"
+                class="ma-0 pa-0 input-services"
+                density="compact"
+                :label="$gettext('Services')"
+                :hint="$gettext('Allow configuration and use of connected apps and services for remote uploads and sync.')"
+                prepend-icon="mdi-sync"
                 persistent-hint
                 @update:model-value="onChange"
               >
@@ -271,23 +278,6 @@
                 persistent-hint
                 @update:model-value="onChange"
               ></v-checkbox>
-            </v-col>
-
-            <v-col cols="12" sm="6" lg="3" class="px-2 pb-2 pt-2">
-              <v-checkbox
-                v-model="settings.features.services"
-                :disabled="busy"
-                class="ma-0 pa-0 input-services"
-                density="compact"
-                :label="$gettext('Services')"
-                :hint="
-                  $gettext('Allow configuration and use of connected apps and services for remote uploads and sync.')
-                "
-                prepend-icon="mdi-sync"
-                persistent-hint
-                @update:model-value="onChange"
-              >
-              </v-checkbox>
             </v-col>
 
             <v-col cols="12" sm="6" lg="3" class="px-2 pb-2 pt-2">
@@ -452,9 +442,7 @@ export default {
   },
   created() {
     this.load();
-    this.subscriptions.push(
-      this.$event.subscribe("config.updated", (ev, data) => this.settings.setValues(data.config.settings))
-    );
+    this.subscriptions.push(this.$event.subscribe("config.updated", (ev, data) => this.settings.setValues(data.config.settings)));
   },
   beforeUnmount() {
     for (let i = 0; i < this.subscriptions.length; i++) {
