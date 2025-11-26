@@ -4,7 +4,7 @@ msgstr ""
 "Report-Msgid-Bugs-To: ci@photoprism.app\n"
 "POT-Creation-Date: \n"
 "PO-Revision-Date: 2025-11-26 10:49+0000\n"
-"Last-Translator: DeepL <noreply-mt-deepl@weblate.org>\n"
+"Last-Translator: Admin <hello@photoprism.app>\n"
 "Language-Team: German <https://translate.photoprism.app/projects/photoprism/frontend/de/>\n"
 "Language: de\n"
 "MIME-Version: 1.0\n"
@@ -3220,7 +3220,7 @@ msgstr "Nur Wichtiges anzeigen"
 
 #: src/page/settings/general.vue:330
 msgid "Show logs in the web interface to monitor activity and troubleshoot problems."
-msgstr "Zeige die Protokolle im Webinterface an, um Aktivitäten zu überwachen und Probleme zu beheben."
+msgstr "Logs in der Weboberfläche anzeigen, um Aktivitäten zu überwachen und Probleme zu beheben."
 
 #: src/page/settings/general.vue:118
 msgid "Show smart albums that group pictures by occasion, trip, or location."
@@ -3228,23 +3228,23 @@ msgstr "Zeige intelligente Alben, die Bilder nach Anlass, Reise oder Ort gruppie
 
 #: src/page/settings/general.vue:345
 msgid "Show the Account page so users can manage their profile and security settings."
-msgstr "Zeige die Kontoseite an, damit die Nutzer ihr Profil und ihre Sicherheitseinstellungen verwalten können."
+msgstr "Die Kontoseite anzeigen, damit Benutzer ihr Profil und ihre Sicherheitseinstellungen verwalten können."
 
 #: src/page/settings/general.vue:103
 msgid "Show the Calendar view to browse the library by year and month."
-msgstr "Zeige die Kalenderansicht an, um die Bibliothek nach Jahr und Monat zu durchsuchen."
+msgstr "Die Kalenderansicht anzeigen, um die Bibliothek nach Jahr und Monat zu durchsuchen."
 
 #: src/page/settings/general.vue:133
 msgid "Show the Labels section to view and manage AI-generated labels."
-msgstr "Zeige den Abschnitt Labels an, um KI-generierte Labels anzuzeigen und zu verwalten."
+msgstr "Den Bereich „Kategorien“ anzeigen, um KI-generierte Labels anzuzeigen und zu verwalten."
 
 #: src/page/settings/general.vue:300
 msgid "Show the Library section to index, manage, and monitor the media library."
-msgstr "Zeige den Bereich Bibliothek an, um die Medienbibliothek zu indizieren, zu verwalten und zu überwachen."
+msgstr "Den Bereich „Dateien“ anzeigen, um die Medienbibliothek indexieren und verwalten zu können."
 
 #: src/page/settings/general.vue:360
 msgid "Show the Places view with interactive maps so you can browse photos by location."
-msgstr "Zeige die Ortsansicht mit interaktiven Karten an, damit du die Fotos nach Orten durchsuchen kannst."
+msgstr "Zeige interaktive Karten, um Bilder basierend auf ihrem Standort zu finden und anzusehen."
 
 #: src/page/settings/content.vue:155
 msgid "Show Titles"
