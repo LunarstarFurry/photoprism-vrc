@@ -397,7 +397,6 @@ msgid "Allow editing the metadata, labels, and albums of multiple pictures at on
 msgstr "Omogući uređivanje metapodataka, oznaka i albuma više slika odjednom."
 
 #: src/page/settings/general.vue:194
-#, fuzzy
 msgid "Allow files to be copied or moved from the Import to the Originals folder."
 msgstr "Omogućite alat za uvoz da biste kopirali ili premjestili datoteke iz mape Uvoz u izvornike."
 
@@ -1690,7 +1689,6 @@ msgid "Hide"
 msgstr "Sakriti"
 
 #: src/page/settings/general.vue:148
-#, fuzzy
 msgid "Hide private content from global views while keeping it accessible in the Private section."
 msgstr "Sakrijte privatne stavke iz globalnih prikaza, a istovremeno ih ostavite dostupnima u odjeljku Privatno."
 

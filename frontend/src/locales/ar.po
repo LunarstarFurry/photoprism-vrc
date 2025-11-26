@@ -397,7 +397,6 @@ msgid "Allow editing the metadata, labels, and albums of multiple pictures at on
 msgstr "السماح بتحرير البيانات الوصفية والتسميات والألبومات لصور متعددة في وقت واحد."
 
 #: src/page/settings/general.vue:194
-#, fuzzy
 msgid "Allow files to be copied or moved from the Import to the Originals folder."
 msgstr "قم بتمكين أداة الاستيراد لنسخ الملفات أو نقلها من مجلد الاستيراد إلى النسخ الأصلية."
 
@@ -1690,7 +1689,6 @@ msgid "Hide"
 msgstr "يخفي"
 
 #: src/page/settings/general.vue:148
-#, fuzzy
 msgid "Hide private content from global views while keeping it accessible in the Private section."
 msgstr "إخفاء العناصر الخاصة من طرق العرض العامة مع إبقائها متاحة في القسم الخاص."
 

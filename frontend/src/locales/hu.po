@@ -396,7 +396,6 @@ msgid "Allow editing the metadata, labels, and albums of multiple pictures at on
 msgstr "Lehetővé teszi több kép metaadatainak, címkéinek és albumainak szerkesztését egyszerre."
 
 #: src/page/settings/general.vue:194
-#, fuzzy
 msgid "Allow files to be copied or moved from the Import to the Originals folder."
 msgstr "Engedélyezze az Importálás eszközt a fájlok másolásához vagy áthelyezéséhez az Importálás mappából az Eredeti mappába."
 
@@ -1689,7 +1688,6 @@ msgid "Hide"
 msgstr "Elrejt"
 
 #: src/page/settings/general.vue:148
-#, fuzzy
 msgid "Hide private content from global views while keeping it accessible in the Private section."
 msgstr "A privát elemek elrejtése a globális nézetekből, miközben a Privát szekcióban elérhetőek maradnak."
 

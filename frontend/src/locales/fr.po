@@ -237,7 +237,6 @@ msgid "Add to album"
 msgstr "Ajouter à l'album"
 
 #: src/component/input/chip-selector.vue:182
-#, fuzzy
 msgid "Add to all"
 msgstr "Ajouter à toutes"
 
@@ -398,7 +397,6 @@ msgid "Allow editing the metadata, labels, and albums of multiple pictures at on
 msgstr "Permet de modifier les métadonnées, les étiquettes et les albums de plusieurs photos à la fois."
 
 #: src/page/settings/general.vue:194
-#, fuzzy
 msgid "Allow files to be copied or moved from the Import to the Originals folder."
 msgstr "Active l'outil d'importation pour copier ou déplacer des fichiers du dossier d'importation vers les originaux."
 
@@ -1277,7 +1275,6 @@ msgid "Drag and drop files here"
 msgstr "Glisser et déposer les fichiers ici"
 
 #: src/locales.js:344
-#, fuzzy
 msgid "Driver"
 msgstr "Pilote"
 
@@ -1369,7 +1366,6 @@ msgid "Enabling two-factor authentication means that you will need a randomly ge
 msgstr "Avec l'authentification à deux facteurs, il faut un code de vérification généré de manière aléatoire pour se connecter, si bien que personne, même connaissant votre mot de passe, ne pourra se connecter à votre compte."
 
 #: src/locales.js:345
-#, fuzzy
 msgid "Engine"
 msgstr "Moteur"
 
@@ -1382,7 +1378,6 @@ msgid "Enter dates"
 msgstr "Saisir les dates"
 
 #: src/component/input/chip-selector.vue:129
-#, fuzzy
 msgid "Enter item name..."
 msgstr "Entrez le nom de l'élément…"
 
@@ -1694,7 +1689,6 @@ msgid "Hide"
 msgstr "Cacher"
 
 #: src/page/settings/general.vue:148
-#, fuzzy
 msgid "Hide private content from global views while keeping it accessible in the Private section."
 msgstr "Masque les éléments privés des vues globales tout en les laissant accessibles dans la section privée."
 
@@ -2177,7 +2171,6 @@ msgid "Missing or invalid configuration"
 msgstr "Configuration manquante ou incorrecte"
 
 #: src/options/options.js:24 src/options/options.js:27
-#, fuzzy
 msgid "mixed"
 msgstr "mélangé"
 
@@ -2298,7 +2291,6 @@ msgid "No data available"
 msgstr "Pas de données disponibles"
 
 #: src/component/photo/batch-edit.vue:466
-#, fuzzy
 msgid "No labels assigned"
 msgstr "Aucune étiquette attribuée"
 
@@ -2718,7 +2710,6 @@ msgid "Press enter to create a new album."
 msgstr "Appuyer sur la touche entrée pour créer un nouvel album."
 
 #: src/component/input/chip-selector.vue:61
-#, fuzzy
 msgid "Press enter to create new item"
 msgstr "Appuyer sur la touche Entrée pour créer un nouvel élément"
 
@@ -2898,7 +2889,6 @@ msgid "Remove from Album"
 msgstr "Retirer de l'album"
 
 #: src/component/input/chip-selector.vue:184
-#, fuzzy
 msgid "Remove from all"
 msgstr "Retirer de toutes"
 
@@ -2911,7 +2901,6 @@ msgid "Remove imported files to save storage. Unsupported file types will never 
 msgstr "Supprimez les fichiers importés pour économiser l'espace de stockage. Les fichiers non pris en charge ne sont jamais supprimés et demeurent à leur emplacement actuel."
 
 #: src/locales.js:362
-#, fuzzy
 msgid "Remove the selected instance from the cluster registry?"
 msgstr "Retirer l'instance sélectionnée du cluster ?"
 
@@ -2984,7 +2973,6 @@ msgid "Roles"
 msgstr "Rôles"
 
 #: src/locales.js:346
-#, fuzzy
 msgid "Rotated"
 msgstr "Rotation effectuée"
 

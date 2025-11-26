@@ -397,7 +397,6 @@ msgid "Allow editing the metadata, labels, and albums of multiple pictures at on
 msgstr "允许同时编辑多张图片的元数据、标签和相册。"
 
 #: src/page/settings/general.vue:194
-#, fuzzy
 msgid "Allow files to be copied or moved from the Import to the Originals folder."
 msgstr "启用 \"导入 \"工具，将文件从 \"导入 \"文件夹复制或移动到 \"原始文件\"。"
 
@@ -1690,7 +1689,6 @@ msgid "Hide"
 msgstr "隐藏"
 
 #: src/page/settings/general.vue:148
-#, fuzzy
 msgid "Hide private content from global views while keeping it accessible in the Private section."
 msgstr "从全局视图中隐藏私人项目，同时在 \"私人 \"部分保持其可访问性。"
 
