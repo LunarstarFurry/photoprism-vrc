@@ -61,14 +61,14 @@ The following features are supported by the current implementation:
 - Keeps app/directory roles (`roles`, `wids`) separate from security groups to avoid accidental privilege escalation.
 - Claim name is configurable via `--oidc-group-claim` (default `groups`).
 
-Configuration options:
+#### Configuration Options
 
 - `--oidc-group-claim` / `PHOTOPRISM_OIDC_GROUP_CLAIM`: claim to read (default `groups`).
 - `--oidc-group` / `PHOTOPRISM_OIDC_GROUP`: comma- or multi-flag list of groups required for login (IDs or names accepted, normalized to lowercase alphanumerics/hyphen/underscore).
 - `--oidc-group-role` / `PHOTOPRISM_OIDC_GROUP_ROLE`: mapping `GROUP=ROLE` (roles: `admin|manager|user|contributor|viewer|guest|none`). First match wins.
 - `--oidc-role` / `PHOTOPRISM_OIDC_ROLE`: fallback role if no group mapping matches (defaults to `guest`).
 
-Integration Guide for Entra ID:
+#### Integration Guide
 
 1. Register an app in Microsoft Entra ID (v2) or reuse your existing PhotoPrism registration. Note the tenant ID and the application (client) ID.
 2. Redirect URI: add `https://app.localssl.dev/api/v1/oidc/redirect` (for Traefik) or `http://localhost:2342/api/v1/oidc/redirect` for local dev.
