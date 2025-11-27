@@ -71,7 +71,7 @@ The following features are supported by the current implementation:
 #### Integration Guide for Entra ID
 
 1. Register an app in Microsoft Entra ID (v2) or reuse your existing PhotoPrism registration. Note the tenant ID and the application (client) ID.
-2. Redirect URI: add `https://{hostname}/api/v1/oidc/redirect`, see [https://docs.photoprism.app/getting-started/advanced/openid-connect/](https://docs.photoprism.app/getting-started/advanced/openid-connect/#redirect-url).
+2. Redirect URI: add [`https://{hostname}/api/v1/oidc/redirect`](https://docs.photoprism.app/getting-started/advanced/openid-connect/#redirect-url).
 3. Token configuration → **Add optional claim** → **Token type** = ID (and Access if you prefer) → **Groups** → choose **Security groups**.
 4. Under “Emit groups as”, pick **Group name** (cloud-only) or **sAMAccountName** / **DNSDomainName\sAMAccountName** for synced AD; this makes tokens carry human-friendly names instead of GUIDs.
 5. If you keep **Group ID**, leave PhotoPrism config in GUID mode; if you emit names, set `PHOTOPRISM_OIDC_GROUP` / `PHOTOPRISM_OIDC_GROUP_ROLE` to those names (lowercase in config for consistency). When Microsoft signals group **overage** (too many groups to fit in the token), it sets `_claim_names.groups` and may omit groups entirely; PhotoPrism will currently block login if required groups are configured and no groups are present.
@@ -97,9 +97,18 @@ Please note:
 - Overage: when the `_claim_names.groups` marker is present and no groups are in the token, PhotoPrism cannot validate membership and will block login if `oidc-group` is set. (Graph-based resolution is described in the next section but is not yet implemented.)
 - For mixed environments, you can supply both names and GUIDs in `oidc-group` / `oidc-group-role`; all entries are normalized and deduplicated.
 
+#### Entra App Roles
+
+As an alternative to security groups, we may use *Microsoft/Entra App Roles* to provide a more business-friendly option if needed:
+
+- To implement this, PhotoPrism must read the `roles` claim, normalize it as with groups, and allow mapping by adding a new flag (e.g., `--oidc-role-claim=roles` or `--oidc-app-role=ROLE=photoprismRole`).
+- This would require an estimated 80–150 lines of code (LOC), including wiring and tests, without introducing new dependencies.
+- Once this feature is available, Entra admins can create app roles (e.g., `admin` or `viewer`) and assign them to users or groups in Entra.
+- PhotoPrism would then receive readable role strings in tokens, eliminating the need to rely on security group names or GUIDs.
+
 #### Microsoft Graph API
 
-Future enhancements may include translating Entra security group GUIDs to display names, as well as fetching full membership lists when tokens omit groups:
+Support for the *Microsoft Graph API* is required to translate Entra security group GUIDs to display names and to fetch full membership lists when tokens omit groups:
 
 - Resolve GUID → display name so `--oidc-group` / `--oidc-group-role` can use human-friendly group names while still matching IDs.
 - Fetch memberships via Microsoft Graph when `_claim_names.groups` signals overage or when the token only carries IDs.
@@ -123,10 +132,11 @@ Impact:
 - Makes log/debug output more readable and reduces reliance on Azure portal lookups for GUIDs.
 - Provides a path to honor group-based access when tokens exceed size limits and omit groups by default.
 
-### Documentation & References
+#### Documentation & References
 
 - Microsoft Entra ID: https://www.microsoft.com/en-us/security/business/identity-access/microsoft-entra-id
-- Microsoft Entra group claims: https://learn.microsoft.com/en-us/entra/identity-platform/access-token-claims-reference#groups-claim
+- Entra group claims: https://learn.microsoft.com/en-us/entra/identity-platform/access-token-claims-reference#groups-claim
+- Entra app roles: https://learn.microsoft.com/en-us/entra/identity-platform/howto-add-app-roles-in-apps
 - Group overage handling: https://learn.microsoft.com/en-us/entra/identity-platform/howto-add-app-roles-in-azure-ad-apps#group-overage-and-_claim_names
 - Token customization guidance: https://learn.microsoft.com/en-us/entra/architecture/customize-tokens
 
