@@ -1,12 +1,6 @@
 <template>
   <div class="p-tab p-settings-advanced py-2">
-    <v-form
-      ref="form"
-      validate-on="invalid-input"
-      class="p-form-settings"
-      accept-charset="UTF-8"
-      @submit.prevent="onChange"
-    >
+    <v-form ref="form" validate-on="invalid-input" class="p-form-settings" accept-charset="UTF-8" @submit.prevent="onChange">
       <v-card flat tile class="mt-0 px-1 bg-background">
         <v-card-actions v-if="$config.values.restart">
           <v-row align="start" dense>
@@ -239,16 +233,7 @@
               <v-list-subheader class="pa-0">
                 {{ $gettextInterpolate($gettext("Static Size Limit: %{n}px"), { n: parseInt(settings.ThumbSize) }) }}
               </v-list-subheader>
-              <v-slider
-                v-model="settings.ThumbSize"
-                :min="720"
-                :max="7680"
-                :step="4"
-                :disabled="isDemo"
-                hide-details
-                class="ma-0"
-                @end="onChange"
-              ></v-slider>
+              <v-slider v-model="settings.ThumbSize" :min="720" :max="7680" :step="4" :disabled="isDemo" hide-details class="ma-0" @end="onChange"></v-slider>
             </v-col>
 
             <v-col cols="12" sm="6" lg="4" class="py-2">
@@ -303,45 +288,21 @@
               <v-list-subheader class="pa-0">
                 {{ $gettextInterpolate($gettext("JPEG Quality: %{n}"), { n: parseInt(settings.JpegQuality) }) }}
               </v-list-subheader>
-              <v-slider
-                v-model="settings.JpegQuality"
-                :min="25"
-                :max="100"
-                :disabled="isDemo"
-                hide-details
-                class="ma-0"
-                @end="onChange"
-              ></v-slider>
+              <v-slider v-model="settings.JpegQuality" :min="25" :max="100" :disabled="isDemo" hide-details class="ma-0" @end="onChange"></v-slider>
             </v-col>
 
             <v-col cols="12" sm="6" lg="4" class="py-2">
               <v-list-subheader class="pa-0">
                 {{ $gettextInterpolate($gettext("JPEG Size Limit: %{n}px"), { n: parseInt(settings.JpegSize) }) }}
               </v-list-subheader>
-              <v-slider
-                v-model="settings.JpegSize"
-                :min="720"
-                :max="30000"
-                :step="20"
-                :disabled="isDemo"
-                class="ma-0"
-                @end="onChange"
-              ></v-slider>
+              <v-slider v-model="settings.JpegSize" :min="720" :max="30000" :step="20" :disabled="isDemo" class="ma-0" @end="onChange"></v-slider>
             </v-col>
 
             <v-col cols="12" sm="6" lg="4" class="py-2">
               <v-list-subheader class="pa-0">
                 {{ $gettextInterpolate($gettext("PNG Size Limit: %{n}px"), { n: parseInt(settings.PngSize) }) }}
               </v-list-subheader>
-              <v-slider
-                v-model="settings.PngSize"
-                :min="720"
-                :max="30000"
-                :step="20"
-                :disabled="isDemo"
-                class="ma-0"
-                @end="onChange"
-              ></v-slider>
+              <v-slider v-model="settings.PngSize" :min="720" :max="30000" :step="20" :disabled="isDemo" class="ma-0" @end="onChange"></v-slider>
             </v-col>
           </v-row>
         </v-card-actions>
@@ -452,13 +413,7 @@
 
         <v-card-actions v-if="!config.disable.restart" class="pt-6 d-flex flex-wrap ga-2">
           <a id="restart"></a>
-          <v-btn
-            color="highlight"
-            :block="$vuetify.display.xs"
-            :disabled="isDemo || !$config.values.restart"
-            variant="flat"
-            @click.stop.p.prevent="onRestart"
-          >
+          <v-btn color="highlight" :block="$vuetify.display.xs" :disabled="isDemo || !$config.values.restart" variant="flat" @click.stop.p.prevent="onRestart">
             {{ $gettext(`Restart`) }}
             <v-icon end>mdi-restart</v-icon>
           </v-btn>

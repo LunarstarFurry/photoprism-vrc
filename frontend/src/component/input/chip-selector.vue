@@ -221,17 +221,13 @@ export default {
     updateItemAction(itemToUpdate, action) {
       // Special case: remove new items completely
       if (itemToUpdate.isNew && action === "remove") {
-        const updatedItems = this.items.filter(
-          (item) => (item.value || item.title) !== (itemToUpdate.value || itemToUpdate.title)
-        );
+        const updatedItems = this.items.filter((item) => (item.value || item.title) !== (itemToUpdate.value || itemToUpdate.title));
         this.$emit("update:items", updatedItems);
         return;
       }
 
       // Update action for existing item
-      const updatedItems = this.items.map((item) =>
-        (item.value || item.title) === (itemToUpdate.value || itemToUpdate.title) ? { ...item, action } : item
-      );
+      const updatedItems = this.items.map((item) => ((item.value || item.title) === (itemToUpdate.value || itemToUpdate.title) ? { ...item, action } : item));
 
       this.$emit("update:items", updatedItems);
     },
@@ -273,15 +269,12 @@ export default {
       }
 
       const normalizedTitle = this.normalizeTitle(title);
-      const existingItem = this.items.find(
-        (item) => (item.value && value && item.value === value) || this.normalizeTitle(item.title) === normalizedTitle
-      );
+      const existingItem = this.items.find((item) => (item.value && value && item.value === value) || this.normalizeTitle(item.title) === normalizedTitle);
 
       if (existingItem) {
         let changed = false;
         const updatedItems = this.items.map((item) => {
-          const isSame =
-            (item.value && value && item.value === value) || this.normalizeTitle(item.title) === normalizedTitle;
+          const isSame = (item.value && value && item.value === value) || this.normalizeTitle(item.title) === normalizedTitle;
           if (!isSame) {
             return item;
           }
