@@ -670,18 +670,18 @@ docker-preview-oracular:
 	docker pull --platform=arm64 photoprism/develop:oracular
 	docker pull --platform=arm64 photoprism/develop:oracular-slim
 	scripts/docker/buildx-multi.sh photoprism linux/amd64,linux/arm64 preview-ce /oracular
-docker-preview-questing:
-	docker pull --platform=amd64 photoprism/develop:questing
-	docker pull --platform=amd64 photoprism/develop:questing-slim
-	docker pull --platform=arm64 photoprism/develop:questing
-	docker pull --platform=arm64 photoprism/develop:questing-slim
-	scripts/docker/buildx-multi.sh photoprism linux/amd64,linux/arm64 preview-ce /questing "-t photoprism/photoprism:preview -t photoprism/photoprism:ubuntu"
 docker-preview-plucky:
 	docker pull --platform=amd64 photoprism/develop:plucky
 	docker pull --platform=amd64 photoprism/develop:plucky-slim
 	docker pull --platform=arm64 photoprism/develop:plucky
 	docker pull --platform=arm64 photoprism/develop:plucky-slim
 	scripts/docker/buildx-multi.sh photoprism linux/amd64,linux/arm64 preview-ce /plucky
+docker-preview-questing:
+	docker pull --platform=amd64 photoprism/develop:questing
+	docker pull --platform=amd64 photoprism/develop:questing-slim
+	docker pull --platform=arm64 photoprism/develop:questing
+	docker pull --platform=arm64 photoprism/develop:questing-slim
+	scripts/docker/buildx-multi.sh photoprism linux/amd64,linux/arm64 preview-ce /questing
 release: docker-release
 docker-release: docker-release-latest
 docker-release-all: docker-release-latest docker-release-other
@@ -752,18 +752,18 @@ docker-release-oracular:
 	docker pull --platform=arm64 photoprism/develop:oracular
 	docker pull --platform=arm64 photoprism/develop:oracular-slim
 	scripts/docker/buildx-multi.sh photoprism linux/amd64,linux/arm64 ce /oracular
-docker-release-questing:
-	docker pull --platform=amd64 photoprism/develop:questing
-	docker pull --platform=amd64 photoprism/develop:questing-slim
-	docker pull --platform=arm64 photoprism/develop:questing
-	docker pull --platform=arm64 photoprism/develop:questing-slim
-	scripts/docker/buildx-multi.sh photoprism linux/amd64,linux/arm64 ce /questing "-t photoprism/photoprism:latest -t photoprism/photoprism:ubuntu"
 docker-release-plucky:
 	docker pull --platform=amd64 photoprism/develop:plucky
 	docker pull --platform=amd64 photoprism/develop:plucky-slim
 	docker pull --platform=arm64 photoprism/develop:plucky
 	docker pull --platform=arm64 photoprism/develop:plucky-slim
 	scripts/docker/buildx-multi.sh photoprism linux/amd64,linux/arm64 ce /plucky
+docker-release-questing:
+	docker pull --platform=amd64 photoprism/develop:questing
+	docker pull --platform=amd64 photoprism/develop:questing-slim
+	docker pull --platform=arm64 photoprism/develop:questing
+	docker pull --platform=arm64 photoprism/develop:questing-slim
+	scripts/docker/buildx-multi.sh photoprism linux/amd64,linux/arm64 ce /questing
 start-traefik:
 	$(DOCKER_COMPOSE) up -d --wait traefik
 stop-traefik:
