@@ -9,7 +9,7 @@ The following 3rd-party software packages may be used by or distributed with
 PhotoPrism. Any information relevant to third-party vendors listed below are
 collected using common, reasonable means.
 
-Date generated: 2025-11-26
+Date generated: 2025-11-29
 
 ================================================================================
 
@@ -1206,8 +1206,8 @@ THE SOFTWARE.
 --------------------------------------------------------------------------------
 
 Package: github.com/go-co-op/gocron/v2
-Version: v2.18.1
-License: MIT (https://github.com/go-co-op/gocron/blob/v2.18.1/LICENSE)
+Version: v2.18.2
+License: MIT (https://github.com/go-co-op/gocron/blob/v2.18.2/LICENSE)
 
 MIT License
 
