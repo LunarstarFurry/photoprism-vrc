@@ -20,17 +20,37 @@ import (
 )
 
 const (
-	metricsNamespace         = "photoprism"
-	metricsUsageSubsystem    = "usage"
-	metricsLabelState        = "state"
-	metricFilesBytes         = "files_bytes"
-	metricFilesRatio         = "files_ratio"
-	metricAccountsRatio      = "accounts_ratio"
-	metricAccountsActive     = "accounts_active"
+	metricsNamespace           = "photoprism"
+	metricsUsageSubsystem      = "usage"
+	metricsStatisticsSubsystem = "statistics"
+	metricsClusterSubsystem    = "cluster"
+
+	metricsLabelState   = "state"
+	metricsLabelStat    = "stat"
+	metricsLabelRole    = "role"
+	metricsLabelUUID    = "uuid"
+	metricsLabelCIDR    = "cidr"
+	metricsLabelEdition = "edition"
+	metricsLabelGoVer   = "goversion"
+	metricsLabelVersion = "version"
+
+	metricFilesBytes     = "files_bytes"
+	metricFilesRatio     = "files_ratio"
+	metricAccountsRatio  = "accounts_ratio"
+	metricAccountsActive = "accounts_active"
+	metricMediaCount     = "media_count"
+	metricBuildInfo      = "build_info"
+	metricClusterNodes   = "nodes"
+	metricClusterInfo    = "info"
+
 	metricsAccountsHelp      = "active user and guest accounts on this PhotoPrism instance"
 	metricsFilesBytesHelp    = "filesystem usage in bytes for files indexed by this PhotoPrism instance"
 	metricsFilesRatioHelp    = "filesystem usage for files indexed by this PhotoPrism instance"
 	metricsAccountsRatioHelp = "account quota usage for this PhotoPrism instance"
+	metricsMediaCountHelp    = "media statistics for this PhotoPrism instance"
+	metricsBuildInfoHelp     = "information about the photoprism instance"
+	metricsClusterNodesHelp  = "registered cluster nodes grouped by role"
+	metricsClusterInfoHelp   = "cluster metadata for this PhotoPrism portal"
 )
 
 // GetMetrics provides a Prometheus-compatible metrics endpoint for monitoring the instance, including usage details and portal cluster metrics.
@@ -94,11 +114,11 @@ func GetMetrics(router *gin.RouterGroup) {
 func registerCountMetrics(factory promauto.Factory, counts config.ClientCounts) {
 	metric := factory.NewGaugeVec(
 		prometheus.GaugeOpts{
-			Namespace: "photoprism",
-			Subsystem: "statistics",
-			Name:      "media_count",
-			Help:      "media statistics for this PhotoPrism instance",
-		}, []string{"stat"},
+			Namespace: metricsNamespace,
+			Subsystem: metricsStatisticsSubsystem,
+			Name:      metricMediaCount,
+			Help:      metricsMediaCountHelp,
+		}, []string{metricsLabelStat},
 	)
 
 	stats := []struct {
@@ -140,7 +160,7 @@ func registerCountMetrics(factory promauto.Factory, counts config.ClientCounts) 
 	}
 
 	for _, stat := range stats {
-		metric.With(prometheus.Labels{"stat": stat.label}).Set(float64(stat.value))
+		metric.With(prometheus.Labels{metricsLabelStat: stat.label}).Set(float64(stat.value))
 	}
 }
 
@@ -148,14 +168,14 @@ func registerCountMetrics(factory promauto.Factory, counts config.ClientCounts) 
 func registerBuildInfoMetric(factory promauto.Factory, conf *config.ClientConfig) {
 	factory.NewGaugeVec(
 		prometheus.GaugeOpts{
-			Namespace: "photoprism",
-			Name:      "build_info",
-			Help:      "information about the photoprism instance",
-		}, []string{"edition", "goversion", "version"},
+			Namespace: metricsNamespace,
+			Name:      metricBuildInfo,
+			Help:      metricsBuildInfoHelp,
+		}, []string{metricsLabelEdition, metricsLabelGoVer, metricsLabelVersion},
 	).With(prometheus.Labels{
-		"edition":   conf.Edition,
-		"goversion": runtime.Version(),
-		"version":   conf.Version,
+		metricsLabelEdition: conf.Edition,
+		metricsLabelGoVer:   runtime.Version(),
+		metricsLabelVersion: conf.Version,
 	}).Set(1.0)
 }
 
@@ -228,29 +248,29 @@ func registerClusterMetrics(factory promauto.Factory, conf *config.Config) {
 
 	nodeMetric := factory.NewGaugeVec(
 		prometheus.GaugeOpts{
-			Namespace: "photoprism",
-			Subsystem: "cluster",
-			Name:      "nodes",
-			Help:      "registered cluster nodes grouped by role",
-		}, []string{"role"},
+			Namespace: metricsNamespace,
+			Subsystem: metricsClusterSubsystem,
+			Name:      metricClusterNodes,
+			Help:      metricsClusterNodesHelp,
+		}, []string{metricsLabelRole},
 	)
 
 	for role, value := range counts {
-		nodeMetric.With(prometheus.Labels{"role": role}).Set(float64(value))
+		nodeMetric.With(prometheus.Labels{metricsLabelRole: role}).Set(float64(value))
 	}
 
 	infoMetric := factory.NewGaugeVec(
 		prometheus.GaugeOpts{
-			Namespace: "photoprism",
-			Subsystem: "cluster",
-			Name:      "info",
-			Help:      "cluster metadata for this PhotoPrism portal",
-		}, []string{"uuid", "cidr"},
+			Namespace: metricsNamespace,
+			Subsystem: metricsClusterSubsystem,
+			Name:      metricClusterInfo,
+			Help:      metricsClusterInfoHelp,
+		}, []string{metricsLabelUUID, metricsLabelCIDR},
 	)
 
 	infoMetric.With(prometheus.Labels{
-		"uuid": conf.ClusterUUID(),
-		"cidr": conf.ClusterCIDR(),
+		metricsLabelUUID: conf.ClusterUUID(),
+		metricsLabelCIDR: conf.ClusterCIDR(),
 	}).Set(1.0)
 }
 
