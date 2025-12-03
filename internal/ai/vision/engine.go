@@ -5,7 +5,6 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/photoprism/photoprism/internal/ai/vision/openai"
 	"github.com/photoprism/photoprism/pkg/http/scheme"
 )
 
@@ -61,14 +60,6 @@ func init() {
 		FileScheme:        scheme.Data,
 		DefaultResolution: DefaultResolution,
 	})
-
-	RegisterEngineAlias(openai.EngineName, EngineInfo{
-		Uri:               "https://api.openai.com/v1/responses",
-		RequestFormat:     ApiFormatOpenAI,
-		ResponseFormat:    ApiFormatOpenAI,
-		FileScheme:        scheme.Data,
-		DefaultResolution: openai.DefaultResolution,
-	})
 }
 
 // RegisterEngine adds/overrides an engine implementation for a specific API format.
@@ -85,6 +76,7 @@ type EngineInfo struct {
 	ResponseFormat    ApiFormat
 	FileScheme        string
 	DefaultResolution int
+	DefaultKey        string // Optional placeholder key (e.g., ${OPENAI_API_KEY}); applied only when Service.Key is empty.
 }
 
 // RegisterEngineAlias maps a logical engine name (e.g., "ollama") to a

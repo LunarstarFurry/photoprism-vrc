@@ -53,41 +53,59 @@ The `vision.yml` file is usually kept in the `storage/config` directory (overrid
 
 The model `Options` adjust model parameters such as temperature, top-p, and schema constraints when using [Ollama](ollama/README.md) or [OpenAI](openai/README.md):
 
-| Option            | Default                                                                                 | Description                                                                             |
-|-------------------|-----------------------------------------------------------------------------------------|-----------------------------------------------------------------------------------------|
-| `Temperature`     | engine default (`0.1` for Ollama)                                                       | Controls randomness with a value between `0.01` and `2.0`; not used for OpenAI's GPT-5. |
-| `TopK`            | engine default (model-specific)                                                         | Limits sampling to the top K tokens to reduce rare or noisy outputs.                    |
-| `TopP`            | engine default (`0.9` for some Ollama label defaults; unset for OpenAI)                 | Nucleus sampling; keeps the smallest token set whose cumulative probability ≥ `p`.      |
-| `MinP`            | engine default (unset unless provided)                                                  | Drops tokens whose probability mass is below `p`, trimming the long tail.               |
-| `TypicalP`        | engine default (unset unless provided)                                                  | Keeps tokens with typicality under the threshold; combine with TopP/MinP for flow.      |
-| `Seed`            | random per run (unless set)                                                             | Fix for reproducible outputs; unset for more variety between runs.                      |
-| `RepeatLastN`     | engine default (model-specific)                                                         | Number of recent tokens considered for repetition penalties.                            |
-| `RepeatPenalty`   | engine default (model-specific)                                                         | Multiplier >1 discourages repeating the same tokens or phrases.                         |
-| `NumPredict`      | engine default (Ollama only)                                                            | Ollama-specific max output tokens; synonymous intent with `MaxOutputTokens`.            |
-| `MaxOutputTokens` | engine default (OpenAI caption 512, labels 1024)                                        | Upper bound on generated tokens; adapters raise low values to defaults.                 |
-| `ForceJson`       | engine-specific (`true` for OpenAI labels; `false` for Ollama labels; captions `false`) | Forces structured output when enabled.                                                  |
-| `SchemaVersion`   | derived from schema name                                                                | Override when coordinating schema migrations.                                           |
-| `Stop`            | engine default                                                                          | Array of stop sequences (e.g., `["\\n\\n"]`).                                           |
-| `NumThread`       | runtime auto                                                                            | Caps CPU threads for local engines.                                                     |
-| `NumCtx`          | engine default                                                                          | Context window length (tokens).                                                         |
+| Option             | Default                                                                                 | Description                                                                             |
+|--------------------|-----------------------------------------------------------------------------------------|-----------------------------------------------------------------------------------------|
+| `Temperature`      | engine default (`0.1` for Ollama)                                                       | Controls randomness with a value between `0.01` and `2.0`; not used for OpenAI's GPT-5. |
+| `TopK`             | engine default (model-specific)                                                         | Limits sampling to the top K tokens to reduce rare or noisy outputs.                    |
+| `TopP`             | engine default (`0.9` for some Ollama label defaults; unset for OpenAI)                 | Nucleus sampling; keeps the smallest token set whose cumulative probability ≥ `p`.      |
+| `MinP`             | engine default (unset unless provided)                                                  | Drops tokens whose probability mass is below `p`, trimming the long tail.               |
+| `TypicalP`         | engine default (unset unless provided)                                                  | Keeps tokens with typicality under the threshold; combine with TopP/MinP for flow.      |
+| `Seed`             | random per run (unless set)                                                             | Fix for reproducible outputs; unset for more variety between runs.                      |
+| `RepeatLastN`      | engine default (model-specific)                                                         | Number of recent tokens considered for repetition penalties.                            |
+| `RepeatPenalty`    | engine default (model-specific)                                                         | Multiplier >1 discourages repeating the same tokens or phrases.                         |
+| `PenalizeNewline`  | engine default                                                                          | Whether to apply repetition penalties to newline tokens.                                |
+| `PresencePenalty`  | engine default (OpenAI-style)                                                           | Increases the likelihood of introducing new tokens by penalizing existing ones.         |
+| `FrequencyPenalty` | engine default (OpenAI-style)                                                           | Penalizes tokens in proportion to their frequency so far.                               |
+| `TfsZ`             | engine default                                                                          | Tail free sampling parameter; lower values reduce repetition.                           |
+| `NumKeep`          | engine default (Ollama)                                                                 | How many tokens to keep from the prompt before sampling starts.                         |
+| `NumPredict`       | engine default (Ollama only)                                                            | Ollama-specific max output tokens; synonymous intent with `MaxOutputTokens`.            |
+| `MaxOutputTokens`  | engine default (OpenAI caption 512, labels 1024)                                        | Upper bound on generated tokens; adapters raise low values to defaults.                 |
+| `ForceJson`        | engine-specific (`true` for OpenAI labels; `false` for Ollama labels; captions `false`) | Forces structured output when enabled.                                                  |
+| `SchemaVersion`    | derived from schema name                                                                | Override when coordinating schema migrations.                                           |
+| `Stop`             | engine default                                                                          | Array of stop sequences (e.g., `["\\n\\n"]`).                                           |
+| `NumThread`        | runtime auto                                                                            | Caps CPU threads for local engines.                                                     |
+| `NumCtx`           | engine default                                                                          | Context window length (tokens).                                                         |
+| `Mirostat`         | engine default (Ollama)                                                                 | Enables Mirostat sampling (`0` off, `1/2` modes).                                       |
+| `MirostatTau`      | engine default                                                                          | Controls surprise target for Mirostat sampling.                                         |
+| `MirostatEta`      | engine default                                                                          | Learning rate for Mirostat adaptation.                                                  |
+| `NumBatch`         | engine default (Ollama)                                                                 | Batch size for prompt processing.                                                       |
+| `NumGpu`           | engine default (Ollama)                                                                 | Number of GPUs to distribute work across.                                               |
+| `MainGpu`          | engine default (Ollama)                                                                 | Primary GPU index when multiple GPUs are present.                                       |
+| `LowVram`          | engine default (Ollama)                                                                 | Enable VRAM-saving mode; may reduce performance.                                        |
+| `VocabOnly`        | engine default (Ollama)                                                                 | Load vocabulary only for quick metadata inspection.                                     |
+| `UseMmap`          | engine default (Ollama)                                                                 | Memory map model weights instead of fully loading them.                                 |
+| `UseMlock`         | engine default (Ollama)                                                                 | Lock model weights in RAM to reduce paging.                                             |
+| `Numa`             | engine default (Ollama)                                                                 | Enable NUMA-aware allocations when available.                                           |
+| `Detail`           | engine default (OpenAI)                                                                 | Controls OpenAI vision detail level (`low`, `high`, `auto`).                            |
+| `CombineOutputs`   | engine default (OpenAI multi-output)                                                    | Controls whether multi-output models combine results automatically.                     |
 
 #### Model Service
 
 Configures the endpoint URL, method, format, and authentication for [Ollama](ollama/README.md), [OpenAI](openai/README.md), and other engines that perform remote HTTP requests:
 
-| Field                              | Default                                  | Notes                                                |
-|------------------------------------|------------------------------------------|------------------------------------------------------|
-| `Uri`                              | required for remote                      | Endpoint base. Empty keeps model local (TensorFlow). |
-| `Method`                           | `POST`                                   | Override verb if provider needs it.                  |
-| `Key`                              | `""`                                     | Bearer token; prefer env expansion.                  |
-| `Username` / `Password`            | `""`                                     | Injected as basic auth when URI lacks userinfo.      |
-| `Model`                            | `""`                                     | Endpoint-specific override; wins over model/name.    |
-| `Org` / `Project`                  | `""`                                     | OpenAI headers (org/proj IDs)                        |
-| `RequestFormat` / `ResponseFormat` | set by engine alias                      | Explicit values win over alias defaults.             |
-| `FileScheme`                       | set by engine alias (`data` or `base64`) | Controls image transport.                            |
-| `Disabled`                         | `false`                                  | Disable the endpoint without removing the model.     |
+| Field                              | Default                                  | Notes                                                                                    |
+|------------------------------------|------------------------------------------|------------------------------------------------------------------------------------------|
+| `Uri`                              | required for remote                      | Endpoint base. Empty keeps model local (TensorFlow).                                     |
+| `Method`                           | `POST`                                   | Override verb if provider needs it.                                                      |
+| `Key`                              | `""`                                     | Bearer token; prefer env expansion (OpenAI: `OPENAI_API_KEY`, Ollama: `OLLAMA_API_KEY`). |
+| `Username` / `Password`            | `""`                                     | Injected as basic auth when URI lacks userinfo.                                          |
+| `Model`                            | `""`                                     | Endpoint-specific override; wins over model/name.                                        |
+| `Org` / `Project`                  | `""`                                     | OpenAI headers (org/proj IDs)                                                            |
+| `RequestFormat` / `ResponseFormat` | set by engine alias                      | Explicit values win over alias defaults.                                                 |
+| `FileScheme`                       | set by engine alias (`data` or `base64`) | Controls image transport.                                                                |
+| `Disabled`                         | `false`                                  | Disable the endpoint without removing the model.                                         |
 
-> **Authentication:** All credentials and identifiers support `${ENV_VAR}` expansion. `Service.Key` sets `Authorization: Bearer <token>`; `Username`/`Password` injects HTTP basic authentication into the service URI when it is not already present.
+> **Authentication:** All credentials and identifiers support `${ENV_VAR}` expansion. `Service.Key` sets `Authorization: Bearer <token>`; `Username`/`Password` injects HTTP basic authentication into the service URI when it is not already present. When `Service.Key` is empty, PhotoPrism defaults to `OPENAI_API_KEY` (OpenAI engine) or `OLLAMA_API_KEY` (Ollama engine), also honoring their `_FILE` counterparts.
  
 ### Field Behavior & Precedence
 

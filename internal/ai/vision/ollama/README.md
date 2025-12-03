@@ -72,6 +72,7 @@ This package provides PhotoPrism’s native adapter for Ollama-compatible multim
 - `PHOTOPRISM_VISION_LABEL_SCHEMA_FILE` — Absolute path to a JSON snippet that overrides the default label schema (applies to every Ollama label model).  
 - `PHOTOPRISM_VISION_YAML` — Custom `vision.yml` path. Keep it synced in Git if you automate deployments.  
 - `OLLAMA_HOST`, `OLLAMA_MODELS`, `OLLAMA_MAX_QUEUE`, `OLLAMA_NUM_PARALLEL`, etc. — Provided in `compose*.yaml` to tune the Ollama daemon. Adjust `OLLAMA_KEEP_ALIVE` if you want models to stay loaded between worker batches.  
+- `OLLAMA_API_KEY` / `OLLAMA_API_KEY_FILE` — Default bearer token picked up when `Service.Key` is empty; useful for hosted Ollama services (e.g., Ollama Cloud).  
 - `PHOTOPRISM_LOG_LEVEL=trace` — Enables verbose request/response previews (truncated to avoid leaking images). Use temporarily when debugging parsing issues.
 
 #### `vision.yml` Example

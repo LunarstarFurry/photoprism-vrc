@@ -491,10 +491,10 @@ func (m *Model) ApplyEngineDefaults() {
 		if info.DefaultResolution > 0 && m.Resolution <= 0 {
 			m.Resolution = info.DefaultResolution
 		}
-	}
 
-	if engine == openai.EngineName && strings.TrimSpace(m.Service.Key) == "" {
-		m.Service.Key = "${OPENAI_API_KEY}"
+		if strings.TrimSpace(m.Service.Key) == "" && strings.TrimSpace(info.DefaultKey) != "" {
+			m.Service.Key = info.DefaultKey
+		}
 	}
 
 	m.Engine = engine

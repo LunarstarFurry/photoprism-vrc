@@ -28,6 +28,15 @@ func init() {
 		Parser:   openaiParser{},
 		Defaults: openaiDefaults{},
 	})
+
+	RegisterEngineAlias(openai.EngineName, EngineInfo{
+		Uri:               "https://api.openai.com/v1/responses",
+		RequestFormat:     ApiFormatOpenAI,
+		ResponseFormat:    ApiFormatOpenAI,
+		FileScheme:        scheme.Data,
+		DefaultResolution: openai.DefaultResolution,
+		DefaultKey:        openai.APIKeyPlaceholder,
+	})
 }
 
 // SystemPrompt returns the default OpenAI system prompt for the specified model type.

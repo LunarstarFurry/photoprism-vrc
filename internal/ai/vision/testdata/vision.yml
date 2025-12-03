@@ -71,6 +71,7 @@ Models:
   Resolution: 720
   Service:
     Uri: http://ollama:11434/api/generate
+    Key: ${OLLAMA_API_KEY}
     FileScheme: base64
     RequestFormat: ollama
     ResponseFormat: ollama

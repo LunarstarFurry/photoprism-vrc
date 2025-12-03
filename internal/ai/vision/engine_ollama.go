@@ -30,6 +30,7 @@ func init() {
 		ResponseFormat:    ApiFormatOllama,
 		FileScheme:        scheme.Base64,
 		DefaultResolution: ollama.DefaultResolution,
+		DefaultKey:        ollama.APIKeyPlaceholder,
 	})
 
 	CaptionModel.Engine = ollama.EngineName
