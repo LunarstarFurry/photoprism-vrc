@@ -90,6 +90,7 @@ var (
 	CaptionModel = &Model{
 		Type:   ModelTypeCaption,
 		Engine: ollama.EngineName,
+		Run:    RunManual,
 	}
 	DefaultModels = Models{
 		NasnetModel,

@@ -67,6 +67,7 @@ Models:
 - Type: caption
   Model: gemma3:latest
   Engine: ollama
+  Run: manual
   Resolution: 720
   Service:
     Uri: http://ollama:11434/api/generate
