@@ -89,8 +89,8 @@ require (
 	github.com/ugjka/go-tz/v2 v2.2.6
 	github.com/urfave/cli/v2 v2.27.7
 	github.com/wamuir/graft v0.10.0
-	github.com/yalue/onnxruntime_go v1.22.0
-	github.com/zitadel/oidc/v3 v3.45.0
+	github.com/yalue/onnxruntime_go v1.24.0
+	github.com/zitadel/oidc/v3 v3.45.1
 	golang.org/x/mod v0.30.0
 	golang.org/x/sys v0.38.0
 	google.golang.org/protobuf v1.36.10
@@ -175,7 +175,7 @@ require (
 	go.opentelemetry.io/otel/trace v1.38.0 // indirect
 	go.uber.org/mock v0.6.0 // indirect
 	go.yaml.in/yaml/v2 v2.4.3 // indirect
-	golang.org/x/oauth2 v0.32.0 // indirect
+	golang.org/x/oauth2 v0.33.0 // indirect
 	golang.org/x/tools v0.38.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
