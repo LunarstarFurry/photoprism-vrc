@@ -9,7 +9,7 @@ The following 3rd-party software packages may be used by or distributed with
 PhotoPrism. Any information relevant to third-party vendors listed below are
 collected using common, reasonable means.
 
-Date generated: 2025-12-09
+Date generated: 2025-12-10
 
 ================================================================================
 
@@ -581,7 +581,7 @@ SOFTWARE.
 
 Package: github.com/dsoprea/go-exif/v3
 Version: v3.0.1
-License: MIT (https://github.com/dsoprea/go-exif/blob/v3.0.1/v3/LICENSE)
+License: MIT (https://github.com/dsoprea/go-exif/blob/v3.0.1/LICENSE)
 
 MIT LICENSE
 
@@ -641,7 +641,7 @@ SOFTWARE.
 
 Package: github.com/dsoprea/go-jpeg-image-structure/v2
 Version: v2.0.0-20221012074422-4f3f7e934102
-License: MIT (https://github.com/dsoprea/go-jpeg-image-structure/blob/4f3f7e934102/v2/LICENSE)
+License: MIT (https://github.com/dsoprea/go-jpeg-image-structure/blob/4f3f7e934102/LICENSE)
 
 MIT LICENSE
 
@@ -717,7 +717,7 @@ SOFTWARE.
 
 Package: github.com/dsoprea/go-png-image-structure/v2
 Version: v2.0.0-20210512210324-29b889a6093d
-License: MIT (https://github.com/dsoprea/go-png-image-structure/blob/29b889a6093d/v2/LICENSE)
+License: MIT (https://github.com/dsoprea/go-png-image-structure/blob/29b889a6093d/LICENSE)
 
 MIT LICENSE
 
@@ -733,7 +733,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 
 Package: github.com/dsoprea/go-tiff-image-structure/v2
 Version: v2.0.0-20221003165014-8ecc4f52edca
-License: MIT (https://github.com/dsoprea/go-tiff-image-structure/blob/8ecc4f52edca/v2/LICENSE)
+License: MIT (https://github.com/dsoprea/go-tiff-image-structure/blob/8ecc4f52edca/LICENSE)
 
 MIT License
 
@@ -2443,8 +2443,8 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 --------------------------------------------------------------------------------
 
 Package: github.com/golang/geo
-Version: v0.0.0-20251125140653-09e2dd3603dd
-License: Apache-2.0 (https://github.com/golang/geo/blob/09e2dd3603dd/LICENSE)
+Version: v0.0.0-20251209161508-25c597310d4b
+License: Apache-2.0 (https://github.com/golang/geo/blob/25c597310d4b/LICENSE)
 
 
                                  Apache License
@@ -8188,8 +8188,8 @@ License: Apache-2.0 (https://github.com/go4org/go4/blob/214862532bf5/LICENSE)
 --------------------------------------------------------------------------------
 
 Package: golang.org/x/crypto
-Version: v0.45.0
-License: BSD-3-Clause (https://cs.opensource.google/go/x/crypto/+/v0.45.0:LICENSE)
+Version: v0.46.0
+License: BSD-3-Clause (https://cs.opensource.google/go/x/crypto/+/v0.46.0:LICENSE)
 
 Copyright 2009 The Go Authors.
 
@@ -8222,8 +8222,8 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 --------------------------------------------------------------------------------
 
 Package: golang.org/x/image
-Version: v0.33.0
-License: BSD-3-Clause (https://cs.opensource.google/go/x/image/+/v0.33.0:LICENSE)
+Version: v0.34.0
+License: BSD-3-Clause (https://cs.opensource.google/go/x/image/+/v0.34.0:LICENSE)
 
 Copyright 2009 The Go Authors.
 
@@ -8256,8 +8256,8 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 --------------------------------------------------------------------------------
 
 Package: golang.org/x/mod/semver
-Version: v0.30.0
-License: BSD-3-Clause (https://cs.opensource.google/go/x/mod/+/v0.30.0:LICENSE)
+Version: v0.31.0
+License: BSD-3-Clause (https://cs.opensource.google/go/x/mod/+/v0.31.0:LICENSE)
 
 Copyright 2009 The Go Authors.
 
@@ -8290,8 +8290,8 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 --------------------------------------------------------------------------------
 
 Package: golang.org/x/net
-Version: v0.47.0
-License: BSD-3-Clause (https://cs.opensource.google/go/x/net/+/v0.47.0:LICENSE)
+Version: v0.48.0
+License: BSD-3-Clause (https://cs.opensource.google/go/x/net/+/v0.48.0:LICENSE)
 
 Copyright 2009 The Go Authors.
 
@@ -8358,8 +8358,8 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 --------------------------------------------------------------------------------
 
 Package: golang.org/x/sync/errgroup
-Version: v0.18.0
-License: BSD-3-Clause (https://cs.opensource.google/go/x/sync/+/v0.18.0:LICENSE)
+Version: v0.19.0
+License: BSD-3-Clause (https://cs.opensource.google/go/x/sync/+/v0.19.0:LICENSE)
 
 Copyright 2009 The Go Authors.
 
@@ -8392,8 +8392,8 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 --------------------------------------------------------------------------------
 
 Package: golang.org/x/sys
-Version: v0.38.0
-License: BSD-3-Clause (https://cs.opensource.google/go/x/sys/+/v0.38.0:LICENSE)
+Version: v0.39.0
+License: BSD-3-Clause (https://cs.opensource.google/go/x/sys/+/v0.39.0:LICENSE)
 
 Copyright 2009 The Go Authors.
 
@@ -8426,8 +8426,8 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 --------------------------------------------------------------------------------
 
 Package: golang.org/x/text
-Version: v0.31.0
-License: BSD-3-Clause (https://cs.opensource.google/go/x/text/+/v0.31.0:LICENSE)
+Version: v0.32.0
+License: BSD-3-Clause (https://cs.opensource.google/go/x/text/+/v0.32.0:LICENSE)
 
 Copyright 2009 The Go Authors.
 
