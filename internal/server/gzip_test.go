@@ -68,7 +68,6 @@ func TestGzipMiddleware(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, "hello world", string(b))
 	})
-
 	t.Run("DoesNotCompressExcludedPaths", func(t *testing.T) {
 		w := httptest.NewRecorder()
 		req := httptest.NewRequest("GET", excludedPath, nil)
@@ -80,7 +79,6 @@ func TestGzipMiddleware(t *testing.T) {
 		assert.Empty(t, w.Header().Get("Content-Encoding"))
 		assert.Equal(t, "download", w.Body.String())
 	})
-
 	t.Run("DoesNotCompressNotFound", func(t *testing.T) {
 		w := httptest.NewRecorder()
 		req := httptest.NewRequest("GET", "/missing", nil)
