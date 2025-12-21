@@ -34,7 +34,7 @@ var VideoInfoCommand = &cli.Command{
 func videoInfoAction(ctx *cli.Context) error {
 	return CallWithDependencies(ctx, func(conf *config.Config) error {
 		filter := videoNormalizeFilter(ctx.Args().Slice())
-		results, err := videoSearchResults(filter, ctx.Uint(videoCountFlag.Name), ctx.Int(OffsetFlag.Name), false)
+		results, err := videoSearchResults(filter, ctx.Int(videoCountFlag.Name), ctx.Int(OffsetFlag.Name), false)
 		if err != nil {
 			return err
 		}

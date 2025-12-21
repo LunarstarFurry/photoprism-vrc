@@ -38,7 +38,7 @@ func videoListAction(ctx *cli.Context) error {
 		filter := videoNormalizeFilter(ctx.Args().Slice())
 		includeSidecar := ctx.Bool(videoIncludeSidecarFlag.Name)
 
-		results, err := videoSearchResults(filter, ctx.Uint(videoCountFlag.Name), ctx.Int(OffsetFlag.Name), includeSidecar)
+		results, err := videoSearchResults(filter, ctx.Int(videoCountFlag.Name), ctx.Int(OffsetFlag.Name), includeSidecar)
 		if err != nil {
 			return err
 		}

@@ -45,7 +45,7 @@ func videoRemuxAction(ctx *cli.Context) error {
 		}
 
 		filter := videoNormalizeFilter(ctx.Args().Slice())
-		results, err := videoSearchResults(filter, ctx.Uint(videoCountFlag.Name), ctx.Int(OffsetFlag.Name), false)
+		results, err := videoSearchResults(filter, ctx.Int(videoCountFlag.Name), ctx.Int(OffsetFlag.Name), false)
 		if err != nil {
 			return err
 		}

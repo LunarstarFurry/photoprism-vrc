@@ -54,7 +54,7 @@ func videoTrimAction(ctx *cli.Context) error {
 		}
 
 		filter := videoNormalizeFilter(filterArgs)
-		results, err := videoSearchResults(filter, ctx.Uint(videoCountFlag.Name), ctx.Int(OffsetFlag.Name), false)
+		results, err := videoSearchResults(filter, ctx.Int(videoCountFlag.Name), ctx.Int(OffsetFlag.Name), false)
 		if err != nil {
 			return err
 		}
@@ -216,13 +216,23 @@ func videoTrimFile(conf *config.Config, convert *photoprism.Convert, plan videoT
 	}
 
 	destDir := filepath.Dir(plan.DestPath)
-	tempPath, err := videoTempPath(destDir, ".trim-*.tmp")
+	ext := filepath.Ext(plan.DestPath)
+	if ext == "" {
+		ext = filepath.Ext(plan.SrcPath)
+	}
+	if ext == "" {
+		ext = ".tmp"
+	}
+
+	tempPath, err := videoTempPath(destDir, ".trim-*"+ext)
 	if err != nil {
 		return err
 	}
 
 	cmd := videoTrimCmd(conf.FFmpegBin(), plan.SrcPath, tempPath, start, remaining)
 	cmd.Env = append(cmd.Env, fmt.Sprintf("HOME=%s", conf.CmdCachePath()))
+
+	log.Debugf("ffmpeg: %s", clean.Log(cmd.String()))
 
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -308,9 +318,24 @@ func videoTrimCmd(ffmpegBin, srcName, destName string, start, duration time.Dura
 		"-ignore_unknown",
 		"-codec", "copy",
 		"-avoid_negative_ts", "make_zero",
-		destName,
 	)
+
+	if videoTrimFastStart(destName) {
+		args = append(args, "-movflags", "+faststart")
+	}
+
+	args = append(args, destName)
 
 	// #nosec G204 -- arguments are built from validated inputs and config.
 	return exec.Command(ffmpegBin, args...)
+}
+
+// videoTrimFastStart reports whether the trim output should enable faststart for MP4/MOV containers.
+func videoTrimFastStart(destName string) bool {
+	switch strings.ToLower(filepath.Ext(destName)) {
+	case fs.ExtMp4, fs.ExtMov, fs.ExtQT, ".m4v":
+		return true
+	default:
+		return false
+	}
 }

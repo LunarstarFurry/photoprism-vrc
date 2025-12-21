@@ -2,10 +2,10 @@ package commands
 
 import "github.com/urfave/cli/v2"
 
-// VideoCommands configures the CLI subcommands for working with indexed videos.
-var VideoCommands = &cli.Command{
-	Name:  "video",
-	Usage: "Video subcommands",
+// VideosCommands configures the CLI subcommands for working with indexed videos.
+var VideosCommands = &cli.Command{
+	Name:  "videos",
+	Usage: "Video troubleshooting and editing subcommands",
 	Subcommands: []*cli.Command{
 		VideoListCommand,
 		VideoTrimCommand,
@@ -16,7 +16,7 @@ var VideoCommands = &cli.Command{
 }
 
 // videoCountFlag limits the number of results returned by video commands.
-var videoCountFlag = &cli.UintFlag{
+var videoCountFlag = &cli.IntFlag{
 	Name:    "count",
 	Aliases: []string{"n"},
 	Usage:   "maximum `NUMBER` of results",

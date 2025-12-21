@@ -7,12 +7,12 @@ import (
 )
 
 // videoSearchResults runs a video-only search and applies offset/count after sidecar filtering.
-func videoSearchResults(query string, count uint, offset int, includeSidecar bool) ([]search.Photo, error) {
+func videoSearchResults(query string, count int, offset int, includeSidecar bool) ([]search.Photo, error) {
 	if offset < 0 {
 		offset = 0
 	}
 
-	if count == 0 {
+	if count <= 0 {
 		return []search.Photo{}, nil
 	}
 
@@ -25,20 +25,20 @@ func videoSearchResults(query string, count uint, offset int, includeSidecar boo
 	}
 
 	if includeSidecar {
-		frm.Count = int(count)
+		frm.Count = count
 		frm.Offset = offset
 		results, _, err := search.Photos(frm)
 		return results, err
 	}
 
-	target := int(count) + offset
+	target := count + offset
 	if target < 0 {
 		target = 0
 	}
 
 	collected := make([]search.Photo, 0, target)
 	searchOffset := 0
-	batchSize := int(count)
+	batchSize := count
 	if batchSize < 200 {
 		batchSize = 200
 	}
@@ -73,7 +73,7 @@ func videoSearchResults(query string, count uint, offset int, includeSidecar boo
 		return []search.Photo{}, nil
 	}
 
-	end := offset + int(count)
+	end := offset + count
 	if end > len(collected) {
 		end = len(collected)
 	}
