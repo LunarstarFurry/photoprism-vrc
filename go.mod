@@ -14,7 +14,7 @@ require (
 	github.com/esimov/pigo v1.4.6
 	github.com/gin-contrib/gzip v1.2.5
 	github.com/gin-gonic/gin v1.11.0
-	github.com/golang/geo v0.0.0-20251209161508-25c597310d4b
+	github.com/golang/geo v0.0.0-20251218194845-df15212eaefe
 	github.com/google/open-location-code/go v0.0.0-20250620134813-83986da0156b
 	github.com/gorilla/websocket v1.5.3
 	github.com/gosimple/slug v1.15.0
@@ -57,7 +57,7 @@ require github.com/google/uuid v1.6.0
 
 require github.com/chzyer/readline v1.5.1 // indirect
 
-require github.com/gabriel-vasile/mimetype v1.4.11
+require github.com/gabriel-vasile/mimetype v1.4.12
 
 require (
 	golang.org/x/sync v0.19.0
@@ -78,7 +78,7 @@ require golang.org/x/text v0.32.0
 require (
 	github.com/IGLOU-EU/go-wildcard v1.0.3
 	github.com/davidbyttow/govips/v2 v2.16.0
-	github.com/go-co-op/gocron/v2 v2.18.2
+	github.com/go-co-op/gocron/v2 v2.19.0
 	github.com/go-sql-driver/mysql v1.9.3
 	github.com/golang-jwt/jwt/v5 v5.3.0
 	github.com/pquerna/otp v1.5.0
@@ -89,7 +89,7 @@ require (
 	github.com/ugjka/go-tz/v2 v2.2.6
 	github.com/urfave/cli/v2 v2.27.7
 	github.com/wamuir/graft v0.10.0
-	github.com/yalue/onnxruntime_go v1.24.0
+	github.com/yalue/onnxruntime_go v1.25.0
 	github.com/zitadel/oidc/v3 v3.45.1
 	golang.org/x/mod v0.31.0
 	golang.org/x/sys v0.39.0
