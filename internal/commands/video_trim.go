@@ -29,7 +29,6 @@ var VideoTrimCommand = &cli.Command{
 	Flags: []cli.Flag{
 		videoCountFlag,
 		OffsetFlag,
-		videoNoBackupFlag,
 		DryRunFlag("prints planned trim operations without writing files"),
 		YesFlag(),
 	},
@@ -54,7 +53,7 @@ func videoTrimAction(ctx *cli.Context) error {
 		}
 
 		filter := videoNormalizeFilter(filterArgs)
-		results, err := videoSearchResults(filter, ctx.Int(videoCountFlag.Name), ctx.Int(OffsetFlag.Name), false)
+		results, err := videoSearchResults(filter, ctx.Int(videoCountFlag.Name), ctx.Int(OffsetFlag.Name))
 		if err != nil {
 			return err
 		}
@@ -96,7 +95,7 @@ func videoTrimAction(ctx *cli.Context) error {
 				continue
 			}
 
-			if err = videoTrimFile(conf, convert, plan, trimDuration, ctx.Bool(videoNoBackupFlag.Name)); err != nil {
+			if err = videoTrimFile(conf, convert, plan, trimDuration, true); err != nil {
 				log.Errorf("trim: %s", clean.Error(err))
 				failed++
 				continue
@@ -136,28 +135,34 @@ func videoBuildTrimPlans(conf *config.Config, results []search.Photo, trimDurati
 	}
 
 	for _, found := range results {
-		if found.FileSidecar {
-			log.Warnf("trim: skipping sidecar file %s", clean.Log(found.FileName))
+		videoFile, ok := videoPrimaryFile(found)
+		if !ok {
+			log.Warnf("trim: missing video file for %s", clean.Log(found.PhotoUID))
 			continue
 		}
 
-		if found.MediaType == entity.MediaLive {
-			log.Warnf("trim: skipping live photo video %s", clean.Log(found.FileName))
+		if videoFile.FileSidecar {
+			log.Warnf("trim: skipping sidecar file %s", clean.Log(videoFile.FileName))
 			continue
 		}
 
-		if found.FileDuration <= 0 {
-			log.Warnf("trim: missing duration for %s", clean.Log(found.FileName))
+		if videoFile.MediaType == entity.MediaLive {
+			log.Warnf("trim: skipping live photo video %s", clean.Log(videoFile.FileName))
 			continue
 		}
 
-		remaining := found.FileDuration - absTrim
+		if videoFile.FileDuration <= 0 {
+			log.Warnf("trim: missing duration for %s", clean.Log(videoFile.FileName))
+			continue
+		}
+
+		remaining := videoFile.FileDuration - absTrim
 		if remaining < time.Second {
-			log.Errorf("trim: duration exceeds available length for %s", clean.Log(found.FileName))
+			log.Errorf("trim: duration exceeds available length for %s", clean.Log(videoFile.FileName))
 			continue
 		}
 
-		srcPath := photoprism.FileName(found.FileRoot, found.FileName)
+		srcPath := photoprism.FileName(videoFile.FileRoot, videoFile.FileName)
 		if !fs.FileExistsNotEmpty(srcPath) {
 			log.Warnf("trim: missing file %s", clean.Log(srcPath))
 			continue
@@ -184,14 +189,14 @@ func videoBuildTrimPlans(conf *config.Config, results []search.Photo, trimDurati
 			IndexPath: srcPath,
 			SrcPath:   srcPath,
 			DestPath:  destPath,
-			Duration:  found.FileDuration,
-			SizeBytes: found.FileSize,
+			Duration:  videoFile.FileDuration,
+			SizeBytes: videoFile.FileSize,
 			Sidecar:   useSidecar,
 		})
 
 		preflight = append(preflight, videoOutputPlan{
 			Destination: destPath,
-			SizeBytes:   found.FileSize,
+			SizeBytes:   videoFile.FileSize,
 		})
 	}
 

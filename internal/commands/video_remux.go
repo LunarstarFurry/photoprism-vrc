@@ -30,7 +30,6 @@ var VideoRemuxCommand = &cli.Command{
 		videoCountFlag,
 		OffsetFlag,
 		videoForceFlag,
-		videoNoBackupFlag,
 		DryRunFlag("prints planned remux operations without writing files"),
 		YesFlag(),
 	},
@@ -45,7 +44,7 @@ func videoRemuxAction(ctx *cli.Context) error {
 		}
 
 		filter := videoNormalizeFilter(ctx.Args().Slice())
-		results, err := videoSearchResults(filter, ctx.Int(videoCountFlag.Name), ctx.Int(OffsetFlag.Name), false)
+		results, err := videoSearchResults(filter, ctx.Int(videoCountFlag.Name), ctx.Int(OffsetFlag.Name))
 		if err != nil {
 			return err
 		}
@@ -87,7 +86,7 @@ func videoRemuxAction(ctx *cli.Context) error {
 				continue
 			}
 
-			if err = videoRemuxFile(conf, convert, plan, ctx.Bool(videoForceFlag.Name), ctx.Bool(videoNoBackupFlag.Name)); err != nil {
+			if err = videoRemuxFile(conf, convert, plan, ctx.Bool(videoForceFlag.Name), true); err != nil {
 				log.Errorf("remux: %s", clean.Error(err))
 				failed++
 				continue
@@ -121,25 +120,31 @@ func videoBuildRemuxPlans(conf *config.Config, results []search.Photo, force boo
 	preflight := make([]videoOutputPlan, 0, len(results))
 
 	for _, found := range results {
-		if found.FileSidecar {
-			log.Warnf("remux: skipping sidecar file %s", clean.Log(found.FileName))
+		videoFile, ok := videoPrimaryFile(found)
+		if !ok {
+			log.Warnf("remux: missing video file for %s", clean.Log(found.PhotoUID))
 			continue
 		}
 
-		if found.MediaType == entity.MediaLive {
-			log.Warnf("remux: skipping live photo video %s", clean.Log(found.FileName))
+		if videoFile.FileSidecar {
+			log.Warnf("remux: skipping sidecar file %s", clean.Log(videoFile.FileName))
 			continue
 		}
 
-		srcPath := photoprism.FileName(found.FileRoot, found.FileName)
+		if videoFile.MediaType == entity.MediaLive {
+			log.Warnf("remux: skipping live photo video %s", clean.Log(videoFile.FileName))
+			continue
+		}
+
+		srcPath := photoprism.FileName(videoFile.FileRoot, videoFile.FileName)
 		if !fs.FileExistsNotEmpty(srcPath) {
 			log.Warnf("remux: missing file %s", clean.Log(srcPath))
 			continue
 		}
 
-		if !videoCodecIsAvc(found.FileCodec) && !force {
+		if !videoCodecIsAvc(videoFile.FileCodec) && !force {
 			if !videoFallbackCodecAvc(srcPath) {
-				log.Warnf("remux: skipping non-AVC video %s", clean.Log(found.FileName))
+				log.Warnf("remux: skipping non-AVC video %s", clean.Log(videoFile.FileName))
 				continue
 			}
 		}
@@ -168,13 +173,13 @@ func videoBuildRemuxPlans(conf *config.Config, results []search.Photo, force boo
 			IndexPath: indexPath,
 			SrcPath:   srcPath,
 			DestPath:  destPath,
-			SizeBytes: found.FileSize,
+			SizeBytes: videoFile.FileSize,
 			Sidecar:   useSidecar,
 		})
 
 		preflight = append(preflight, videoOutputPlan{
 			Destination: destPath,
-			SizeBytes:   found.FileSize,
+			SizeBytes:   videoFile.FileSize,
 		})
 	}
 

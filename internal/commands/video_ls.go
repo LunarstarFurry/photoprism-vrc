@@ -17,7 +17,6 @@ var VideoListCommand = &cli.Command{
 	Flags: append(append([]cli.Flag{}, report.CliFlags...),
 		videoCountFlag,
 		OffsetFlag,
-		videoIncludeSidecarFlag,
 	),
 	Action: videoListAction,
 }
@@ -31,29 +30,29 @@ func videoListAction(ctx *cli.Context) error {
 		}
 
 		format, err := report.CliFormatStrict(ctx)
+
 		if err != nil {
 			return err
 		}
 
 		filter := videoNormalizeFilter(ctx.Args().Slice())
-		includeSidecar := ctx.Bool(videoIncludeSidecarFlag.Name)
+		results, err := videoSearchResults(filter, ctx.Int(videoCountFlag.Name), ctx.Int(OffsetFlag.Name))
 
-		results, err := videoSearchResults(filter, ctx.Int(videoCountFlag.Name), ctx.Int(OffsetFlag.Name), includeSidecar)
 		if err != nil {
 			return err
 		}
 
-		cols := videoListColumns(includeSidecar)
+		cols := videoListColumns()
 
 		if format == report.JSON {
 			rows := make([]map[string]interface{}, 0, len(results))
 			for _, found := range results {
-				rows = append(rows, videoListJSONRow(found, includeSidecar))
+				rows = append(rows, videoListJSONRow(found))
 			}
 
-			payload, err := videoListJSON(rows, cols)
-			if err != nil {
-				return err
+			payload, jsonErr := videoListJSON(rows, cols)
+			if jsonErr != nil {
+				return jsonErr
 			}
 
 			fmt.Println(payload)
@@ -61,16 +60,19 @@ func videoListAction(ctx *cli.Context) error {
 		}
 
 		rows := make([][]string, 0, len(results))
+
 		for _, found := range results {
-			rows = append(rows, videoListRow(found, includeSidecar))
+			rows = append(rows, videoListRow(found))
 		}
 
 		output, err := report.RenderFormat(rows, cols, format)
+
 		if err != nil {
 			return err
 		}
 
 		fmt.Println(output)
+
 		return nil
 	})
 }

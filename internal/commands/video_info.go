@@ -10,6 +10,7 @@ import (
 	"github.com/urfave/cli/v2"
 
 	"github.com/photoprism/photoprism/internal/config"
+	"github.com/photoprism/photoprism/internal/entity"
 	"github.com/photoprism/photoprism/internal/entity/search"
 	"github.com/photoprism/photoprism/internal/meta"
 	"github.com/photoprism/photoprism/internal/photoprism"
@@ -34,7 +35,7 @@ var VideoInfoCommand = &cli.Command{
 func videoInfoAction(ctx *cli.Context) error {
 	return CallWithDependencies(ctx, func(conf *config.Config) error {
 		filter := videoNormalizeFilter(ctx.Args().Slice())
-		results, err := videoSearchResults(filter, ctx.Int(videoCountFlag.Name), ctx.Int(OffsetFlag.Name), false)
+		results, err := videoSearchResults(filter, ctx.Int(videoCountFlag.Name), ctx.Int(OffsetFlag.Name))
 		if err != nil {
 			return err
 		}
@@ -75,11 +76,16 @@ type videoInfoEntry struct {
 
 // videoInfoEntryFor collects indexed, ExifTool, and ffprobe metadata for a search result.
 func videoInfoEntryFor(conf *config.Config, found search.Photo, verbose bool) (videoInfoEntry, error) {
-	entry := videoInfoEntry{
-		Index: videoIndexSummary(found),
+	videoFile, ok := videoPrimaryFile(found)
+	if !ok {
+		return videoInfoEntry{}, fmt.Errorf("info: missing video file for %s", found.PhotoUID)
 	}
 
-	filePath := photoprism.FileName(found.FileRoot, found.FileName)
+	entry := videoInfoEntry{
+		Index: videoIndexSummary(found, videoFile),
+	}
+
+	filePath := photoprism.FileName(videoFile.FileRoot, videoFile.FileName)
 	mediaFile, err := photoprism.NewMediaFile(filePath)
 	if err != nil {
 		return entry, err
@@ -117,29 +123,29 @@ func videoInfoEntryFor(conf *config.Config, found search.Photo, verbose bool) (v
 }
 
 // videoIndexSummary builds a concise map of indexed fields for diagnostics.
-func videoIndexSummary(found search.Photo) map[string]interface{} {
+func videoIndexSummary(found search.Photo, file entity.File) map[string]interface{} {
 	return map[string]interface{}{
-		"file_name":       found.FileName,
-		"file_root":       found.FileRoot,
-		"file_uid":        found.FileUID,
+		"file_name":       file.FileName,
+		"file_root":       file.FileRoot,
+		"file_uid":        file.FileUID,
 		"photo_uid":       found.PhotoUID,
-		"media_type":      found.MediaType,
-		"file_type":       found.FileType,
-		"file_mime":       found.FileMime,
-		"file_codec":      found.FileCodec,
-		"file_hash":       found.FileHash,
-		"file_size":       found.FileSize,
-		"file_duration":   found.FileDuration.Nanoseconds(),
+		"media_type":      file.MediaType,
+		"file_type":       file.FileType,
+		"file_mime":       file.FileMime,
+		"file_codec":      file.FileCodec,
+		"file_hash":       file.FileHash,
+		"file_size":       file.FileSize,
+		"file_duration":   file.FileDuration.Nanoseconds(),
 		"photo_duration":  found.PhotoDuration.Nanoseconds(),
-		"file_frames":     found.FileFrames,
-		"file_fps":        found.FileFPS,
-		"file_width":      found.FileWidth,
-		"file_height":     found.FileHeight,
-		"file_sidecar":    found.FileSidecar,
-		"file_missing":    found.FileMissing,
-		"file_video":      found.FileVideo,
-		"original_name":   found.OriginalName,
-		"instance_id":     found.InstanceID,
+		"file_frames":     file.FileFrames,
+		"file_fps":        file.FileFPS,
+		"file_width":      file.FileWidth,
+		"file_height":     file.FileHeight,
+		"file_sidecar":    file.FileSidecar,
+		"file_missing":    file.FileMissing,
+		"file_video":      file.FileVideo,
+		"original_name":   file.OriginalName,
+		"instance_id":     file.InstanceID,
 		"photo_taken_at":  found.TakenAt,
 		"photo_taken_src": found.TakenSrc,
 	}

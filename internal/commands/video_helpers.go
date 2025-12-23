@@ -11,7 +11,9 @@ import (
 
 	"github.com/dustin/go-humanize"
 
+	"github.com/photoprism/photoprism/internal/entity"
 	"github.com/photoprism/photoprism/internal/entity/search"
+	"github.com/photoprism/photoprism/pkg/media/video"
 	"github.com/photoprism/photoprism/pkg/txt/report"
 )
 
@@ -141,54 +143,109 @@ func videoParseTrimDuration(value string) (time.Duration, error) {
 }
 
 // videoListColumns returns the ordered column list for the video ls output.
-func videoListColumns(includeSidecar bool) []string {
-	cols := []string{"Name", "Root"}
-	if includeSidecar {
-		cols = append(cols, "Sidecar")
+func videoListColumns() []string {
+	return []string{"Video", "Size", "Resolution", "Duration", "Frames", "FPS", "Content Type", "Checksum"}
+}
+
+// videoResultFiles returns the related files for a merged search result or falls back to the file fields on the result.
+func videoResultFiles(found search.Photo) []entity.File {
+	if len(found.Files) > 0 {
+		return found.Files
 	}
-	return append(cols, "Duration", "Codec", "Mime", "Width", "Height", "FPS", "Frames", "Size", "Hash")
+
+	return []entity.File{videoFileFromSearch(found)}
+}
+
+// videoFileFromSearch builds a file record from the file fields of a search result.
+func videoFileFromSearch(found search.Photo) entity.File {
+	return entity.File{
+		ID:              found.FileID,
+		PhotoUID:        found.PhotoUID,
+		FileUID:         found.FileUID,
+		FileRoot:        found.FileRoot,
+		FileName:        found.FileName,
+		OriginalName:    found.OriginalName,
+		FileHash:        found.FileHash,
+		FileWidth:       found.FileWidth,
+		FileHeight:      found.FileHeight,
+		FilePortrait:    found.FilePortrait,
+		FilePrimary:     found.FilePrimary,
+		FileSidecar:     found.FileSidecar,
+		FileMissing:     found.FileMissing,
+		FileVideo:       found.FileVideo,
+		FileDuration:    found.FileDuration,
+		FileFPS:         found.FileFPS,
+		FileFrames:      found.FileFrames,
+		FilePages:       found.FilePages,
+		FileCodec:       found.FileCodec,
+		FileType:        found.FileType,
+		MediaType:       found.MediaType,
+		FileMime:        found.FileMime,
+		FileSize:        found.FileSize,
+		FileOrientation: found.FileOrientation,
+		FileProjection:  found.FileProjection,
+		FileAspectRatio: found.FileAspectRatio,
+		FileColors:      found.FileColors,
+		FileDiff:        found.FileDiff,
+		FileChroma:      found.FileChroma,
+		FileLuminance:   found.FileLuminance,
+		OmitMarkers:     true,
+	}
+}
+
+// videoPrimaryFile selects the best video file from a merged search result, preferring non-sidecar entries.
+func videoPrimaryFile(found search.Photo) (entity.File, bool) {
+	files := videoResultFiles(found)
+	if len(files) == 0 {
+		return entity.File{}, false
+	}
+
+	for _, file := range files {
+		if file.FileVideo && !file.FileSidecar {
+			return file, true
+		}
+	}
+
+	for _, file := range files {
+		if file.FileVideo {
+			return file, true
+		}
+	}
+
+	return files[0], true
 }
 
 // videoListRow renders a search result row for table outputs with human-friendly values.
-func videoListRow(found search.Photo, includeSidecar bool) []string {
-	row := []string{found.FileName, found.FileRoot}
-	if includeSidecar {
-		row = append(row, strconv.FormatBool(found.FileSidecar))
-	}
+func videoListRow(found search.Photo) []string {
+	videoFile, _ := videoPrimaryFile(found)
 
-	row = append(row,
-		videoHumanDuration(found.FileDuration),
-		found.FileCodec,
-		found.FileMime,
-		videoHumanInt(found.FileWidth),
-		videoHumanInt(found.FileHeight),
-		videoHumanFloat(found.FileFPS),
-		videoHumanInt(found.FileFrames),
-		videoHumanSize(found.FileSize),
-		found.FileHash,
-	)
+	row := []string{
+		videoFile.FileName,
+		videoHumanSize(videoFile.FileSize),
+		fmt.Sprintf("%dx%d", videoFile.FileWidth, videoFile.FileHeight),
+		videoHumanDuration(videoFile.FileDuration),
+		videoHumanInt(videoFile.FileFrames),
+		videoHumanFloat(videoFile.FileFPS),
+		video.ContentType(videoFile.FileMime, videoFile.FileType, videoFile.FileCodec, videoFile.FileHDR),
+		videoFile.FileHash,
+	}
 
 	return row
 }
 
-// videoListJSONRow renders a search result row for JSON output with raw numeric values.
-func videoListJSONRow(found search.Photo, includeSidecar bool) map[string]interface{} {
-	data := map[string]interface{}{
-		"name":     found.FileName,
-		"root":     found.FileRoot,
-		"duration": found.FileDuration.Nanoseconds(),
-		"codec":    found.FileCodec,
-		"mime":     found.FileMime,
-		"width":    found.FileWidth,
-		"height":   found.FileHeight,
-		"fps":      found.FileFPS,
-		"frames":   found.FileFrames,
-		"size":     videoNonNegativeSize(found.FileSize),
-		"hash":     found.FileHash,
-	}
+// videoListJSONRow renders a search result row for JSON output with canonical column keys.
+func videoListJSONRow(found search.Photo) map[string]interface{} {
+	videoFile, _ := videoPrimaryFile(found)
 
-	if includeSidecar {
-		data["sidecar"] = found.FileSidecar
+	data := map[string]interface{}{
+		"video":        videoFile.FileName,
+		"size":         videoNonNegativeSize(videoFile.FileSize),
+		"resolution":   fmt.Sprintf("%dx%d", videoFile.FileWidth, videoFile.FileHeight),
+		"duration":     videoFile.FileDuration.Nanoseconds(),
+		"frames":       videoFile.FileFrames,
+		"fps":          videoFile.FileFPS,
+		"content_type": video.ContentType(videoFile.FileMime, videoFile.FileType, videoFile.FileCodec, videoFile.FileHDR),
+		"checksum":     videoFile.FileHash,
 	}
 
 	return data

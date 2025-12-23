@@ -19,7 +19,7 @@ func videoReindexRelated(conf *config.Config, fileName string) error {
 		return err
 	}
 
-	related, err := mediaFile.RelatedFiles(false)
+	related, err := mediaFile.RelatedFiles(conf.Settings().Stack.Name)
 	if err != nil {
 		return err
 	}

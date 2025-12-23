@@ -39,7 +39,7 @@ func videoTranscodeAction(ctx *cli.Context) error {
 		}
 
 		filter := videoNormalizeFilter(ctx.Args().Slice())
-		results, err := videoSearchResults(filter, ctx.Int(videoCountFlag.Name), ctx.Int(OffsetFlag.Name), false)
+		results, err := videoSearchResults(filter, ctx.Int(videoCountFlag.Name), ctx.Int(OffsetFlag.Name))
 		if err != nil {
 			return err
 		}
@@ -127,17 +127,23 @@ func videoBuildTranscodePlans(conf *config.Config, results []search.Photo, force
 	preflight := make([]videoOutputPlan, 0, len(results))
 
 	for _, found := range results {
-		if found.FileSidecar {
-			log.Warnf("transcode: skipping sidecar file %s", clean.Log(found.FileName))
+		videoFile, ok := videoPrimaryFile(found)
+		if !ok {
+			log.Warnf("transcode: missing video file for %s", clean.Log(found.PhotoUID))
 			continue
 		}
 
-		if found.MediaType == entity.MediaLive {
-			log.Warnf("transcode: skipping live photo video %s", clean.Log(found.FileName))
+		if videoFile.FileSidecar {
+			log.Warnf("transcode: skipping sidecar file %s", clean.Log(videoFile.FileName))
 			continue
 		}
 
-		srcPath := photoprism.FileName(found.FileRoot, found.FileName)
+		if videoFile.MediaType == entity.MediaLive {
+			log.Warnf("transcode: skipping live photo video %s", clean.Log(videoFile.FileName))
+			continue
+		}
+
+		srcPath := photoprism.FileName(videoFile.FileRoot, videoFile.FileName)
 		if !fs.FileExistsNotEmpty(srcPath) {
 			log.Warnf("transcode: missing file %s", clean.Log(srcPath))
 			continue
@@ -167,12 +173,12 @@ func videoBuildTranscodePlans(conf *config.Config, results []search.Photo, force
 			IndexPath: srcPath,
 			SrcPath:   srcPath,
 			DestPath:  destPath,
-			SizeBytes: found.FileSize,
+			SizeBytes: videoFile.FileSize,
 		})
 
 		preflight = append(preflight, videoOutputPlan{
 			Destination: destPath,
-			SizeBytes:   found.FileSize,
+			SizeBytes:   videoFile.FileSize,
 		})
 	}
 
