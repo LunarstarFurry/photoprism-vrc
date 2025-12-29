@@ -30,7 +30,21 @@ func vipsSetIccProfileForInteropIndex(img *vips.ImageRef, logName string) (err e
 	// Some cameras signal color space via EXIF InteroperabilityIndex instead of
 	// embedding an ICC profile. Browsers and libvips ignore this tag, so we
 	// inject a matching ICC profile to produce correct thumbnails.
-	iiFull := img.GetString("exif-ifd4-InteroperabilityIndex")
+	iiField := "exif-ifd4-InteroperabilityIndex"
+	hasInterop := false
+
+	for _, field := range img.GetFields() {
+		if field == iiField {
+			hasInterop = true
+			break
+		}
+	}
+
+	if !hasInterop {
+		return nil
+	}
+
+	iiFull := img.GetString(iiField)
 
 	if iiFull == "" {
 		return nil
