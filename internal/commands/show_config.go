@@ -39,7 +39,7 @@ func showConfigAction(ctx *cli.Context) error {
 	get.SetConfig(conf)
 	hub.Disable()
 
-	if err := conf.InitReport(); err != nil {
+	if err := conf.InitCore(); err != nil {
 		log.Debug(err)
 	}
 

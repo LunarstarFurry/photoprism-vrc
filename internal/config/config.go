@@ -288,9 +288,9 @@ func (c *Config) Init() error {
 	return nil
 }
 
-// InitReport initializes configuration values for report commands without
-// connecting to the database or running cluster bootstrap tasks.
-func (c *Config) InitReport() error {
+// InitCore initializes configuration values without connecting to the database
+// or running cluster bootstrap tasks.
+func (c *Config) InitCore() error {
 	start := time.Now()
 
 	// Fail if the originals and storage path are identical.

@@ -128,7 +128,7 @@ func TestClientExtSkipsNilClientValues(t *testing.T) {
 	assert.Empty(t, values)
 }
 
-func TestInitReportSkipsBootExtensions(t *testing.T) {
+func TestInitCoreSkipsBootExtensions(t *testing.T) {
 	cleanup := resetExtensionsForTest(t)
 	defer cleanup()
 
@@ -145,7 +145,7 @@ func TestInitReportSkipsBootExtensions(t *testing.T) {
 	}, nil)
 
 	conf := NewMinimalTestConfig(t.TempDir())
-	require.NoError(t, conf.InitReport())
+	require.NoError(t, conf.InitCore())
 	assert.False(t, bootCalled)
 	assert.True(t, initCalled)
 	assert.True(t, conf.IsReady())
