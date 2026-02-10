@@ -40,15 +40,15 @@ require (
 	github.com/tidwall/gjson v1.18.0
 	github.com/ulule/deepcopier v0.0.0-20200430083143-45decc6639b6
 	go4.org v0.0.0-20260112195520-a5071408f32f // indirect
-	golang.org/x/crypto v0.47.0
-	golang.org/x/net v0.49.0
+	golang.org/x/crypto v0.48.0
+	golang.org/x/net v0.50.0
 	gonum.org/v1/gonum v0.17.0
 	gopkg.in/yaml.v2 v2.4.0
 )
 
 require (
 	github.com/go-xmlfmt/xmlfmt v1.1.3 // indirect
-	golang.org/x/image v0.35.0
+	golang.org/x/image v0.36.0
 )
 
 require github.com/olekukonko/tablewriter v1.1.3
@@ -73,7 +73,7 @@ require (
 
 require github.com/dustinkirkland/golang-petname v0.0.0-20240428194347-eebcea082ee0
 
-require golang.org/x/text v0.33.0
+require golang.org/x/text v0.34.0
 
 require (
 	github.com/IGLOU-EU/go-wildcard v1.0.3
@@ -91,7 +91,7 @@ require (
 	github.com/wamuir/graft v0.10.0
 	github.com/yalue/onnxruntime_go v1.25.0
 	github.com/zitadel/oidc/v3 v3.45.4
-	golang.org/x/mod v0.32.0
+	golang.org/x/mod v0.33.0
 	golang.org/x/sys v0.41.0
 	google.golang.org/protobuf v1.36.11
 )
