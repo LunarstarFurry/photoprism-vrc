@@ -26,6 +26,7 @@ package proxy
 
 import (
 	"fmt"
+	"path"
 	"strings"
 	"time"
 
@@ -98,7 +99,18 @@ func NormalizePathPrefix(prefix string) (string, error) {
 		return "", fmt.Errorf("proxy path prefix contains invalid characters")
 	}
 
-	return "/" + trimmed + "/", nil
+	if strings.ContainsRune(trimmed, '\\') {
+		return "", fmt.Errorf("proxy path prefix must not contain backslashes")
+	}
+
+	normalized := "/" + trimmed
+
+	// Reject ambiguous prefixes (duplicate slashes, dot segments, parent traversal).
+	if path.Clean(normalized) != normalized {
+		return "", fmt.Errorf("proxy path prefix contains invalid path segments")
+	}
+
+	return normalized + "/", nil
 }
 
 // SetPathPrefix sets PathPrefix after validation and normalization.
