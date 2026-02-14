@@ -33,9 +33,8 @@ This file tells automated coding agents (and humans) where to find the single so
 - Regenerate `NOTICE` files with `make notice` when dependencies change (e.g., updates to `go.mod`, `go.sum`, `package-lock.json`, or other lockfiles). Do not edit `NOTICE` or `frontend/NOTICE` manually.
 - When writing CLI examples or scripts, place option flags before positional arguments unless the command requires a different order.
 - Use RFC 3339 UTC timestamps in request and response examples, and valid ID, UID and UUID examples in docs and tests.
+- Document headings must use **Title Case** (in APA or AP style) across Markdown files to keep generated navigation and changelogs consistent. Always spell the product name as `PhotoPrism`; this proper noun is an exception to generic naming rules.
 
-> Document headings must use **Title Case** (in APA or AP style) across Markdown files to keep generated navigation and changelogs consistent. Always spell the product name as `PhotoPrism`; this proper noun is an exception to generic naming rules.
->
 > Title Case rules (APA/AP implementation):
 > - Capitalize the first word of a title/heading and the first word of a subtitle.
 > - Capitalize the first word after a colon, an em dash, or end punctuation.
