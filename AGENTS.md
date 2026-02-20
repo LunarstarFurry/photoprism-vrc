@@ -21,9 +21,10 @@ This file tells automated coding agents (and humans) where to find the single so
 
 ### Local Agent Progress
 
-- Use a root-level `TODO.md` file to track local agent progress and handoff notes across sessions/environments.
-- `TODO.md` is ignored by Git and may not exist yet in a given local workspace.
-- Create or update it locally as needed, but do not treat it as a required artifact.
+- Use root-level task files to track progress and handoff notes across sessions/environments:
+  - `TODO.md` for new/upcoming tasks.
+  - `DONE.md` for completed tasks.
+- These files are local workflow aids and may not exist yet in a given workspace.
 
 > Quick Tip: to inspect GitHub issue details without leaving the terminal, run `curl -s https://api.github.com/repos/photoprism/photoprism/issues/<id>`.
 
