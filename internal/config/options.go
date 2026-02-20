@@ -126,6 +126,7 @@ type Options struct {
 	DefaultLocale             string        `yaml:"DefaultLocale" json:"DefaultLocale" flag:"default-locale"`
 	DefaultTimezone           string        `yaml:"DefaultTimezone" json:"DefaultTimezone" flag:"default-timezone"`
 	DefaultTheme              string        `yaml:"DefaultTheme" json:"DefaultTheme" flag:"default-theme"`
+	ThemeUrl                  string        `yaml:"-" json:"-" flag:"theme-url" tags:"pro"`
 	PlacesLocale              string        `yaml:"PlacesLocale" json:"PlacesLocale" flag:"places-locale"`
 	AppName                   string        `yaml:"AppName" json:"AppName" flag:"app-name"`
 	AppMode                   string        `yaml:"AppMode" json:"AppMode" flag:"app-mode"`

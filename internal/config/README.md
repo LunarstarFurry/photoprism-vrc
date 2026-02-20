@@ -1,6 +1,6 @@
 ## PhotoPrism — Config Package
 
-**Last Updated:** February 18, 2026
+**Last Updated:** February 19, 2026
 
 ### Overview
 
@@ -55,3 +55,4 @@ Example output:
 - `photoprism show config-options` prints the description and default value for each option. Use this when updating [`flags.go`](flags.go).
 - `photoprism show config-yaml` displays the configuration keys and their expected types in the [same structure that the YAML files use](https://docs.photoprism.app/getting-started/config-files/). It is a read-only helper meant to guide you when editing files under `storage/config`.
 - Additional `show` subcommands document search filters, metadata tags, and supported thumbnail sizes; see [`internal/commands/show.go`](../commands/show.go) for the complete list.
+- Pro/Portal builds additionally expose `PHOTOPRISM_THEME_URL` / `--theme-url` (hidden in CE/Plus), which can bootstrap `config/theme/` from a secure ZIP download when no theme files are present yet. HTTP Basic credentials in the URL are supported for protected artifact endpoints and are redacted in config reports.
