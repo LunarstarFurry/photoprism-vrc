@@ -259,6 +259,7 @@ audit: audit-frontend audit-backend
 audit-frontend:
 	$(MAKE) -C frontend audit
 audit-backend: dep-vuln
+dep-audit: dep-vuln
 dep-vuln:
 	@echo "Checking Go production dependencies for security vulnerabilities..."
 	go run golang.org/x/vuln/cmd/govulncheck@latest ./pkg/... ./internal/...
