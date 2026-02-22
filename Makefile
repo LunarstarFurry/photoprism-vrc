@@ -151,6 +151,8 @@ fix-permissions:
 	fi
 gettext-merge:
 	./scripts/gettext-merge.sh
+gettext-extract:
+	./scripts/gettext-extract.sh
 gettext-clear-fuzzy:
 	./scripts/gettext-clear-fuzzy.sh
 clean:
