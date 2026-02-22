@@ -38,6 +38,8 @@ This file tells automated coding agents (and humans) where to find the single so
   - Older spec versions remain in the repo for historical reference but are not linked from the main TOC. Do not base new work on superseded files (e.g., `*-v1.md` when `*-v2.md` exists).
   - Auto-generated configuration and command references live under `specs/generated/`. Agents MUST NOT read, analyze, or modify anything in this directory; refer humans to `specs/generated/README.md` if regeneration is required.
 - Regenerate `NOTICE` files with `make notice` when dependencies change (e.g., updates to `go.mod`, `go.sum`, `package-lock.json`, or other lockfiles). Do not edit `NOTICE` or `frontend/NOTICE` manually.
+- Frontend translation extraction source of truth is root `make gettext-extract` (runs `scripts/gettext-extract.sh`), which scans `frontend/src` plus available private overlays in `plus/frontend`, `pro/frontend`, and `portal/frontend`. Subrepo compatibility targets (`make -C plus gettext-extract`, `make -C pro gettext-extract`, `make -C portal gettext-extract`) delegate to this root target.
+- Avoid punctuation-only gettext keys (for example `$gettext("—")`), as they create noisy/unhelpful entries in `frontend/src/locales/translations.pot`.
 - When writing CLI examples or scripts, place option flags before positional arguments unless the command requires a different order.
 - Use RFC 3339 UTC timestamps in request and response examples, and valid ID, UID and UUID examples in docs and tests.
 - Document headings must use **Title Case** (in APA or AP style) across Markdown files to keep generated navigation and changelogs consistent. Always spell the product name as `PhotoPrism`; this proper noun is an exception to generic naming rules.

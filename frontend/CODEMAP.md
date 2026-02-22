@@ -36,7 +36,7 @@ Startup Templates & Splash Screen
 Runtime & Plugins
 - Vue 3 + Vuetify 3 (`createVuetify`) with MDI icons; themes from `src/options/themes.js`
 - Router: Vue Router 4, history base at `$config.baseUri + "/library/"`
-- I18n: `vue3-gettext` via `common/gettext.js`; extraction with `npm run gettext-extract`, compile with `npm run gettext-compile`
+- I18n: `vue3-gettext` via `common/gettext.js`; canonical extraction via root `make gettext-extract` (scans `frontend/src` plus available overlays in `plus/frontend`, `pro/frontend`, and `portal/frontend`), compile with `npm run gettext-compile`
 - HTML sanitization: `vue-3-sanitize` + `vue-sanitize-directive`
 - Tooltips: `floating-vue`
 - Video: HLS.js assigned to `window.Hls`
@@ -117,7 +117,8 @@ Common How‑Tos
 
 - Add translations
   - Wrap strings with `$gettext(...)` / `$pgettext(...)`
-  - Extract: `npm run gettext-extract`; compile: `npm run gettext-compile`
+  - Avoid punctuation-only gettext keys (for example `$gettext("—")`)
+  - Extract: `make gettext-extract` from repo root (or CE-only fallback: `cd frontend && npm run gettext-extract`); compile: `npm run gettext-compile`
 
 - Restore scroll state on back navigation
   - Use `$view.saveRestoreState(key, { count, offset, scrollTop })` when unloads happen and `$view.consumeRestoreState(key)` on popstate to preload prior batches (Albums, Labels already supply examples).
