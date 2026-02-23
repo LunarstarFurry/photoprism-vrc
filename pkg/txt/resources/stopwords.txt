@@ -1906,7 +1906,7 @@ lui-même
 là
 lès
 maint
-maintenant
+maininstance
 mais
 malgre
 malgré
@@ -2148,7 +2148,7 @@ telle
 tellement
 telles
 tels
-tenant
+instance
 tend
 tenir
 tente

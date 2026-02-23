@@ -33,7 +33,7 @@ import (
 // Supported cluster node register flags.
 var (
 	regNameFlag       = &cli.StringFlag{Name: "name", Usage: "node `NAME` (lowercase letters, digits, hyphens)"}
-	regRoleFlag       = &cli.StringFlag{Name: "role", Usage: "node `ROLE` (tenant, service)", Value: "tenant"}
+	regRoleFlag       = &cli.StringFlag{Name: "role", Usage: "node `ROLE` (instance, service)", Value: "instance"}
 	regIntUrlFlag     = &cli.StringFlag{Name: "advertise-url", Usage: "internal service `URL`"}
 	regSiteUrlFlag    = &cli.StringFlag{Name: "site-url", Usage: "public site `URL` (https://...)"}
 	regAppNameFlag    = &cli.StringFlag{Name: "app-name", Usage: "override app `NAME` reported to the portal"}
@@ -93,9 +93,9 @@ func clusterRegisterAction(ctx *cli.Context) error {
 
 		nodeRole := cluster.NormalizeNodeRole(clean.TypeLowerDash(ctx.String("role")))
 		switch nodeRole {
-		case cluster.RoleTenant, cluster.RoleService:
+		case cluster.RoleInstance, cluster.RoleService:
 		default:
-			return cli.Exit(fmt.Errorf("invalid --role (must be tenant or service)"), 2)
+			return cli.Exit(fmt.Errorf("invalid --role (must be instance or service)"), 2)
 		}
 
 		portalURL := ctx.String("portal-url")

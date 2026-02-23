@@ -11,7 +11,7 @@ import (
 	reg "github.com/photoprism/photoprism/internal/service/cluster/registry"
 )
 
-func TestClusterNodesMod_LegacyAliasAppToTenant(t *testing.T) {
+func TestClusterNodesMod_LegacyAliasAppToInstance(t *testing.T) {
 	c := get.Config()
 	prevRole := c.Options().NodeRole
 	c.Options().NodeRole = cluster.RolePortal
@@ -29,7 +29,7 @@ func TestClusterNodesMod_LegacyAliasAppToTenant(t *testing.T) {
 	updated, err := r.FindByName("pp-mod-alias")
 	assert.NoError(t, err)
 	if assert.NotNil(t, updated) {
-		assert.Equal(t, cluster.RoleTenant, updated.Role)
+		assert.Equal(t, cluster.RoleInstance, updated.Role)
 	}
 }
 

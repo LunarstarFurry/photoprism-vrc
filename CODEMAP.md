@@ -116,7 +116,7 @@ Background Workers
 - Auto indexer: `internal/workers/auto/*`.
 
 Cluster / Portal
-- Node types: `internal/service/cluster/const.go` (`cluster.RoleTenant`, `cluster.RolePortal`, `cluster.RoleService`).
+- Node types: `internal/service/cluster/const.go` (`cluster.RoleInstance`, `cluster.RolePortal`, `cluster.RoleService`).
 - Node bootstrap & registration: `internal/service/cluster/node/*` (HTTP to Portal; do not import Portal internals).
   - Registration now retries once on 401/403 by rotating the node client secret with the join token and persists the new credentials (falling back to in-memory storage if the secrets directory is read-only).
   - Theme sync logs explicitly when refresh/rotation occurs so operators can trace credential churn in standard log levels.

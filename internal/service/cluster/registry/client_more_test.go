@@ -16,7 +16,7 @@ func TestClientRegistry_DuplicateNamePrefersLatest(t *testing.T) {
 	c := newRegistryTestConfig(t, "cluster-registry-dupes")
 
 	// Create two clients directly to simulate duplicates with same name.
-	c1 := entity.NewClient().SetName("pp-dupe").SetRole(cluster.RoleTenant)
+	c1 := entity.NewClient().SetName("pp-dupe").SetRole(cluster.RoleInstance)
 	assert.NoError(t, c1.Create())
 	// Stagger times
 	time.Sleep(10 * time.Millisecond)
@@ -47,17 +47,17 @@ func TestClientRegistry_RoleChange(t *testing.T) {
 	if assert.NotNil(t, got) {
 		assert.Equal(t, "service", got.Role)
 	}
-	// Change to tenant
-	upd := &Node{Node: cluster.Node{ClientID: got.ClientID, Name: got.Name, Role: cluster.RoleTenant}}
+	// Change to instance
+	upd := &Node{Node: cluster.Node{ClientID: got.ClientID, Name: got.Name, Role: cluster.RoleInstance}}
 	assert.NoError(t, r.Put(upd))
 	got2, err := r.FindByName("pp-role")
 	assert.NoError(t, err)
 	if assert.NotNil(t, got2) {
-		assert.Equal(t, cluster.RoleTenant, got2.Role)
+		assert.Equal(t, cluster.RoleInstance, got2.Role)
 	}
 }
 
-func TestClientRegistry_FindByName_NormalizesLegacyAliasAppToTenant(t *testing.T) {
+func TestClientRegistry_FindByName_NormalizesLegacyAliasAppToInstance(t *testing.T) {
 	c := newRegistryTestConfig(t, "cluster-registry-legacy-app")
 
 	legacy := entity.NewClient()
@@ -69,6 +69,6 @@ func TestClientRegistry_FindByName_NormalizesLegacyAliasAppToTenant(t *testing.T
 	n, err := r.FindByName("pp-legacy-app")
 	assert.NoError(t, err)
 	if assert.NotNil(t, n) {
-		assert.Equal(t, cluster.RoleTenant, n.Role)
+		assert.Equal(t, cluster.RoleInstance, n.Role)
 	}
 }

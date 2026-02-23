@@ -18,7 +18,7 @@ import (
 
 // flags for nodes mod
 var (
-	nodesModRoleFlag = &cli.StringFlag{Name: "role", Aliases: []string{"t"}, Usage: "node `ROLE` (portal, tenant, service)"}
+	nodesModRoleFlag = &cli.StringFlag{Name: "role", Aliases: []string{"t"}, Usage: "node `ROLE` (portal, instance, service)"}
 	nodesModInternal = &cli.StringFlag{Name: "advertise-url", Aliases: []string{"i"}, Usage: "internal service `URL`"}
 	nodesModLabel    = &cli.StringSliceFlag{Name: "label", Aliases: []string{"l"}, Usage: "`k=v` label (repeatable)"}
 )
@@ -77,10 +77,10 @@ func clusterNodesModAction(ctx *cli.Context) error {
 		if v := ctx.String("role"); v != "" {
 			role := cluster.NormalizeNodeRole(v)
 			switch role {
-			case cluster.RolePortal, cluster.RoleTenant, cluster.RoleService:
+			case cluster.RolePortal, cluster.RoleInstance, cluster.RoleService:
 				n.Role = role
 			default:
-				return cli.Exit(fmt.Errorf("invalid --role (must be portal, tenant, or service)"), 2)
+				return cli.Exit(fmt.Errorf("invalid --role (must be portal, instance, or service)"), 2)
 			}
 			changes = append(changes, fmt.Sprintf("role=%s", clean.Log(n.Role)))
 		}

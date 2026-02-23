@@ -37,8 +37,8 @@ func newBootstrapTestConfig(t *testing.T, name string) *config.Config {
 func TestInitConfig_NoPortal_NoOp(t *testing.T) {
 	c := newBootstrapTestConfig(t, "bootstrap")
 
-	// Default NodeRole() resolves to tenant; no Portal configured.
-	assert.Equal(t, cluster.RoleTenant, c.NodeRole())
+	// Default NodeRole() resolves to instance; no Portal configured.
+	assert.Equal(t, cluster.RoleInstance, c.NodeRole())
 	assert.NoError(t, InitConfig(c))
 }
 

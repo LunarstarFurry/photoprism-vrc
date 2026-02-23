@@ -25,7 +25,7 @@ import (
 var DefaultPortalUrl = "https://portal.${PHOTOPRISM_CLUSTER_DOMAIN}"
 
 // DefaultNodeRole is the default node role assigned when none is configured.
-var DefaultNodeRole = cluster.RoleTenant
+var DefaultNodeRole = cluster.RoleInstance
 
 // DefaultJWTAllowedScopes lists default OAuth scopes for cluster-issued JWTs.
 var DefaultJWTAllowedScopes = "config cluster vision metrics"
@@ -323,7 +323,7 @@ func (c *Config) NodeName() string {
 	return "node-" + s
 }
 
-// NodeRole returns the cluster node role (portal, tenant, or service).
+// NodeRole returns the cluster node role (portal, instance, or service).
 func (c *Config) NodeRole() string {
 	if c.Edition() == Portal {
 		c.options.NodeRole = cluster.RolePortal
@@ -331,7 +331,7 @@ func (c *Config) NodeRole() string {
 	}
 
 	switch role := cluster.NormalizeNodeRole(c.options.NodeRole); role {
-	case cluster.RolePortal, cluster.RoleTenant, cluster.RoleService:
+	case cluster.RolePortal, cluster.RoleInstance, cluster.RoleService:
 		return string(role)
 	default:
 		return DefaultNodeRole

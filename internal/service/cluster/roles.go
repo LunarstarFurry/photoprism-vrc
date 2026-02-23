@@ -10,8 +10,8 @@ import (
 type NodeRole = string
 
 const (
-	// RoleTenant represents a regular PhotoPrism tenant node that can join a cluster.
-	RoleTenant = NodeRole(acl.RoleTenant)
+	// RoleInstance represents a regular PhotoPrism instance node that can join a cluster.
+	RoleInstance = NodeRole(acl.RoleInstance)
 	// RolePortal represents a management portal for orchestrating a cluster.
 	RolePortal = NodeRole(acl.RolePortal)
 	// RoleService represents other services used within a cluster, e.g., Ollama or Vision API.
@@ -21,8 +21,8 @@ const (
 // NormalizeNodeRole maps cluster role aliases to their canonical values.
 func NormalizeNodeRole(role string) NodeRole {
 	switch strings.ToLower(strings.TrimSpace(role)) {
-	case "app", RoleTenant:
-		return RoleTenant
+	case "app", RoleInstance:
+		return RoleInstance
 	case RolePortal:
 		return RolePortal
 	case RoleService:

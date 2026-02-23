@@ -7,12 +7,12 @@ import (
 )
 
 func TestNormalizeNodeRole(t *testing.T) {
-	t.Run("Tenant", func(t *testing.T) {
-		assert.Equal(t, RoleTenant, NormalizeNodeRole("tenant"))
+	t.Run("Instance", func(t *testing.T) {
+		assert.Equal(t, RoleInstance, NormalizeNodeRole("instance"))
 	})
 
-	t.Run("LegacyAliasAppToTenant", func(t *testing.T) {
-		assert.Equal(t, RoleTenant, NormalizeNodeRole(" app "))
+	t.Run("LegacyAliasAppToInstance", func(t *testing.T) {
+		assert.Equal(t, RoleInstance, NormalizeNodeRole(" app "))
 	})
 
 	t.Run("Portal", func(t *testing.T) {
