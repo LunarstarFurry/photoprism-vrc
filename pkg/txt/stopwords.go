@@ -1912,7 +1912,7 @@ var StopWords = map[string]bool{
 	"là":               true,
 	"lès":              true,
 	"maint":            true,
-	"maininstance":     true,
+	"maintenant":       true,
 	"mais":             true,
 	"malgre":           true,
 	"malgré":           true,
