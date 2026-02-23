@@ -59,7 +59,12 @@ func indexAction(ctx *cli.Context) error {
 	defer conf.Shutdown()
 
 	// Use first argument to limit scope if set.
-	subPath := strings.TrimSpace(ctx.Args().First())
+	rawSubPath := strings.TrimSpace(ctx.Args().First())
+	subPath := clean.UserPath(rawSubPath)
+
+	if rawSubPath != "" && subPath == "" {
+		return cli.Exit("invalid subfolder path", 2)
+	}
 
 	if subPath == "" {
 		log.Infof("indexing originals in %s", clean.Log(conf.OriginalsPath()))
