@@ -124,43 +124,13 @@ func registerWithPortal(c *config.Config, portal *url.URL, token string) (*clust
 	// Let the configuration decide if credentials are missing (MySQL with no effective name/user/password).
 	wantRotateDatabase := c.ShouldAutoRotateDatabase()
 
-	payload := cluster.RegisterRequest{
-		NodeName:     c.NodeName(),
-		NodeUUID:     c.NodeUUID(),
-		NodeRole:     c.NodeRole(),
-		AdvertiseUrl: c.AdvertiseUrl(),
-		AppName:      clean.TypeUnicode(c.About()),
-		AppVersion:   clean.TypeUnicode(c.Version()),
-		Theme:        clean.TypeUnicode(c.NodeThemeVersion()),
-	}
-
-	// Auto-derive Advertise/Site URLs from node name and cluster domain when not configured.
-	if domain := strings.TrimSpace(defaultClusterDomain(c)); domain != "" {
-		if payload.NodeName == "" {
-			payload.NodeName = c.NodeName()
-		}
-
-		if payload.AdvertiseUrl == "" {
-			if u := defaultNodeURL(payload.NodeName, domain); u != "" {
-				payload.AdvertiseUrl = u
-			}
-		}
-
-		if payload.SiteUrl == "" && payload.AdvertiseUrl != "" {
-			payload.SiteUrl = payload.AdvertiseUrl
-		}
-	}
+	payload := buildRegisterPayload(c)
 
 	// Include client credentials when present so the Portal can verify re-registration
 	// and authorize UUID/name changes.
 	if id, secret := strings.TrimSpace(c.NodeClientID()), strings.TrimSpace(c.NodeClientSecret()); id != "" && secret != "" {
 		payload.ClientID = id
 		payload.ClientSecret = secret
-	}
-
-	// Include SiteUrl whenever configured; the server normalizes duplicates if needed.
-	if su := c.SiteUrl(); su != "" {
-		payload.SiteUrl = su
 	}
 
 	if wantRotateDatabase {
@@ -303,6 +273,44 @@ func defaultNodeURL(name, domain string) string {
 	}
 
 	return fmt.Sprintf("https://%s.%s", name, domain)
+}
+
+// buildRegisterPayload builds a registration payload with stable defaults so
+// all registration code paths report consistent node metadata.
+func buildRegisterPayload(c *config.Config) cluster.RegisterRequest {
+	payload := cluster.RegisterRequest{
+		NodeName:     c.NodeName(),
+		NodeUUID:     c.NodeUUID(),
+		NodeRole:     c.NodeRole(),
+		AdvertiseUrl: c.AdvertiseUrl(),
+		AppName:      clean.TypeUnicode(c.About()),
+		AppVersion:   clean.TypeUnicode(c.Version()),
+		Theme:        clean.TypeUnicode(c.NodeThemeVersion()),
+	}
+
+	// Auto-derive Advertise/Site URLs from node name and cluster domain when not configured.
+	if domain := strings.TrimSpace(defaultClusterDomain(c)); domain != "" {
+		if payload.NodeName == "" {
+			payload.NodeName = c.NodeName()
+		}
+
+		if payload.AdvertiseUrl == "" {
+			if u := defaultNodeURL(payload.NodeName, domain); u != "" {
+				payload.AdvertiseUrl = u
+			}
+		}
+
+		if payload.SiteUrl == "" && payload.AdvertiseUrl != "" {
+			payload.SiteUrl = payload.AdvertiseUrl
+		}
+	}
+
+	// Include SiteUrl whenever configured; the server normalizes duplicates if needed.
+	if su := c.SiteUrl(); su != "" {
+		payload.SiteUrl = su
+	}
+
+	return payload
 }
 
 // persistRegistration merges registration responses into options.yml and, when
@@ -695,11 +703,8 @@ func obtainNodeCredentialsViaRegister(c *config.Config, portal *url.URL, joinTok
 	endpoint := *portal
 	endpoint.Path = strings.TrimRight(endpoint.Path, "/") + "/api/v1/cluster/nodes/register"
 
-	payload := cluster.RegisterRequest{
-		NodeName:     c.NodeName(),
-		NodeRole:     c.NodeRole(),
-		RotateSecret: true,
-	}
+	payload := buildRegisterPayload(c)
+	payload.RotateSecret = true
 
 	body, _ := json.Marshal(payload)
 	req, _ := http.NewRequest(http.MethodPost, endpoint.String(), bytes.NewReader(body))

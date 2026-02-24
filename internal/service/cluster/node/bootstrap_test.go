@@ -122,6 +122,51 @@ func TestRegister_PersistSecretAndDB(t *testing.T) {
 	assert.Equal(t, "192.0.2.0/24", c.ClusterCIDR())
 }
 
+func TestObtainNodeCredentialsViaRegister_UsesFullPayload(t *testing.T) {
+	var got cluster.RegisterRequest
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/cluster/nodes/register" {
+			http.NotFound(w, r)
+			return
+		}
+
+		assert.NoError(t, json.NewDecoder(r.Body).Decode(&got))
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(cluster.RegisterResponse{
+			Node:    cluster.Node{ClientID: "c-test-node-01"},
+			Secrets: &cluster.RegisterSecrets{ClientSecret: cluster.ExampleClientSecret},
+		})
+	}))
+	defer srv.Close()
+
+	c := newBootstrapTestConfig(t, "bootstrap-refresh-payload")
+
+	c.Options().NodeName = "refresh-node-1"
+	c.Options().NodeRole = cluster.RoleInstance
+	c.Options().NodeUUID = rnd.UUIDv7()
+	c.Options().SiteUrl = "https://app.example.test/i/refresh-node-1/"
+	c.Options().AdvertiseUrl = "http://refresh-node-1.example.internal:2342/"
+
+	parsed, err := url.Parse(srv.URL)
+	assert.NoError(t, err)
+
+	id, secret, err := obtainNodeCredentialsViaRegister(c, parsed, cluster.ExampleJoinToken)
+	assert.NoError(t, err)
+	assert.Equal(t, "c-test-node-01", id)
+	assert.Equal(t, cluster.ExampleClientSecret, secret)
+
+	assert.Equal(t, c.NodeName(), got.NodeName)
+	assert.Equal(t, c.NodeRole(), got.NodeRole)
+	assert.Equal(t, c.NodeUUID(), got.NodeUUID)
+	assert.Equal(t, c.SiteUrl(), got.SiteUrl)
+	assert.Equal(t, c.AdvertiseUrl(), got.AdvertiseUrl)
+	assert.NotEmpty(t, got.AppName)
+	assert.NotEmpty(t, got.AppVersion)
+	assert.True(t, got.RotateSecret)
+}
+
 func TestRegister_AllowsHTTPPortalNonLoopback(t *testing.T) {
 	var hits int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
