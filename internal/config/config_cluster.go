@@ -280,16 +280,19 @@ func (c *Config) NodeJoinTokenFile() string {
 	return filepath.Join(c.NodeConfigPath(), fs.SecretsDir, fs.JoinTokenFile)
 }
 
-// deriveNodeNameAndDomainFromHttpHost attempts to derive cluster host and domain name from the site URL.
+// deriveNodeNameAndDomainFromHttpHost attempts to derive cluster host and
+// domain name from the site URL without overriding explicit node-name values.
 func (c *Config) deriveNodeNameAndDomainFromHttpHost() (hostName, domainName string, found bool) {
 	if fqdn := c.SiteDomain(); fqdn != "" && !header.IsIP(fqdn) {
 		hostName, domainName, found = strings.Cut(fqdn, ".")
 		if hostName = clean.DNSLabel(hostName); found && dns.IsLabel(hostName) && dns.IsDomain(domainName) {
-			c.options.NodeName = hostName
+			if clean.DNSLabel(c.options.NodeName) == "" {
+				c.options.NodeName = hostName
+			}
 			if c.options.ClusterDomain == "" {
 				c.options.ClusterDomain = strings.ToLower(domainName)
 			}
-			return c.options.NodeName, c.options.ClusterDomain, found
+			return hostName, strings.ToLower(domainName), found
 		}
 	}
 

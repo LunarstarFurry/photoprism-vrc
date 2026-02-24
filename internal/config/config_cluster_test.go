@@ -483,6 +483,15 @@ func TestConfig_Cluster(t *testing.T) {
 		c.options.NodeName = ""
 		assert.Equal(t, "my-host-name-prod", c.NodeName())
 	})
+	t.Run("NodeNameNotOverriddenByClusterDomainDerivation", func(t *testing.T) {
+		c := NewConfig(CliTestContext())
+		c.options.NodeName = "smiling-ocelot"
+		c.options.ClusterDomain = ""
+		c.options.SiteUrl = "https://media.glowworm.com/i/smiling-ocelot/"
+
+		assert.Equal(t, "glowworm.com", c.ClusterDomain())
+		assert.Equal(t, "smiling-ocelot", c.NodeName())
+	})
 	t.Run("NodeRoleValues", func(t *testing.T) {
 		c := NewConfig(CliTestContext())
 
