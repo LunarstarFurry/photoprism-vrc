@@ -266,8 +266,8 @@ func (c *Config) OptionsYaml() string {
 	return fs.Abs(c.options.OptionsYaml)
 }
 
-// configPath resolves the config path name from the CLI context.
-func configPath(ctx *cli.Context) string {
+// resolveConfigPath resolves the config path name from the CLI context.
+func resolveConfigPath(ctx *cli.Context) string {
 	if dir := ctx.String("config-path"); dir != "" {
 		return fs.Abs(dir)
 	}
@@ -297,7 +297,7 @@ func defaultsYaml(ctx *cli.Context) string {
 		return fs.Abs(fileName)
 	}
 
-	fileName = fs.ConfigFilePath(configPath(ctx), "defaults", fs.ExtYml)
+	fileName = fs.ConfigFilePath(resolveConfigPath(ctx), "defaults", fs.ExtYml)
 
 	if fs.FileExistsNotEmpty(fileName) {
 		return fs.Abs(fileName)
