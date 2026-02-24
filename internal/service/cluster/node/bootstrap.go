@@ -654,7 +654,8 @@ func refreshNodeCredentials(c *config.Config, portal *url.URL) bool {
 		return false
 	}
 
-	id, secret, err := obtainNodeCredentialsViaRegister(c, portal, joinToken)
+	id, secret, nodeUUID, err := obtainNodeCredentialsViaRegister(c, portal, joinToken)
+
 	if err != nil {
 		log.Infof("cluster: failed to refresh credentials (%s)", clean.Error(err))
 		return false
@@ -666,13 +667,23 @@ func refreshNodeCredentials(c *config.Config, portal *url.URL) bool {
 	}
 
 	c.Options().NodeClientID = id
+
+	if rnd.IsUUID(nodeUUID) {
+		c.Options().NodeUUID = nodeUUID
+	}
+
 	updates := cluster.OptionsUpdate{}
+
 	if id != "" {
 		updates.SetNodeClientID(id)
 	}
 
+	if rnd.IsUUID(nodeUUID) {
+		updates.SetNodeUUID(nodeUUID)
+	}
+
 	if wrote, err := ApplyOptionsUpdate(c, updates); err != nil {
-		log.Warnf("cluster: failed to persist client id (%s)", clean.Error(err))
+		log.Warnf("cluster: failed to persist refreshed credentials (%s)", clean.Error(err))
 	} else if wrote {
 		if loadErr := c.Options().Load(c.OptionsYaml()); loadErr != nil {
 			log.Warnf("cluster: failed to reload options.yml after credential refresh (%s)", clean.Error(loadErr))
@@ -694,10 +705,10 @@ func isAuthError(err error) bool {
 }
 
 // obtainNodeCredentialsViaRegister calls the portal registration endpoint to
-// rotate the node secret and returns the new client ID and secret.
-func obtainNodeCredentialsViaRegister(c *config.Config, portal *url.URL, joinToken string) (string, string, error) {
+// rotate the node secret and returns the new client ID, secret, and node UUID.
+func obtainNodeCredentialsViaRegister(c *config.Config, portal *url.URL, joinToken string) (string, string, string, error) {
 	if portal == nil {
-		return "", "", fmt.Errorf("invalid portal url")
+		return "", "", "", fmt.Errorf("invalid portal url")
 	}
 
 	endpoint := *portal
@@ -706,40 +717,95 @@ func obtainNodeCredentialsViaRegister(c *config.Config, portal *url.URL, joinTok
 	payload := buildRegisterPayload(c)
 	payload.RotateSecret = true
 
-	body, _ := json.Marshal(payload)
-	req, _ := http.NewRequest(http.MethodPost, endpoint.String(), bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("Authorization", "Bearer "+joinToken)
+	for attempt := 0; attempt < 2; attempt++ {
+		body, _ := json.Marshal(payload)
+		req, _ := http.NewRequest(http.MethodPost, endpoint.String(), bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "application/json")
+		req.Header.Set("Authorization", "Bearer "+joinToken)
 
-	resp, err := newHTTPClient(cluster.BootstrapRegisterTimeout).Do(req)
-	if err != nil {
-		return "", "", err
-	}
-	defer func() {
-		if closeErr := resp.Body.Close(); closeErr != nil {
-			log.Debugf("cluster: %s (close register response body)", clean.Error(closeErr))
-		}
-	}()
+		resp, err := newHTTPClient(cluster.BootstrapRegisterTimeout).Do(req)
 
-	switch resp.StatusCode {
-	case http.StatusOK, http.StatusCreated, http.StatusConflict:
-		var regResp cluster.RegisterResponse
-		if err := json.NewDecoder(resp.Body).Decode(&regResp); err != nil {
-			return "", "", err
+		if err != nil {
+			return "", "", "", err
 		}
-		id := regResp.Node.ClientID
-		secret := ""
-		if regResp.Secrets != nil {
-			secret = regResp.Secrets.ClientSecret
+
+		status := resp.Status
+		statusCode := resp.StatusCode
+
+		closeRespBody := func() {
+			if closeErr := resp.Body.Close(); closeErr != nil {
+				log.Debugf("cluster: %s (close register response body)", clean.Error(closeErr))
+			}
 		}
-		if id == "" || secret == "" {
-			return "", "", fmt.Errorf("missing client credentials in response")
+
+		switch statusCode {
+		case http.StatusOK, http.StatusCreated:
+			var regResp cluster.RegisterResponse
+
+			if err = json.NewDecoder(resp.Body).Decode(&regResp); err != nil {
+				closeRespBody()
+				return "", "", "", err
+			}
+
+			closeRespBody()
+
+			id := regResp.Node.ClientID
+			secret := ""
+
+			if regResp.Secrets != nil {
+				secret = regResp.Secrets.ClientSecret
+			}
+
+			if id == "" || secret == "" {
+				return "", "", "", fmt.Errorf("missing client credentials in response")
+			}
+
+			return id, secret, rnd.SanitizeUUID(regResp.Node.UUID), nil
+		case http.StatusConflict:
+			errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+			closeRespBody()
+
+			// A stale local NodeUUID can trigger a conflict when no client credentials are
+			// available. Retry once without NodeUUID so the existing node can rotate secret.
+			if payload.NodeUUID != "" && attempt == 0 {
+				log.Infof("cluster: refresh conflict for node %s with UUID %s; retrying without node UUID", clean.Log(payload.NodeName), clean.Log(payload.NodeUUID))
+				payload.NodeUUID = ""
+				continue
+			}
+
+			return "", "", "", registerStatusError(status, errBody)
+		case http.StatusUnauthorized, http.StatusForbidden:
+			errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+			closeRespBody()
+			return "", "", "", registerStatusError(status, errBody)
+		default:
+			errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+			closeRespBody()
+			return "", "", "", registerStatusError(status, errBody)
 		}
-		return id, secret, nil
-	case http.StatusUnauthorized, http.StatusForbidden:
-		return "", "", fmt.Errorf("%s", resp.Status)
-	default:
-		return "", "", fmt.Errorf("%s", resp.Status)
 	}
+
+	return "", "", "", fmt.Errorf("credential refresh request failed")
+}
+
+// registerStatusError formats a readable status error with optional API detail text.
+func registerStatusError(status string, body []byte) error {
+	msg := strings.TrimSpace(string(body))
+
+	if msg == "" {
+		return fmt.Errorf("%s", status)
+	}
+
+	var payload struct {
+		Error string `json:"error"`
+	}
+
+	if err := json.Unmarshal(body, &payload); err == nil {
+		if s := strings.TrimSpace(payload.Error); s != "" {
+			return fmt.Errorf("%s: %s", status, s)
+		}
+	}
+
+	return fmt.Errorf("%s: %s", status, msg)
 }
