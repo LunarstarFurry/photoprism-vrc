@@ -28,6 +28,46 @@ var DefaultNodeRole = cluster.RoleInstance
 // DefaultJWTAllowedScopes lists default OAuth scopes for cluster-issued JWTs.
 var DefaultJWTAllowedScopes = "config cluster vision metrics"
 
+// SaveClusterOptionsUpdate persists a cluster options update to options.yml,
+// reloads in-memory options, and returns true when values changed.
+func (c *Config) SaveClusterOptionsUpdate(update cluster.OptionsUpdate) (bool, error) {
+	if c == nil || c.options == nil || update.IsZero() {
+		return false, nil
+	}
+
+	if err := validateClusterOptionsUpdate(update); err != nil {
+		return false, err
+	}
+
+	patch := Values{}
+	setOptionString(patch, "ClusterUUID", update.ClusterUUID)
+	setOptionString(patch, "ClusterCIDR", update.ClusterCIDR)
+	setOptionString(patch, "NodeClientID", update.NodeClientID)
+	setOptionString(patch, "JWKSUrl", update.JWKSUrl)
+	setOptionString(patch, "NodeUUID", update.NodeUUID)
+	setOptionString(patch, "DatabaseDriver", update.DatabaseDriver)
+	setOptionString(patch, "DatabaseDSN", update.DatabaseDSN)
+	setOptionString(patch, "DatabaseServer", update.DatabaseServer)
+	setOptionString(patch, "DatabaseName", update.DatabaseName)
+	setOptionString(patch, "DatabaseUser", update.DatabaseUser)
+	setOptionString(patch, "DatabasePassword", update.DatabasePassword)
+
+	return c.SaveOptionsPatch(patch)
+}
+
+// validateClusterOptionsUpdate validates cluster-managed option updates.
+func validateClusterOptionsUpdate(update cluster.OptionsUpdate) error {
+	if update.ClusterUUID != nil && !rnd.IsUUID(*update.ClusterUUID) {
+		return fmt.Errorf("invalid cluster UUID")
+	}
+
+	if update.NodeUUID != nil && !rnd.IsUUID(*update.NodeUUID) {
+		return fmt.Errorf("invalid node UUID")
+	}
+
+	return nil
+}
+
 // ClusterDomain returns the cluster DOMAIN (lowercase DNS name; 1–63 chars).
 func (c *Config) ClusterDomain() string {
 	if c.options.ClusterDomain != "" {

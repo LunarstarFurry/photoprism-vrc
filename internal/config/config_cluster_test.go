@@ -446,6 +446,52 @@ func TestConfig_Cluster(t *testing.T) {
 		assert.Error(t, err)
 		assert.False(t, wrote)
 	})
+	t.Run("SaveOptionsPatch", func(t *testing.T) {
+		tempCfg := t.TempDir()
+		ctx := CliTestContext()
+		assert.NoError(t, ctx.Set("config-path", tempCfg))
+		c := NewConfig(ctx)
+		c.options.ConfigPath = tempCfg
+		c.options.OptionsYaml = filepath.Join(tempCfg, "options.yml")
+
+		seed := map[string]any{
+			"Existing": "value",
+		}
+		b, err := yaml.Marshal(seed)
+		assert.NoError(t, err)
+		assert.NoError(t, os.WriteFile(c.OptionsYaml(), b, fs.ModeFile))
+
+		patch := Values{
+			"SiteUrl": "https://photos.example.com/",
+			"Public":  true,
+		}
+
+		wrote, err := c.SaveOptionsPatch(patch)
+		assert.NoError(t, err)
+		assert.True(t, wrote)
+
+		content, readErr := os.ReadFile(c.OptionsYaml())
+		assert.NoError(t, readErr)
+
+		var merged map[string]any
+		assert.NoError(t, yaml.Unmarshal(content, &merged))
+		assert.Equal(t, "value", merged["Existing"])
+		assert.Equal(t, "https://photos.example.com/", merged["SiteUrl"])
+		assert.Equal(t, true, merged["Public"])
+
+		wrote, err = c.SaveOptionsPatch(patch)
+		assert.NoError(t, err)
+		assert.False(t, wrote)
+	})
+	t.Run("SaveOptionsPatchEmpty", func(t *testing.T) {
+		c := NewConfig(CliTestContext())
+		c.options.ConfigPath = t.TempDir()
+		c.options.OptionsYaml = filepath.Join(c.options.ConfigPath, "options.yml")
+
+		wrote, err := c.SaveOptionsPatch(nil)
+		assert.NoError(t, err)
+		assert.False(t, wrote)
+	})
 	t.Run("JoinTokenFilePortal", func(t *testing.T) {
 		tempCfg := t.TempDir()
 		ctx := CliTestContext()

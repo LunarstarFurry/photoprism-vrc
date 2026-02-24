@@ -1,6 +1,6 @@
 # PhotoPrism® — Repository Guidelines
 
-**Last Updated:** February 23, 2026
+**Last Updated:** February 24, 2026
 
 ## Purpose
 
@@ -375,6 +375,7 @@ Note: Across our public documentation, official images, and in production, the c
 ### API & Config Changes
 
 - Respect precedence: `options.yml` overrides CLI/env values, which override defaults. When adding a new option, update `internal/config/options.go` (yaml/flag tags), register it in `internal/config/flags.go`, expose a getter, surface it in `*config.Report()`, and write generated values back to `options.yml` by setting `c.options.OptionsYaml` before persisting. Use `CliTestContext` in `internal/config/test.go` to exercise new flags.
+- For `options.yml` writes in Go code, prefer config-owned persistence helpers over ad-hoc YAML handling: use `Config.SaveOptionsPatch(...)` for generic merges and `Config.SaveClusterOptionsUpdate(...)` for cluster-managed metadata updates.
 - Use `pkg/fs.ConfigFilePath` when you need a config filename so existing `.yml` files remain valid and new installs can adopt `.yaml` transparently (the helper also covers other paired extensions such as `.toml`/`.tml`).
 - When touching configuration in Go code, use the public accessors on `*config.Config` (e.g. `Config.JWKSUrl()`, `Config.SetJWKSUrl()`, `Config.ClusterUUID()`) instead of mutating `Config.Options()` directly; reserve raw option tweaks for test fixtures only.
 - When introducing new metadata sources (e.g., `SrcOllama`, `SrcOpenAI`), define them in both `internal/entity/src.go` and the frontend lookup tables (`frontend/src/common/util.js`) so UI badges and server priorities stay aligned.

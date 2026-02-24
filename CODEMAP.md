@@ -1,6 +1,6 @@
 PhotoPrism — Backend CODEMAP
 
-**Last Updated:** February 23, 2026
+**Last Updated:** February 24, 2026
 
 Purpose
 - Give agents and contributors a fast, reliable map of where things live and how they fit together, so you can add features, fix bugs, and write tests without spelunking.
@@ -79,6 +79,9 @@ Configuration & Flags
   - Report current values: `internal/config/report.go` → surfaced by `photoprism show config` (alias `photoprism config --md`).
   - CLI commands catalog: `internal/commands/show_commands.go` → surfaced by `photoprism show commands` (Markdown by default; `--json` alternative; `--nested` optional tree; `--all` includes hidden commands/flags; nested `help` subcommands omitted).
 - Precedence: `defaults.yml` < CLI/env < `options.yml` (global options rule). See Agent Tips in `AGENTS.md`.
+- Config-owned persistence helpers:
+  - `Config.SaveOptionsPatch(...)` in `internal/config/config.go` for generic `options.yml` merge/write/reload.
+  - `Config.SaveClusterOptionsUpdate(...)` in `internal/config/config_cluster.go` for cluster metadata updates (`ClusterUUID`, `NodeUUID`, `NodeClientID`, DB fields, etc.).
 - Getters are grouped by topic, e.g. DB in `internal/config/config_db.go`, server in `config_server.go`, TLS in `config_tls.go`, etc.
 - Client Config (read-only)
   - Endpoint: GET `/api/v1/config` (see `internal/api/api_client_config.go`).
@@ -158,7 +161,7 @@ Common How‑Tos
   - Register CLI flag/env in `internal/config/flags.go` via `EnvVars(...)`
   - Expose a getter (e.g., in `config_server.go` or topic file)
   - Append to `rows` in `*config.Report()` after the same option as in `options.go`
-  - If value must persist, write back to `options.yml` and reload into memory
+  - If value must persist, write back to `options.yml` and reload into memory (prefer `Config.SaveOptionsPatch(...)` and related config-owned helpers over ad-hoc YAML logic).
   - When you need the path to defaults/options/settings files, call `pkg/fs.ConfigFilePath` so `.yml` and `.yaml` stay interchangeable.
   - Tests: cover CLI/env/file precedence (see `internal/config/test.go` helpers)
 
