@@ -269,6 +269,50 @@ func TestObtainNodeCredentialsViaRegister_ConflictIncludesPortalError(t *testing
 	}
 }
 
+func TestRefreshNodeCredentials_ClearsStaleInlineSecretAfterReload(t *testing.T) {
+	const staleInlineSecret = "STALE_OLD_SECRET"
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/cluster/nodes/register" {
+			http.NotFound(w, r)
+			return
+		}
+
+		var req cluster.RegisterRequest
+		assert.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+		assert.True(t, req.RotateSecret)
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(cluster.RegisterResponse{
+			Node: cluster.Node{
+				ClientID: cluster.ExampleClientID,
+				UUID:     rnd.UUIDv7(),
+			},
+			Secrets: &cluster.RegisterSecrets{ClientSecret: cluster.ExampleClientSecret},
+		})
+	}))
+	defer srv.Close()
+
+	c := newBootstrapTestConfig(t, "bootstrap-refresh-inline-secret")
+	c.Options().NodeName = "inline-secret-node"
+	c.Options().NodeRole = cluster.RoleInstance
+	c.Options().JoinToken = cluster.ExampleJoinToken
+
+	assert.NoError(t, fs.MkdirAll(filepath.Dir(c.OptionsYaml())))
+	assert.NoError(t, os.WriteFile(c.OptionsYaml(), []byte("NodeClientSecret: "+staleInlineSecret+"\n"), fs.ModeFile))
+	assert.NoError(t, c.Options().Load(c.OptionsYaml()))
+	assert.Equal(t, staleInlineSecret, c.Options().NodeClientSecret)
+	assert.Equal(t, staleInlineSecret, c.NodeClientSecret())
+
+	parsed, err := url.Parse(srv.URL)
+	assert.NoError(t, err)
+	assert.True(t, refreshNodeCredentials(c, parsed))
+
+	assert.Equal(t, "", c.Options().NodeClientSecret)
+	assert.Equal(t, cluster.ExampleClientSecret, c.NodeClientSecret())
+}
+
 func TestRegister_AllowsHTTPPortalNonLoopback(t *testing.T) {
 	var hits int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

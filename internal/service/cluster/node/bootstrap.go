@@ -666,6 +666,8 @@ func refreshNodeCredentials(c *config.Config, portal *url.URL) bool {
 		return false
 	}
 
+	// Always prefer the refreshed secret from file over potentially stale inline config.
+	c.Options().NodeClientSecret = ""
 	c.Options().NodeClientID = id
 
 	if rnd.IsUUID(nodeUUID) {
@@ -689,6 +691,9 @@ func refreshNodeCredentials(c *config.Config, portal *url.URL) bool {
 			log.Warnf("cluster: failed to reload options.yml after credential refresh (%s)", clean.Error(loadErr))
 		}
 	}
+
+	// Keep inline secret empty after reload so NodeClientSecret() reads the fresh secret file.
+	c.Options().NodeClientSecret = ""
 
 	return true
 }

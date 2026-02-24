@@ -230,7 +230,8 @@ func ClusterNodesRegister(router *gin.RouterGroup) {
 				}
 			}
 
-			shouldProvisionDB := req.RotateDatabase || n.Database == nil || n.Database.Name == ""
+			// Provision or rotate database credentials only when explicitly requested.
+			shouldProvisionDB := req.RotateDatabase
 
 			var creds provisioner.Credentials
 			haveCreds := false
