@@ -119,6 +119,133 @@ func TestStaticRoutesWebOverlay(t *testing.T) {
 		r.ServeHTTP(w, req)
 		assert.Equal(t, http.StatusNotFound, w.Code)
 	})
+	t.Run("HiddenAndSpecialPathsBlocked", func(t *testing.T) {
+		conf := config.NewMinimalTestConfig(t.TempDir())
+		webDir := conf.WebStoragePath()
+		require.NoError(t, os.MkdirAll(filepath.Join(webDir, "foo"), fs.ModeDir))
+		require.NoError(t, os.MkdirAll(filepath.Join(webDir, "__MACOSX"), fs.ModeDir))
+		require.NoError(t, os.WriteFile(filepath.Join(webDir, "env"), []byte("public-env"), fs.ModeFile))
+		require.NoError(t, os.WriteFile(filepath.Join(webDir, "@secrets.txt"), []byte("secret"), fs.ModeFile))
+		require.NoError(t, os.WriteFile(filepath.Join(webDir, "__MACOSX", "test.txt"), []byte("meta"), fs.ModeFile))
+		require.NoError(t, os.WriteFile(filepath.Join(webDir, "foo", ".env"), []byte("hidden"), fs.ModeFile))
+		require.NoError(t, os.WriteFile(filepath.Join(webDir, "public.txt"), []byte("ok"), fs.ModeFile))
+
+		r := gin.New()
+		r.LoadHTMLFiles(conf.TemplateFiles()...)
+		registerStaticRoutes(r, conf)
+
+		blocked := []string{
+			"/.env",
+			"/.htaccess",
+			"/foo/.env",
+			"/@secrets.txt",
+			"/__MACOSX/test.txt",
+		}
+
+		for _, filePath := range blocked {
+			w := httptest.NewRecorder()
+			req := httptest.NewRequest(header.MethodGet, filePath, nil)
+			r.ServeHTTP(w, req)
+			assert.Equal(t, http.StatusNotFound, w.Code, filePath)
+		}
+
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(header.MethodGet, "/public.txt", nil)
+		r.ServeHTTP(w, req)
+		assert.Equal(t, http.StatusOK, w.Code)
+		assert.Equal(t, "ok", w.Body.String())
+	})
+	t.Run("SensitiveNamesBlocked", func(t *testing.T) {
+		conf := config.NewMinimalTestConfig(t.TempDir())
+		webDir := conf.WebStoragePath()
+		require.NoError(t, os.MkdirAll(filepath.Join(webDir, "node", "secrets"), fs.ModeDir))
+		require.NoError(t, os.MkdirAll(filepath.Join(webDir, "docs"), fs.ModeDir))
+		require.NoError(t, os.WriteFile(filepath.Join(webDir, "options.yml"), []byte("blocked"), fs.ModeFile))
+		require.NoError(t, os.WriteFile(filepath.Join(webDir, "Options.YML"), []byte("blocked"), fs.ModeFile))
+		require.NoError(t, os.WriteFile(filepath.Join(webDir, "config.yaml"), []byte("blocked"), fs.ModeFile))
+		require.NoError(t, os.WriteFile(filepath.Join(webDir, "id_rsa"), []byte("blocked"), fs.ModeFile))
+		require.NoError(t, os.WriteFile(filepath.Join(webDir, "docs", "client_secret"), []byte("blocked"), fs.ModeFile))
+		require.NoError(t, os.WriteFile(filepath.Join(webDir, "node", "secrets", "token.txt"), []byte("blocked"), fs.ModeFile))
+		require.NoError(t, os.WriteFile(filepath.Join(webDir, "docs", "public.txt"), []byte("ok"), fs.ModeFile))
+
+		r := gin.New()
+		r.LoadHTMLFiles(conf.TemplateFiles()...)
+		registerStaticRoutes(r, conf)
+
+		blocked := []string{
+			"/options.yml",
+			"/Options.YML",
+			"/config.yaml",
+			"/id_rsa",
+			"/docs/client_secret",
+			"/node/secrets/token.txt",
+		}
+
+		for _, filePath := range blocked {
+			w := httptest.NewRecorder()
+			req := httptest.NewRequest(header.MethodGet, filePath, nil)
+			r.ServeHTTP(w, req)
+			assert.Equal(t, http.StatusNotFound, w.Code, filePath)
+		}
+
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(header.MethodGet, "/docs/public.txt", nil)
+		r.ServeHTTP(w, req)
+		assert.Equal(t, http.StatusOK, w.Code)
+		assert.Equal(t, "ok", w.Body.String())
+	})
+	t.Run("SymlinkEscapeBlocked", func(t *testing.T) {
+		conf := config.NewMinimalTestConfig(t.TempDir())
+		webDir := conf.WebStoragePath()
+		outsideDir := filepath.Join(t.TempDir(), "outside")
+		require.NoError(t, os.MkdirAll(webDir, fs.ModeDir))
+		require.NoError(t, os.MkdirAll(outsideDir, fs.ModeDir))
+		require.NoError(t, os.WriteFile(filepath.Join(webDir, "public.txt"), []byte("ok"), fs.ModeFile))
+		require.NoError(t, os.WriteFile(filepath.Join(outsideDir, "secret.txt"), []byte("secret"), fs.ModeFile))
+
+		if err := os.Symlink(filepath.Join(outsideDir, "secret.txt"), filepath.Join(webDir, "leak.txt")); err != nil {
+			t.Skipf("symlink setup failed: %v", err)
+		}
+
+		r := gin.New()
+		r.LoadHTMLFiles(conf.TemplateFiles()...)
+		registerStaticRoutes(r, conf)
+
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(header.MethodGet, "/public.txt", nil)
+		r.ServeHTTP(w, req)
+		assert.Equal(t, http.StatusOK, w.Code)
+		assert.Equal(t, "ok", w.Body.String())
+
+		w = httptest.NewRecorder()
+		req = httptest.NewRequest(header.MethodGet, "/leak.txt", nil)
+		r.ServeHTTP(w, req)
+		assert.Equal(t, http.StatusNotFound, w.Code)
+	})
+	t.Run("EncodedAndAmbiguousPathsBlocked", func(t *testing.T) {
+		conf := config.NewMinimalTestConfig(t.TempDir())
+		webDir := conf.WebStoragePath()
+		require.NoError(t, os.MkdirAll(filepath.Join(webDir, "docs"), fs.ModeDir))
+		require.NoError(t, os.WriteFile(filepath.Join(webDir, "env"), []byte("public-env"), fs.ModeFile))
+		require.NoError(t, os.WriteFile(filepath.Join(webDir, "docs", IndexHtml), []byte("docs"), fs.ModeFile))
+
+		r := gin.New()
+		r.LoadHTMLFiles(conf.TemplateFiles()...)
+		registerStaticRoutes(r, conf)
+
+		blocked := []string{
+			"/%2eenv",
+			"/docs//index.html",
+			"/docs/../env",
+		}
+
+		for _, filePath := range blocked {
+			w := httptest.NewRecorder()
+			req := httptest.NewRequest(header.MethodGet, filePath, nil)
+			r.ServeHTTP(w, req)
+			assert.Equal(t, http.StatusNotFound, w.Code, filePath)
+		}
+	})
 }
 
 func TestWebAppRoutes(t *testing.T) {
