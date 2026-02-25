@@ -1,6 +1,6 @@
 # PhotoPrism® — Repository Guidelines
 
-**Last Updated:** February 24, 2026
+**Last Updated:** February 25, 2026
 
 ## Purpose
 
@@ -208,7 +208,7 @@ Note: Across our public documentation, official images, and in production, the c
 ### Playwright MCP Usage
 
 - **Endpoint & Navigation** — Playwright MCP is preconfigured to reach the dev server at `http://localhost:2342/`.
-  Use `playwright__browser_navigate` to open the login route under the configured frontend URI (default `/library/login`), sign in, and then call `playwright__browser_take_screenshot` to capture the page state.
+  Use `playwright__browser_navigate` to open the login route under the configured frontend URI (default `/library/login` for CE/Plus/Pro, `/portal/admin/login` for Portal), sign in, and then call `playwright__browser_take_screenshot` to capture the page state.
 - **Viewport Defaults** — Desktop sessions open with a `1280×900` viewport by default.
   Use `playwright__browser_resize` if the viewport is not preconfigured or you need to adjust it mid-run.
 - **Mobile Workflows** — When testing responsive layouts, use the `playwright_mobile` server (for example, `playwright_mobile__browser_navigate`).
@@ -352,7 +352,7 @@ Note: Across our public documentation, official images, and in production, the c
 - `PhotoFixtures.Get()` and similar helpers return value copies; when a test needs the database-backed row (with associations preloaded), re-query by UID/ID using helpers like `entity.FindPhoto(fixture)` so updates observe persisted IDs and in-memory caches stay coherent.
 - For slimmer tests that only need config objects, prefer the new helpers in `internal/config/test.go`: `NewMinimalTestConfig(t.TempDir())` when no database is needed, or `NewMinimalTestConfigWithDb("<pkg>", t.TempDir())` to spin up an isolated SQLite schema without seeding all fixtures.
 - When you need illustrative credentials (join tokens, client IDs/secrets, etc.), reuse the shared `Example*` constants (see `internal/service/cluster/examples.go`) so tests, docs, and examples stay consistent.
-- Hidden error UI checks for the hidden route under the frontend URI (default `/library/hidden`) require both `files.file_error` and `photos.photo_quality = -1`; hidden searches are quality-gated, so setting only `file_error` will not surface the row in Hidden results.
+- Hidden error UI checks for the hidden route under the frontend URI (default `/library/hidden` for CE/Plus/Pro, `/portal/admin/hidden` for Portal) require both `files.file_error` and `photos.photo_quality = -1`; hidden searches are quality-gated, so setting only `file_error` will not surface the row in Hidden results.
 
 ### Roles & ACL
 
