@@ -17,6 +17,7 @@ import (
 	"github.com/tidwall/gjson"
 
 	"github.com/photoprism/photoprism/internal/config"
+	"github.com/photoprism/photoprism/internal/entity"
 	"github.com/photoprism/photoprism/internal/service/cluster"
 	"github.com/photoprism/photoprism/internal/service/cluster/provisioner"
 	reg "github.com/photoprism/photoprism/internal/service/cluster/registry"
@@ -303,6 +304,35 @@ func TestClusterNodesRegister(t *testing.T) {
 		body := `{"NodeName":"pp-victim","RotateSecret":true}`
 		r := AuthenticatedRequestWithBody(app, http.MethodPost, "/api/v1/cluster/nodes/register", body, token)
 		assert.Equal(t, http.StatusConflict, r.Code)
+		assert.NotContains(t, r.Body.String(), "\"ClientSecret\"")
+		assert.NotContains(t, r.Body.String(), "\"Password\"")
+	})
+	t.Run("ExistingNodeMutationRequiresWriteScope", func(t *testing.T) {
+		app, router, conf := NewApiTest()
+		enablePortalAPIs(t, conf)
+		conf.Options().JoinToken = cluster.ExampleJoinToken
+		ClusterNodesRegister(router)
+
+		regy, err := reg.NewClientRegistryWithConfig(conf)
+		assert.NoError(t, err)
+
+		node := &reg.Node{Node: cluster.Node{UUID: rnd.UUIDv7(), Name: "pp-scope-check", Role: cluster.RoleInstance}}
+		assert.NoError(t, regy.Put(node))
+		node, err = regy.RotateSecret(node.UUID)
+		if !assert.NoError(t, err) || !assert.NotNil(t, node) {
+			return
+		}
+
+		client := entity.FindClientByUID(node.ClientID)
+		if assert.NotNil(t, client) {
+			client.SetScope("metrics")
+			assert.NoError(t, client.Save())
+		}
+
+		// Tokens that do not include cluster permissions must be denied.
+		token := oauthNodeAccessToken(t, app, router, conf, node.ClientID, node.ClientSecret)
+		r := AuthenticatedRequestWithBody(app, http.MethodPost, "/api/v1/cluster/nodes/register", `{"NodeName":"pp-scope-check","SiteUrl":"https://scope.example.com"}`, token)
+		assert.Equal(t, http.StatusForbidden, r.Code)
 	})
 	t.Run("RotateDatabaseWithJoinTokenReturnsConflict", func(t *testing.T) {
 		app, router, conf := NewApiTest()
@@ -491,6 +521,10 @@ func AuthenticatedRequestWithBodyAndIP(r http.Handler, method, path, body string
 }
 
 func oauthNodeAccessToken(t testing.TB, app http.Handler, router *gin.RouterGroup, conf *config.Config, clientID, clientSecret string) string {
+	return oauthNodeAccessTokenWithScope(t, app, router, conf, clientID, clientSecret, "cluster")
+}
+
+func oauthNodeAccessTokenWithScope(t testing.TB, app http.Handler, router *gin.RouterGroup, conf *config.Config, clientID, clientSecret, scope string) string {
 	t.Helper()
 
 	prevAuthMode := conf.AuthMode()
@@ -505,7 +539,7 @@ func oauthNodeAccessToken(t testing.TB, app http.Handler, router *gin.RouterGrou
 		"grant_type":    {authn.GrantClientCredentials.String()},
 		"client_id":     {clientID},
 		"client_secret": {clientSecret},
-		"scope":         {"cluster"},
+		"scope":         {scope},
 	}
 
 	req, _ := http.NewRequest(http.MethodPost, "/api/v1/oauth/token", strings.NewReader(data.Encode()))

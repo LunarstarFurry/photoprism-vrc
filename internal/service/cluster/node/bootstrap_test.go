@@ -131,6 +131,12 @@ func TestRegister_PersistSecretAndDB(t *testing.T) {
 	assert.NoError(t, yaml.Unmarshal(content, &persisted))
 	_, hasInlineSecret := persisted["NodeClientSecret"]
 	assert.False(t, hasInlineSecret)
+
+	info, statErr := os.Stat(c.NodeClientSecretFile())
+	assert.NoError(t, statErr)
+	if statErr == nil {
+		assert.Equal(t, fs.ModeSecretFile, info.Mode().Perm())
+	}
 }
 
 func TestRegisterAuthToken_UsesJoinTokenWithoutNodeCredentials(t *testing.T) {
@@ -159,6 +165,9 @@ func TestRegisterAuthToken_UsesOAuthWithNodeCredentials(t *testing.T) {
 			"Basic "+base64.StdEncoding.EncodeToString([]byte(cluster.ExampleClientID+":"+cluster.ExampleClientSecret)),
 			r.Header.Get("Authorization"),
 		)
+		assert.NoError(t, r.ParseForm())
+		assert.Equal(t, "client_credentials", r.Form.Get("grant_type"))
+		assert.Equal(t, "cluster", r.Form.Get("scope"))
 
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"access_token":"oauth-node-token","token_type":"Bearer"}`))

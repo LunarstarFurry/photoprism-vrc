@@ -28,6 +28,8 @@ import (
 
 var log = event.Log
 
+const bootstrapOAuthScope = "cluster"
+
 // init registers the cluster node bootstrap extension so it runs before the
 // database connection is established.
 func init() {
@@ -215,7 +217,7 @@ func registerAuthToken(c *config.Config, portal *url.URL, joinToken string) (str
 	}
 
 	if id, secret := strings.TrimSpace(c.NodeClientID()), strings.TrimSpace(c.NodeClientSecret()); id != "" && secret != "" {
-		token, err := oauthAccessToken(portal, id, secret)
+		token, err := oauthAccessToken(portal, id, secret, bootstrapOAuthScope)
 		if err != nil {
 			return "", fmt.Errorf("portal access token request failed: %w", err)
 		}
@@ -473,7 +475,7 @@ func syncNodeTheme(c *config.Config, portal *url.URL, registerResp *cluster.Regi
 	bearer := ""
 	var tokenErr error
 	if id, secret := strings.TrimSpace(c.NodeClientID()), strings.TrimSpace(c.NodeClientSecret()); id != "" && secret != "" {
-		if t, err := oauthAccessToken(portal, id, secret); err != nil {
+		if t, err := oauthAccessToken(portal, id, secret, bootstrapOAuthScope); err != nil {
 			tokenErr = err
 			log.Infof("config: portal access token request failed (%s)", clean.Error(err))
 		} else {
@@ -582,7 +584,7 @@ func activateNodeThemeIfPresent(c *config.Config) {
 }
 
 // oauthAccessToken requests an OAuth access token via client_credentials using Basic auth.
-func oauthAccessToken(portal *url.URL, clientID, clientSecret string) (string, error) {
+func oauthAccessToken(portal *url.URL, clientID, clientSecret, scope string) (string, error) {
 	if portal == nil {
 		return "", fmt.Errorf("invalid portal url")
 	}
@@ -592,6 +594,7 @@ func oauthAccessToken(portal *url.URL, clientID, clientSecret string) (string, e
 
 	form := url.Values{}
 	form.Set("grant_type", "client_credentials")
+	form.Set("scope", clean.Scope(scope))
 
 	req, _ := http.NewRequest(http.MethodPost, tokenURL.String(), strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")

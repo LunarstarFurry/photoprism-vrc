@@ -86,10 +86,14 @@ func TestClusterPermissions(t *testing.T) {
 
 		ClusterSummary(router)
 		ClusterMetrics(router)
+		ClusterGetTheme(router)
 		r := AuthenticatedRequest(app, http.MethodGet, "/api/v1/cluster", token)
 		assert.Equal(t, http.StatusForbidden, r.Code)
 
 		r = AuthenticatedRequest(app, http.MethodGet, "/api/v1/cluster/metrics", token)
+		assert.Equal(t, http.StatusForbidden, r.Code)
+
+		r = AuthenticatedRequest(app, http.MethodGet, "/api/v1/cluster/theme", token)
 		assert.Equal(t, http.StatusForbidden, r.Code)
 	})
 }

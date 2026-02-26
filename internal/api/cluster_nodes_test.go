@@ -127,3 +127,16 @@ func TestClusterGetNode_UUIDValidation(t *testing.T) {
 	r = PerformRequest(app, http.MethodGet, "/api/v1/cluster/nodes/"+string(longID))
 	assert.Equal(t, http.StatusNotFound, r.Code)
 }
+
+func TestClusterUpdateNode_UUIDValidation(t *testing.T) {
+	app, router, conf := NewApiTest()
+	enablePortalAPIs(t, conf)
+
+	ClusterUpdateNode(router)
+
+	r := PerformRequestWithBody(app, http.MethodPatch, "/api/v1/cluster/nodes/bad_id", `{"SiteUrl":"https://photos.example.com"}`)
+	assert.Equal(t, http.StatusNotFound, r.Code)
+
+	r = PerformRequestWithBody(app, http.MethodPatch, "/api/v1/cluster/nodes/BadID", `{"SiteUrl":"https://photos.example.com"}`)
+	assert.Equal(t, http.StatusNotFound, r.Code)
+}
