@@ -140,7 +140,7 @@ func Start(ctx context.Context, conf *config.Config) {
 			if !txt.Bool(unixSocket.Query().Get("force")) {
 				Fail("server: %s socket %s already exists", clean.Log(unixSocket.Scheme), clean.Log(unixSocket.Path))
 				return
-			} else if removeErr := os.Remove(unixSocket.Path); removeErr != nil {
+			} else if removeErr := os.Remove(unixSocket.Path); removeErr != nil { //nolint:gosec // unixSocket.Path is parsed/validated in config.HttpSocket().
 				Fail("server: %s socket %s already exists and cannot be deleted", clean.Log(unixSocket.Scheme), clean.Log(unixSocket.Path))
 				return
 			}
@@ -157,7 +157,7 @@ func Start(ctx context.Context, conf *config.Config) {
 			// Update socket permissions?
 			if mode := unixSocket.Query().Get("mode"); mode == "" {
 				// Skip, no socket mode was specified.
-			} else if modeErr := os.Chmod(unixSocket.Path, fs.ParseMode(mode, fs.ModeSocket)); modeErr != nil {
+			} else if modeErr := os.Chmod(unixSocket.Path, fs.ParseMode(mode, fs.ModeSocket)); modeErr != nil { //nolint:gosec // unixSocket.Path is parsed/validated in config.HttpSocket().
 				log.Warnf(
 					"server: failed to change permissions of %s socket %s (%s)",
 					clean.Log(unixSocket.Scheme),

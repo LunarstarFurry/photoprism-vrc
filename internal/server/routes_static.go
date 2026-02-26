@@ -16,6 +16,7 @@ import (
 )
 
 const (
+	// IndexHtml is the default frontend entrypoint file name.
 	IndexHtml = "index.html"
 )
 
