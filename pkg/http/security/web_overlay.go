@@ -11,21 +11,41 @@ import (
 // overlayBlockedFileNames lists sensitive file base names that must never be
 // served by the web overlay, even when present under /storage/web.
 var overlayBlockedFileNames = map[string]struct{}{
-	"client_secret":  {},
-	"config.yaml":    {},
-	"config.yml":     {},
 	"id_ed25519":     {},
 	"id_ed25519.pub": {},
 	"id_rsa":         {},
 	"id_rsa.pub":     {},
+	"config.toml":    {},
+	"config.yaml":    {},
+	"config.yml":     {},
+	"defaults.yaml":  {},
+	"defaults.yml":   {},
 	"options.yaml":   {},
 	"options.yml":    {},
+	"hub.yml":        {},
+	"hub.yaml":       {},
+	"auth.json":      {},
+	"join_token":     {},
+	"client_secret":  {},
+}
+
+// overlayBlockedFileExt lists sensitive file extensions that must never be
+// served by the web overlay, even when present under /storage/web.
+var overlayBlockedFileExt = map[string]struct{}{
+	".key":  {},
+	".rsa":  {},
+	".jwk":  {},
+	".pem":  {},
+	".sql":  {},
+	".toml": {},
 }
 
 // overlayBlockedPathPrefixes lists sensitive slash paths rooted under the
 // overlay tree that must always be denied (path-prefix match).
 var overlayBlockedPathPrefixes = []string{
 	"node/secrets",
+	"config/portal",
+	"config/certificates",
 }
 
 // OverlayHasAmbiguousPath returns true when a request path is unsafe due to
@@ -109,11 +129,19 @@ func OverlayPathBlocked(webPath string) bool {
 	}
 
 	lowerPath := strings.ToLower(relPath)
+	lowerBase := path.Base(lowerPath)
 
-	if _, blocked := overlayBlockedFileNames[path.Base(lowerPath)]; blocked {
+	// Block requests for sensitive file names like "auth.json".
+	if _, blocked := overlayBlockedFileNames[lowerBase]; blocked {
 		return true
 	}
 
+	// Block file extensions commonly used for private keys or backups.
+	if _, blocked := overlayBlockedFileExt[path.Ext(lowerBase)]; blocked {
+		return true
+	}
+
+	// Additionally check for sensitive path prefixes that should not be served.
 	for _, prefix := range overlayBlockedPathPrefixes {
 		if lowerPath == prefix || strings.HasPrefix(lowerPath, prefix+"/") {
 			return true

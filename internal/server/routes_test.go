@@ -159,13 +159,24 @@ func TestStaticRoutesWebOverlay(t *testing.T) {
 		conf := config.NewMinimalTestConfig(t.TempDir())
 		webDir := conf.WebStoragePath()
 		require.NoError(t, os.MkdirAll(filepath.Join(webDir, "node", "secrets"), fs.ModeDir))
+		require.NoError(t, os.MkdirAll(filepath.Join(webDir, "config", "portal"), fs.ModeDir))
+		require.NoError(t, os.MkdirAll(filepath.Join(webDir, "config", "certificates"), fs.ModeDir))
+		require.NoError(t, os.MkdirAll(filepath.Join(webDir, "tls"), fs.ModeDir))
+		require.NoError(t, os.MkdirAll(filepath.Join(webDir, "db"), fs.ModeDir))
 		require.NoError(t, os.MkdirAll(filepath.Join(webDir, "docs"), fs.ModeDir))
 		require.NoError(t, os.WriteFile(filepath.Join(webDir, "options.yml"), []byte("blocked"), fs.ModeFile))
 		require.NoError(t, os.WriteFile(filepath.Join(webDir, "Options.YML"), []byte("blocked"), fs.ModeFile))
 		require.NoError(t, os.WriteFile(filepath.Join(webDir, "config.yaml"), []byte("blocked"), fs.ModeFile))
 		require.NoError(t, os.WriteFile(filepath.Join(webDir, "id_rsa"), []byte("blocked"), fs.ModeFile))
+		require.NoError(t, os.WriteFile(filepath.Join(webDir, "auth.json"), []byte("blocked"), fs.ModeFile))
+		require.NoError(t, os.WriteFile(filepath.Join(webDir, "join_token"), []byte("blocked"), fs.ModeFile))
+		require.NoError(t, os.WriteFile(filepath.Join(webDir, "tls", "server.pem"), []byte("blocked"), fs.ModeFile))
+		require.NoError(t, os.WriteFile(filepath.Join(webDir, "db", "dump.sql"), []byte("blocked"), fs.ModeFile))
+		require.NoError(t, os.WriteFile(filepath.Join(webDir, "docs", "public.toml"), []byte("blocked"), fs.ModeFile))
 		require.NoError(t, os.WriteFile(filepath.Join(webDir, "docs", "client_secret"), []byte("blocked"), fs.ModeFile))
 		require.NoError(t, os.WriteFile(filepath.Join(webDir, "node", "secrets", "token.txt"), []byte("blocked"), fs.ModeFile))
+		require.NoError(t, os.WriteFile(filepath.Join(webDir, "config", "portal", "options.yml"), []byte("blocked"), fs.ModeFile))
+		require.NoError(t, os.WriteFile(filepath.Join(webDir, "config", "certificates", "fullchain.pem"), []byte("blocked"), fs.ModeFile))
 		require.NoError(t, os.WriteFile(filepath.Join(webDir, "docs", "public.txt"), []byte("ok"), fs.ModeFile))
 
 		r := gin.New()
@@ -177,8 +188,15 @@ func TestStaticRoutesWebOverlay(t *testing.T) {
 			"/Options.YML",
 			"/config.yaml",
 			"/id_rsa",
+			"/auth.json",
+			"/join_token",
+			"/tls/server.pem",
+			"/db/dump.sql",
+			"/docs/public.toml",
 			"/docs/client_secret",
 			"/node/secrets/token.txt",
+			"/config/portal/options.yml",
+			"/config/certificates/fullchain.pem",
 		}
 
 		for _, filePath := range blocked {

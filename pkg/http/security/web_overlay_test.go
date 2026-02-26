@@ -75,7 +75,14 @@ func TestOverlayPathBlocked(t *testing.T) {
 		{name: "SpecialDirBlocked", webPath: "__MACOSX/test.txt", blocked: true},
 		{name: "BlockedByName", webPath: "options.yml", blocked: true},
 		{name: "BlockedByNameCaseInsensitive", webPath: "Options.YML", blocked: true},
+		{name: "BlockedByNameAuthJson", webPath: "auth.json", blocked: true},
+		{name: "BlockedByNameJoinToken", webPath: "join_token", blocked: true},
+		{name: "BlockedByExtensionPem", webPath: "tls/server.pem", blocked: true},
+		{name: "BlockedByExtensionToml", webPath: "docs/public.toml", blocked: true},
+		{name: "BlockedByExtensionSQL", webPath: "backup/database.sql", blocked: true},
 		{name: "BlockedByPrefix", webPath: "node/secrets/token.txt", blocked: true},
+		{name: "BlockedByPrefixConfigPortal", webPath: "config/portal/options.yml", blocked: true},
+		{name: "BlockedByPrefixCertificates", webPath: "config/certificates/fullchain.pem", blocked: true},
 	}
 
 	for _, tc := range tests {
