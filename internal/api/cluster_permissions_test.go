@@ -11,7 +11,6 @@ import (
 	"github.com/tidwall/gjson"
 
 	"github.com/photoprism/photoprism/internal/config"
-	"github.com/photoprism/photoprism/internal/service/cluster"
 	"github.com/photoprism/photoprism/pkg/authn"
 	"github.com/photoprism/photoprism/pkg/http/header"
 )
@@ -19,7 +18,7 @@ import (
 func TestClusterPermissions(t *testing.T) {
 	t.Run("UnauthorizedWhenPublicDisabled", func(t *testing.T) {
 		app, router, conf := NewApiTest()
-		conf.Options().NodeRole = cluster.RolePortal
+		enablePortalAPIs(t, conf)
 
 		// Disable public mode so Auth requires a session.
 		conf.SetAuthMode(config.AuthModePasswd)
@@ -36,7 +35,7 @@ func TestClusterPermissions(t *testing.T) {
 	})
 	t.Run("ForbiddenFromCDN", func(t *testing.T) {
 		app, router, conf := NewApiTest()
-		conf.Options().NodeRole = cluster.RolePortal
+		enablePortalAPIs(t, conf)
 
 		ClusterListNodes(router)
 		ClusterMetrics(router)
@@ -50,7 +49,7 @@ func TestClusterPermissions(t *testing.T) {
 	})
 	t.Run("AdminCanAccess", func(t *testing.T) {
 		app, router, conf := NewApiTest()
-		conf.Options().NodeRole = cluster.RolePortal
+		enablePortalAPIs(t, conf)
 		ClusterSummary(router)
 		ClusterMetrics(router)
 		token := AuthenticateAdmin(app, router)
@@ -65,7 +64,7 @@ func TestClusterPermissions(t *testing.T) {
 
 	t.Run("ClientInsufficientScope", func(t *testing.T) {
 		app, router, conf := NewApiTest()
-		conf.Options().NodeRole = cluster.RolePortal
+		enablePortalAPIs(t, conf)
 		conf.SetAuthMode(config.AuthModePasswd)
 		defer conf.SetAuthMode(config.AuthModePublic)
 

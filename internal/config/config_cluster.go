@@ -372,8 +372,8 @@ func (c *Config) NodeRole() string {
 	}
 
 	switch role := cluster.NormalizeNodeRole(c.options.NodeRole); role {
-	case cluster.RolePortal, cluster.RoleInstance, cluster.RoleService:
-		return string(role)
+	case cluster.RoleInstance, cluster.RoleService:
+		return role
 	default:
 		return DefaultNodeRole
 	}

@@ -35,7 +35,7 @@ func TestClusterNodesRegister(t *testing.T) {
 	// Register with existing ClientID requires ClientSecret
 	t.Run("ExistingClientRequiresSecret", func(t *testing.T) {
 		app, router, conf := NewApiTest()
-		conf.Options().NodeRole = cluster.RolePortal
+		enablePortalAPIs(t, conf)
 		conf.Options().JoinToken = cluster.ExampleJoinToken
 		ClusterNodesRegister(router)
 
@@ -66,7 +66,7 @@ func TestClusterNodesRegister(t *testing.T) {
 	})
 	t.Run("MissingToken", func(t *testing.T) {
 		app, router, conf := NewApiTest()
-		conf.Options().NodeRole = cluster.RolePortal
+		enablePortalAPIs(t, conf)
 		ClusterNodesRegister(router)
 
 		r := PerformRequestWithBody(app, http.MethodPost, "/api/v1/cluster/nodes/register", `{"NodeName":"pp-node-01"}`)
@@ -74,7 +74,7 @@ func TestClusterNodesRegister(t *testing.T) {
 	})
 	t.Run("ForbiddenFromCDN", func(t *testing.T) {
 		app, router, conf := NewApiTest()
-		conf.Options().NodeRole = cluster.RolePortal
+		enablePortalAPIs(t, conf)
 		conf.Options().JoinToken = cluster.ExampleJoinToken
 		ClusterNodesRegister(router)
 
@@ -90,7 +90,7 @@ func TestClusterNodesRegister(t *testing.T) {
 	})
 	t.Run("CreateNodeWithoutRotateSkipsProvisioner", func(t *testing.T) {
 		app, router, conf := NewApiTest()
-		conf.Options().NodeRole = cluster.RolePortal
+		enablePortalAPIs(t, conf)
 		conf.Options().JoinToken = cluster.ExampleJoinToken
 		ClusterNodesRegister(router)
 
@@ -108,7 +108,7 @@ func TestClusterNodesRegister(t *testing.T) {
 	})
 	t.Run("CreateNodeRotateDatabaseProvisioned", func(t *testing.T) {
 		app, router, conf := NewApiTest()
-		conf.Options().NodeRole = cluster.RolePortal
+		enablePortalAPIs(t, conf)
 		conf.Options().JoinToken = cluster.ExampleJoinToken
 		ClusterNodesRegister(router)
 
@@ -122,7 +122,7 @@ func TestClusterNodesRegister(t *testing.T) {
 	})
 	t.Run("UUIDChangeRequiresSecret", func(t *testing.T) {
 		app, router, conf := NewApiTest()
-		conf.Options().NodeRole = cluster.RolePortal
+		enablePortalAPIs(t, conf)
 		conf.Options().JoinToken = cluster.ExampleJoinToken
 		ClusterNodesRegister(router)
 
@@ -140,7 +140,7 @@ func TestClusterNodesRegister(t *testing.T) {
 	})
 	t.Run("AdvertiseUrlHttpAllowed", func(t *testing.T) {
 		app, router, conf := NewApiTest()
-		conf.Options().NodeRole = cluster.RolePortal
+		enablePortalAPIs(t, conf)
 		conf.Options().JoinToken = cluster.ExampleJoinToken
 		ClusterNodesRegister(router)
 
@@ -151,7 +151,7 @@ func TestClusterNodesRegister(t *testing.T) {
 	})
 	t.Run("GoodAdvertiseUrlAccepted", func(t *testing.T) {
 		app, router, conf := NewApiTest()
-		conf.Options().NodeRole = cluster.RolePortal
+		enablePortalAPIs(t, conf)
 		conf.Options().JoinToken = cluster.ExampleJoinToken
 		ClusterNodesRegister(router)
 
@@ -167,7 +167,7 @@ func TestClusterNodesRegister(t *testing.T) {
 	})
 	t.Run("SiteUrlValidation", func(t *testing.T) {
 		app, router, conf := NewApiTest()
-		conf.Options().NodeRole = cluster.RolePortal
+		enablePortalAPIs(t, conf)
 		conf.Options().JoinToken = cluster.ExampleJoinToken
 		ClusterNodesRegister(router)
 
@@ -182,7 +182,7 @@ func TestClusterNodesRegister(t *testing.T) {
 	})
 	t.Run("NormalizeName", func(t *testing.T) {
 		app, router, conf := NewApiTest()
-		conf.Options().NodeRole = cluster.RolePortal
+		enablePortalAPIs(t, conf)
 		conf.Options().JoinToken = cluster.ExampleJoinToken
 		ClusterNodesRegister(router)
 
@@ -202,7 +202,7 @@ func TestClusterNodesRegister(t *testing.T) {
 	})
 	t.Run("BadName", func(t *testing.T) {
 		app, router, conf := NewApiTest()
-		conf.Options().NodeRole = cluster.RolePortal
+		enablePortalAPIs(t, conf)
 		conf.Options().JoinToken = cluster.ExampleJoinToken
 		ClusterNodesRegister(router)
 
@@ -212,7 +212,7 @@ func TestClusterNodesRegister(t *testing.T) {
 	})
 	t.Run("RotateSecretPersistsAndRespondsOK", func(t *testing.T) {
 		app, router, conf := NewApiTest()
-		conf.Options().NodeRole = cluster.RolePortal
+		enablePortalAPIs(t, conf)
 		conf.Options().JoinToken = cluster.ExampleJoinToken
 		ClusterNodesRegister(router)
 
@@ -239,7 +239,7 @@ func TestClusterNodesRegister(t *testing.T) {
 	})
 	t.Run("ExistingNodeSiteUrlPersistsAndRespondsOK", func(t *testing.T) {
 		app, router, conf := NewApiTest()
-		conf.Options().NodeRole = cluster.RolePortal
+		enablePortalAPIs(t, conf)
 		conf.Options().JoinToken = cluster.ExampleJoinToken
 		ClusterNodesRegister(router)
 
@@ -261,7 +261,7 @@ func TestClusterNodesRegister(t *testing.T) {
 	})
 	t.Run("ExistingNodeWithoutRotateDoesNotProvisionDatabase", func(t *testing.T) {
 		app, router, conf := NewApiTest()
-		conf.Options().NodeRole = cluster.RolePortal
+		enablePortalAPIs(t, conf)
 		conf.Options().JoinToken = cluster.ExampleJoinToken
 		// If provisioning is called unexpectedly, this invalid DSN should cause a 409.
 		conf.Options().DatabaseProvisionDSN = "invalid-dsn"
@@ -282,7 +282,7 @@ func TestClusterNodesRegister(t *testing.T) {
 	})
 	t.Run("AssignNodeUUIDWhenMissing", func(t *testing.T) {
 		app, router, conf := NewApiTest()
-		conf.Options().NodeRole = cluster.RolePortal
+		enablePortalAPIs(t, conf)
 		conf.Options().JoinToken = cluster.ExampleJoinToken
 		ClusterNodesRegister(router)
 
@@ -306,7 +306,7 @@ func TestClusterNodesRegister(t *testing.T) {
 	})
 	t.Run("ThemeHintProvided", func(t *testing.T) {
 		app, router, conf := NewApiTest()
-		conf.Options().NodeRole = cluster.RolePortal
+		enablePortalAPIs(t, conf)
 		conf.Options().JoinToken = cluster.ExampleJoinToken
 		ClusterNodesRegister(router)
 

@@ -38,6 +38,7 @@ func TestConfig_PortalUrl(t *testing.T) {
 		ctx := CliTestContext()
 		assert.NoError(t, ctx.Set("config-path", tempCfg))
 		c := NewConfig(ctx)
+		c.options.Edition = Portal
 		c.options.NodeRole = cluster.RolePortal
 		c.options.JoinToken = ""
 
@@ -51,8 +52,20 @@ func TestConfig_PortalUrl(t *testing.T) {
 		assert.FileExists(t, secretFile)
 		info, err := os.Stat(secretFile)
 		assert.NoError(t, err)
-		assert.Equal(t, fs.ModeSecretFile, info.Mode().Perm())
+		if err == nil {
+			assert.Equal(t, fs.ModeSecretFile, info.Mode().Perm())
+		}
 		assert.Equal(t, token, c.JoinToken())
+	})
+	t.Run("RegularInstallCannotEnablePortalRole", func(t *testing.T) {
+		c := NewConfig(CliTestContext())
+		c.options.Edition = Community
+		c.options.NodeRole = cluster.RolePortal
+		c.options.JoinToken = ""
+
+		assert.Equal(t, string(cluster.RoleInstance), c.NodeRole())
+		assert.False(t, c.Portal())
+		assert.Equal(t, "", c.JoinToken())
 	})
 	t.Run("Default", func(t *testing.T) {
 		c := NewConfig(CliTestContext())
@@ -99,8 +112,12 @@ func TestConfig_Cluster(t *testing.T) {
 		// Defaults
 		assert.False(t, c.Portal())
 
-		// Toggle values
+		// Regular installations cannot enable portal mode through the role flag.
 		c.Options().NodeRole = string(cluster.RolePortal)
+		assert.False(t, c.Portal())
+
+		// Portal edition is always treated as a portal node.
+		c.Options().Edition = Portal
 		assert.True(t, c.Portal())
 		c.Options().NodeRole = ""
 	})
@@ -111,6 +128,9 @@ func TestConfig_Cluster(t *testing.T) {
 		assert.False(t, c.PortalProxy())
 
 		c.options.NodeRole = string(cluster.RolePortal)
+		assert.False(t, c.PortalProxy())
+
+		c.options.Edition = Portal
 		assert.True(t, c.PortalProxy())
 
 		c.options.PortalProxy = false
@@ -311,6 +331,7 @@ func TestConfig_Cluster(t *testing.T) {
 		ctx := CliTestContext()
 		assert.NoError(t, ctx.Set("config-path", tempCfg))
 		c := NewConfig(ctx)
+		c.options.Edition = Portal
 		c.options.NodeRole = cluster.RolePortal
 
 		c.options.JoinToken = "onwnOVt-MZCCkA0z-YJXHnzJ"
@@ -497,6 +518,7 @@ func TestConfig_Cluster(t *testing.T) {
 		ctx := CliTestContext()
 		assert.NoError(t, ctx.Set("config-path", tempCfg))
 		c := NewConfig(ctx)
+		c.options.Edition = Portal
 		c.options.NodeRole = cluster.RolePortal
 
 		expected := filepath.Join(c.PortalConfigPath(), fs.SecretsDir, fs.JoinTokenFile)
@@ -620,9 +642,18 @@ func TestConfig_Cluster(t *testing.T) {
 		c.options.NodeRole = "app"
 		assert.Equal(t, string(cluster.RoleInstance), c.NodeRole())
 		c.options.NodeRole = string(cluster.RolePortal)
-		assert.Equal(t, string(cluster.RolePortal), c.NodeRole())
+		assert.Equal(t, string(cluster.RoleInstance), c.NodeRole())
 		c.options.NodeRole = string(cluster.RoleService)
 		assert.Equal(t, string(cluster.RoleService), c.NodeRole())
+
+		// Portal edition always resolves to portal.
+		c.options.Edition = Portal
+		c.options.NodeRole = string(cluster.RoleInstance)
+		assert.Equal(t, string(cluster.RolePortal), c.NodeRole())
+		c.options.NodeRole = string(cluster.RoleService)
+		assert.Equal(t, string(cluster.RolePortal), c.NodeRole())
+		c.options.NodeRole = string(cluster.RolePortal)
+		assert.Equal(t, string(cluster.RolePortal), c.NodeRole())
 	})
 	t.Run("SecretsFromFiles", func(t *testing.T) {
 		c := NewConfig(CliTestContext())

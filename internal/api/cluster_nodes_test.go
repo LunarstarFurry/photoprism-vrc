@@ -13,7 +13,7 @@ import (
 
 func TestClusterEndpoints(t *testing.T) {
 	app, router, conf := NewApiTest()
-	conf.Options().NodeRole = cluster.RolePortal
+	enablePortalAPIs(t, conf)
 
 	ClusterListNodes(router)
 	ClusterGetNode(router)
@@ -82,7 +82,7 @@ func TestClusterEndpoints(t *testing.T) {
 // Test that ClusterGetNode validates the :uuid path parameter and rejects unsafe values.
 func TestClusterGetNode_UUIDValidation(t *testing.T) {
 	app, router, conf := NewApiTest()
-	conf.Options().NodeRole = cluster.RolePortal
+	enablePortalAPIs(t, conf)
 
 	// Register route under test.
 	ClusterGetNode(router)

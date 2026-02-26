@@ -329,12 +329,13 @@ func postWithBackoff(url, token string, payload []byte, out any) error {
 	// backoff: 500ms -> max ~8s, 6 attempts with jitter
 	delay := 500 * time.Millisecond
 	for range 6 {
-		req, _ := http.NewRequest(http.MethodPost, url, bytes.NewReader(payload))
+		// url is a register endpoint derived from the configured portal URL for this CLI command.
+		req, _ := http.NewRequest(http.MethodPost, url, bytes.NewReader(payload)) //nolint:gosec
 		header.SetAuthorization(req, token)
 		req.Header.Set(header.ContentType, "application/json")
 
 		client := &http.Client{Timeout: cluster.BootstrapRegisterTimeout}
-		resp, err := client.Do(req)
+		resp, err := client.Do(req) //nolint:gosec
 		if err != nil {
 			return err
 		}

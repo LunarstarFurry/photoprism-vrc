@@ -14,7 +14,7 @@ import (
 // Verifies that PATCH /cluster/nodes/{uuid} normalizes/validates SiteUrl and persists only when valid.
 func TestClusterUpdateNode_SiteUrl(t *testing.T) {
 	app, router, conf := NewApiTest()
-	conf.Options().NodeRole = cluster.RolePortal
+	enablePortalAPIs(t, conf)
 
 	ClusterUpdateNode(router)
 	ClusterGetNode(router)

@@ -140,7 +140,7 @@ func TestClusterRegister_WriteConfig_PersistsSecretFileOnly(t *testing.T) {
 	assert.NoError(t, err)
 
 	secretFile := conf.NodeClientSecretFile()
-	secretContent, readSecretErr := os.ReadFile(secretFile)
+	secretContent, readSecretErr := os.ReadFile(secretFile) //nolint:gosec // secretFile is created by the test config in a temp directory.
 	assert.NoError(t, readSecretErr)
 	assert.Equal(t, cluster.ExampleClientSecret, string(secretContent))
 

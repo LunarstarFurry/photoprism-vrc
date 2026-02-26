@@ -129,6 +129,7 @@ func TestConfig_ReportPortalSettingsVisibility(t *testing.T) {
 	})
 	t.Run("PortalIncludesPortalSettings", func(t *testing.T) {
 		conf := NewConfig(CliTestContext())
+		conf.options.Edition = Portal
 		conf.options.NodeRole = cluster.RolePortal
 		conf.options.PortalProxy = true
 		conf.options.PortalProxyPrefix = "/instance/"
@@ -188,6 +189,7 @@ func TestConfig_ReportThemeURLVisibility(t *testing.T) {
 	t.Run("PortalIncludesThemeURL", func(t *testing.T) {
 		Features = Community
 		conf := NewConfig(CliTestContext())
+		conf.options.Edition = Portal
 		conf.options.NodeRole = cluster.RolePortal
 		conf.SetThemeUrl("https://demo:secret@cdn.photoprism.app/theme.zip")
 

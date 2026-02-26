@@ -18,11 +18,11 @@ import (
 // Application code should retrieve option values via getter functions since they provide
 // validation and return defaults if a value is empty.
 type Options struct {
-	Name                      string        `json:"-"`
-	About                     string        `json:"-"`
-	Edition                   string        `json:"-"`
-	Version                   string        `json:"-"`
-	Copyright                 string        `json:"-"`
+	Name                      string        `yaml:"-" json:"-"`
+	About                     string        `yaml:"-" json:"-"`
+	Edition                   string        `yaml:"-" json:"-"`
+	Version                   string        `yaml:"-" json:"-"`
+	Copyright                 string        `yaml:"-" json:"-"`
 	PartnerID                 string        `yaml:"-" json:"-" flag:"partner-id"`
 	AuthMode                  string        `yaml:"AuthMode" json:"-" flag:"auth-mode"`
 	AuthSecret                string        `yaml:"-" json:"-" flag:"auth-secret"`
