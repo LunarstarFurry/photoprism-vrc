@@ -27,16 +27,21 @@ This file tells automated coding agents (and humans) where to find the single so
   - `AGENTS_DONE.md` for completed tasks.
 - These files are local workflow aids and may not exist yet in a given workspace.
 
-> Quick Tip: to inspect GitHub issue details without leaving the terminal, run `curl -s https://api.github.com/repos/photoprism/photoprism/issues/<id>`.
-
 ### Commit Messages
 
-- Default suggested commit message format is `Topic: Description`.
-- Keep suggested commit messages to a maximum of 75 characters unless a user requests a different format or length.
+Favor concise, imperative subjects with a scope prefix and a maximum of 75 characters, e.g.:
 
-### Issue Writing
+- `Config: Add tests for "darktable-cli" path detection`
+- `Docker: Use two stage build to reduce image size`
 
-- Start GitHub issue descriptions with a one-sentence user story in the format: `As a <role>, I want <goal>, so that <outcome>.`
+If the commit belongs to specific issues or a pull request, include their IDs (e.g., `#123 #5632`) at the end of the message.
+
+### GitHub Issues
+
+Start GitHub issue descriptions with a one-sentence user story in the format: `As a <role>, I want <goal>, so that <outcome>.`
+The user story should be followed by a clear summary of the expected behavior and rationale, as well as a list of Acceptance Criteria with checkboxes.
+
+> Quick Tip: to inspect GitHub issue details without leaving the terminal, run `curl -s https://api.github.com/repos/photoprism/photoprism/issues/<id>`.
 
 ### Specifications, Versioning, & Writing Style
 
