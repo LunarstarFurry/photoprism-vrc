@@ -21,7 +21,7 @@ This file tells automated coding agents (and humans) where to find the single so
 - Terminology Glossary: [`GLOSSARY.md`](GLOSSARY.md) (single source for term definitions across specs/docs)
 - Regenerate `NOTICE` files with `make notice` when dependencies change (e.g., updates to `go.mod`, `go.sum`, `package-lock.json`, or other lockfiles). Do not edit `NOTICE` or `frontend/NOTICE` manually.
 
-> Quick Tip: to inspect GitHub issue details without leaving the terminal, run `curl -s https://api.github.com/repos/photoprism/photoprism/issues/<id>`.
+> Quick Tip: to inspect GitHub issue details without leaving the terminal, run `curl -s https://api.github.com/repos/photoprism/photoprism/issues/<id>`; if `gh` is set up, you MAY also run `gh issue view <id> -R photoprism/photoprism`.
 
 ### Local Agent Progress
 
