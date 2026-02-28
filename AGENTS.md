@@ -1,6 +1,6 @@
 # PhotoPrism® — Repository Guidelines
 
-**Last Updated:** February 26, 2026
+**Last Updated:** February 28, 2026
 
 ## Purpose
 
@@ -48,7 +48,7 @@ Commit messages must not exceed 80 characters in length.
 
 Issue titles MUST be concise, use the imperative mood, and start with a single capitalized prefix followed by a colon and a space, e.g. `Search: Add filter for RAW image formats`.
 
-Issue descriptions MUST begin with a one-sentence **User Story** in the format: `As a <role>, I want <goal>, so that <outcome>.`
+Issue descriptions MUST begin with a one-sentence **User Story** where the sentence itself is fully bold in the format: `**As a <role>, I want <goal>, so that <outcome>.**`
 Follow the User Story with a clear summary of the expected behavior, rationale, technical considerations, and constraints.
 
 Descriptions MUST conclude with a checklist of **Acceptance Criteria**:
