@@ -40,7 +40,10 @@ ENV PHOTOPRISM_ARCH=$TARGETARCH \
     PROG="photoprism" \
     S6_KEEP_ENV=1 \
     S6_VERBOSITY=0 \
-    S6_LOGGING=0
+    S6_LOGGING=0 \
+    CODEX_HOME="/go/src/github.com/photoprism/photoprism/.local/codex" \
+    GH_CONFIG_DIR="/go/src/github.com/photoprism/photoprism/.local/gh" \
+    GH_REPO="photoprism/photoprism"
 
 # Copy scripts and package sources config.
 COPY --chown=root:root --chmod=755 /scripts/dist/ /scripts/
