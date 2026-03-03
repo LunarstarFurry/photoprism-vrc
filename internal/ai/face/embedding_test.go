@@ -40,7 +40,6 @@ func TestEmbedding_Dist(t *testing.T) {
 		assert.InDelta(t, 5.0, a.Dist(b), 1e-9)
 		assert.InDelta(t, 5.0, b.Dist(a), 1e-9)
 	})
-
 	t.Run("MismatchedLength", func(t *testing.T) {
 		a := Embedding{0, 0}
 		b := Embedding{1}

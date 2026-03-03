@@ -73,8 +73,9 @@ func JoinNames(names []string, shorten bool) (result string) {
 			currShort := parts[0]
 
 			if i > 0 && currShort == lastShort {
+				prev := i - 1
 				shortNames[i] = full
-				shortNames[i-1] = names[i-1]
+				shortNames[prev] = names[prev]
 			} else {
 				shortNames[i] = currShort
 			}

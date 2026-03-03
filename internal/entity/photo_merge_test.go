@@ -254,7 +254,6 @@ func TestPhoto_SyncMediaTypeFromFiles(t *testing.T) {
 		assert.Equal(t, MediaVideo, refreshed.PhotoType)
 		assert.Equal(t, SrcAuto, refreshed.TypeSrc)
 	})
-
 	t.Run("PreservesManualOverride", func(t *testing.T) {
 		photo := NewPhoto(true)
 		photo.PhotoUID = rnd.GenerateUID(PhotoUID)

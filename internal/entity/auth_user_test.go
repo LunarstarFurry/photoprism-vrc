@@ -1856,7 +1856,6 @@ func TestUser_SetAuthID(t *testing.T) {
 		assert.Equal(t, uuid, m.AuthID)
 		assert.Equal(t, "", m.AuthIssuer)
 	})
-
 	t.Run("DupeAuthProviderAndID", func(t *testing.T) {
 		m := UserFixtures.Get("guest")
 		n := NewUser()
@@ -2384,14 +2383,12 @@ func TestUser_ScopeHelpers(t *testing.T) {
 		assert.False(t, u.HasScope())
 		assert.True(t, u.NoScope())
 	})
-
 	t.Run("AnyScope", func(t *testing.T) {
 		u := &User{UserScope: list.Any}
 		assert.Equal(t, "*", u.Scope())
 		assert.False(t, u.HasScope())
 		assert.True(t, u.NoScope())
 	})
-
 	t.Run("RestrictedScope", func(t *testing.T) {
 		u := &User{UserScope: "Photos:View"}
 		assert.Equal(t, "photos:view", u.Scope())

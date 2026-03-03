@@ -210,7 +210,6 @@ func TestConfig_ReportThemeURLVisibility(t *testing.T) {
 		assert.False(t, hasThemeURL)
 		assert.Equal(t, -1, indexOf(rows, "theme-url"))
 	})
-
 	t.Run("PortalIncludesThemeURL", func(t *testing.T) {
 		Features = Community
 		conf := NewConfig(CliTestContext())
@@ -226,7 +225,6 @@ func TestConfig_ReportThemeURLVisibility(t *testing.T) {
 		assert.Greater(t, indexOf(rows, "theme-url"), indexOf(rows, "default-theme"))
 		assert.Less(t, indexOf(rows, "theme-url"), indexOf(rows, "places-locale"))
 	})
-
 	t.Run("ProIncludesThemeURL", func(t *testing.T) {
 		Features = Pro
 		conf := NewConfig(CliTestContext())
