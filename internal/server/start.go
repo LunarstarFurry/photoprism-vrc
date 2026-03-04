@@ -117,17 +117,9 @@ func Start(ctx context.Context, conf *config.Config) {
 	}
 	router.Any(conf.BaseUri("/readyz"), isReady)
 
-	// Create a new HTTP server instance with no read or write timeout, except for reading the headers:
-	// https://pkg.go.dev/net/http#Server
-	server := &http.Server{
-		ReadHeaderTimeout: time.Minute,
-		ReadTimeout:       -1,
-		WriteTimeout:      -1,
-		Handler:           router,
-	}
-
 	var tlsErr error
 	var tlsManager *autocert.Manager
+	var server *http.Server
 
 	// Listen on a Unix domain socket instead of a TCP port?
 	if unixSocket := conf.HttpSocket(); unixSocket != nil {
@@ -168,6 +160,7 @@ func Start(ctx context.Context, conf *config.Config) {
 
 			// Listen on Unix socket, which should be automatically closed and removed after use:
 			// https://pkg.go.dev/net#UnixListener.SetUnlinkOnClose.
+			server = newHTTPServer(router, conf)
 			server.Addr = listener.Addr().String()
 
 			log.Infof("server: listening on %s [%s]", unixSocket.Path, time.Since(start))
@@ -181,6 +174,8 @@ func Start(ctx context.Context, conf *config.Config) {
 		tlsSocket := fmt.Sprintf("%s:%d", conf.HttpHost(), conf.HttpPort())
 		tlsConfig := tlsManager.TLSConfig()
 		tlsConfig.MinVersion = tls.VersionTLS12
+
+		server = newHTTPServer(router, conf)
 
 		// Listen on HTTPS socket.
 		server.Addr = tlsSocket
@@ -197,6 +192,8 @@ func Start(ctx context.Context, conf *config.Config) {
 		tlsConfig := &tls.Config{
 			MinVersion: tls.VersionTLS12,
 		}
+
+		server = newHTTPServer(router, conf)
 
 		// Listen on HTTPS socket.
 		server.Addr = tlsSocket
@@ -216,6 +213,7 @@ func Start(ctx context.Context, conf *config.Config) {
 			return
 		} else {
 			// Listen on HTTP socket.
+			server = newHTTPServer(router, conf)
 			server.Addr = tcpSocket
 
 			log.Infof("server: listening on %s [%s]", server.Addr, time.Since(start))
@@ -281,13 +279,8 @@ func StartAutoTLS(s *http.Server, m *autocert.Manager, conf *config.Config) {
 	var g errgroup.Group
 
 	g.Go(func() error {
-		redirectSrv := &http.Server{
-			Addr:              fmt.Sprintf("%s:%d", conf.HttpHost(), conf.HttpPort()),
-			Handler:           m.HTTPHandler(http.HandlerFunc(redirect)),
-			ReadHeaderTimeout: time.Minute,
-			ReadTimeout:       5 * time.Second,
-			WriteTimeout:      10 * time.Second,
-		}
+		redirectSrv := newHTTPServer(m.HTTPHandler(http.HandlerFunc(redirect)), conf)
+		redirectSrv.Addr = fmt.Sprintf("%s:%d", conf.HttpHost(), conf.HttpPort())
 
 		return redirectSrv.ListenAndServe()
 	})
@@ -309,4 +302,26 @@ func redirect(w http.ResponseWriter, req *http.Request) {
 	target := "https://" + req.Host + req.RequestURI
 
 	http.Redirect(w, req, target, httpsRedirect)
+}
+
+// newHTTPServer creates an HTTP server with hardened header and idle settings.
+func newHTTPServer(handler http.Handler, conf *config.Config) *http.Server {
+	headerTimeout := config.DefaultHttpHeaderTimeout
+	headerBytes := config.DefaultHttpHeaderBytes
+	idleTimeout := config.DefaultHttpIdleTimeout
+
+	if conf != nil {
+		headerTimeout = conf.HttpHeaderTimeout()
+		headerBytes = conf.HttpHeaderBytes()
+		idleTimeout = conf.HttpIdleTimeout()
+	}
+
+	return &http.Server{
+		ReadHeaderTimeout: headerTimeout,
+		ReadTimeout:       0,
+		WriteTimeout:      0,
+		IdleTimeout:       idleTimeout,
+		MaxHeaderBytes:    headerBytes,
+		Handler:           handler,
+	}
 }

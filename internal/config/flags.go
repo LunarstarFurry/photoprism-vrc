@@ -863,6 +863,24 @@ var Flags = CliFlags{
 			Usage:   "Web server compression `METHOD` (gzip, none)",
 			EnvVars: EnvVars("HTTP_COMPRESSION"),
 		}}, {
+		Flag: &cli.StringFlag{
+			Name:    "http-header-timeout",
+			Usage:   "timeout for reading request headers as `DURATION`",
+			Value:   DefaultHttpHeaderTimeout.String(),
+			EnvVars: EnvVars("HTTP_HEADER_TIMEOUT"),
+		}}, {
+		Flag: &cli.IntFlag{
+			Name:    "http-header-bytes",
+			Usage:   "maximum request header size in `BYTES`",
+			Value:   DefaultHttpHeaderBytes,
+			EnvVars: EnvVars("HTTP_HEADER_BYTES"),
+		}}, {
+		Flag: &cli.StringFlag{
+			Name:    "http-idle-timeout",
+			Usage:   "timeout for idle keep-alive connections as `DURATION`",
+			Value:   DefaultHttpIdleTimeout.String(),
+			EnvVars: EnvVars("HTTP_IDLE_TIMEOUT"),
+		}}, {
 		Flag: &cli.BoolFlag{
 			Name:    "http-cache-public",
 			Usage:   "allows static content to be cached by a CDN or caching proxy",

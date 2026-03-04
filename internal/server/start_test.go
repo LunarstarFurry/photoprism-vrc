@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
@@ -75,5 +76,31 @@ func TestConfigureTrustedProxySettings(t *testing.T) {
 		ip := requestClientIP(t, router, "198.51.100.11:12345", "10.0.0.124")
 
 		assert.Equal(t, "198.51.100.11", ip)
+	})
+}
+
+func TestNewHTTPServer(t *testing.T) {
+	t.Run("UsesConfiguredValues", func(t *testing.T) {
+		conf := config.NewConfig(config.CliTestContext())
+		conf.Options().HttpHeaderTimeout = 15 * time.Second
+		conf.Options().HttpHeaderBytes = 2048
+		conf.Options().HttpIdleTimeout = 2 * time.Minute
+
+		server := newHTTPServer(http.NewServeMux(), conf)
+
+		assert.Equal(t, 15*time.Second, server.ReadHeaderTimeout)
+		assert.Equal(t, 0*time.Second, server.ReadTimeout)
+		assert.Equal(t, 0*time.Second, server.WriteTimeout)
+		assert.Equal(t, 2*time.Minute, server.IdleTimeout)
+		assert.Equal(t, 2048, server.MaxHeaderBytes)
+	})
+	t.Run("UsesDefaultsWhenConfigIsNil", func(t *testing.T) {
+		server := newHTTPServer(http.NewServeMux(), nil)
+
+		assert.Equal(t, config.DefaultHttpHeaderTimeout, server.ReadHeaderTimeout)
+		assert.Equal(t, 0*time.Second, server.ReadTimeout)
+		assert.Equal(t, 0*time.Second, server.WriteTimeout)
+		assert.Equal(t, config.DefaultHttpIdleTimeout, server.IdleTimeout)
+		assert.Equal(t, config.DefaultHttpHeaderBytes, server.MaxHeaderBytes)
 	})
 }

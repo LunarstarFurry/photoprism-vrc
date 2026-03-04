@@ -1,6 +1,6 @@
 ## PhotoPrism — Config Package
 
-**Last Updated:** March 2, 2026
+**Last Updated:** March 4, 2026
 
 ### Overview
 
@@ -29,6 +29,13 @@ PhotoPrism loads configuration in the following order:
 The `PHOTOPRISM_CONFIG_PATH` variable controls where PhotoPrism looks for YAML files (defaults to `storage/config`).
 
 > Any change to configuration (flags, env vars, YAML files) requires a restart. The Go process reads options during startup and does not watch for changes.
+
+### HTTP Hardening Defaults
+
+- `PHOTOPRISM_HTTP_HEADER_TIMEOUT` / `--http-header-timeout` configures `http.Server.ReadHeaderTimeout` and defaults to `15s`.
+- `PHOTOPRISM_HTTP_HEADER_BYTES` / `--http-header-bytes` configures `http.Server.MaxHeaderBytes` and defaults to `1048576` (1 MiB).
+- `PHOTOPRISM_HTTP_IDLE_TIMEOUT` / `--http-idle-timeout` configures `http.Server.IdleTimeout` and defaults to `180s`.
+- `ReadTimeout` and `WriteTimeout` remain disabled globally so large uploads/downloads are not interrupted by a one-size-fits-all timeout.
 
 ### Inspect Before Editing
 
