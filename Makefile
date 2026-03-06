@@ -328,24 +328,8 @@ dep-gh:
 	fi
 claude:
 	@echo "Installing Claude Code..."
-	@[ -n "$(HOME)" ] && [ "$(HOME)" != "/" ] || (echo "ERROR: Unsafe HOME path '$(HOME)'"; exit 1)
-	@if [ -e "$(HOME)/.cache" ] && [ ! -w "$(HOME)/.cache" ]; then \
-	  echo "Fixing ownership of \"$(HOME)/.cache\"..."; \
-	  if command -v sudo >/dev/null 2>&1; then \
-	    sudo chown "$(UID):$(GID)" "$(HOME)/.cache"; \
-	  else \
-	    chown "$(UID):$(GID)" "$(HOME)/.cache"; \
-	  fi; \
-	fi
-	@if [ -e "$(HOME)/.cache/claude" ] && [ ! -w "$(HOME)/.cache/claude" ]; then \
-	  echo "Fixing ownership of \"$(HOME)/.cache/claude\"..."; \
-	  if command -v sudo >/dev/null 2>&1; then \
-	    sudo chown -R "$(UID):$(GID)" "$(HOME)/.cache/claude"; \
-	  else \
-	    chown -R "$(UID):$(GID)" "$(HOME)/.cache/claude"; \
-	  fi; \
-	fi
-	install -d -m 700 -- "$(HOME)/.cache/claude"
+	@[ -n "$(HOME)" ] && [ "$(HOME)" != "/" ] && install -d -m 755 -- "$(HOME)/.local/bin" || true
+	@[ -n "$(CLAUDE_CONFIG_DIR)" ] && [ "$(CLAUDE_CONFIG_DIR)" != "/" ] && install -d -m 755 -- "$(CLAUDE_CONFIG_DIR)" || true
 	curl -fsSL https://claude.ai/install.sh | bash
 dep-go:
 	go build -v ./...
