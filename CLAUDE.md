@@ -57,6 +57,11 @@ go test ./internal/entity/... -count=1 -tags="slow,develop"
 
 Always run `make fmt-go` before committing Go changes and `make fmt-js` before committing frontend changes.
 
+When editing or creating Markdown files that contain tables, format them with:
+```bash
+npx --yes markdown-table-formatter <filename>
+```
+
 ## Schema Migrations
 
 If a change touches database schema, check migrations:
