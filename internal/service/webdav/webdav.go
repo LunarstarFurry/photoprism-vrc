@@ -1,6 +1,10 @@
 /*
 Package webdav provides WebDAV file sharing and synchronization.
 
+It includes the outbound client wrapper used by services and sync workers for
+recursive directory discovery, uploads, downloads, and compatibility fallbacks
+when remote servers reject recursive PROPFIND requests with "Depth: infinity".
+
 Copyright (c) 2018 - 2025 PhotoPrism UG. All rights reserved.
 
 	This program is free software: you can redistribute it and/or modify
@@ -50,7 +54,7 @@ const (
 //revive:disable-next-line:time-naming // keep exported constant name for API compatibility
 const Second = time.Second
 
-// MaxRequestDuration is the maximum request duration e.g. for recursive retrieval of large remote directory structures.
+// MaxRequestDuration is the maximum request duration for large recursive directory listings, including fallback traversal.
 const MaxRequestDuration = 30 * time.Minute
 
 // Durations maps Timeout options to specific time durations.

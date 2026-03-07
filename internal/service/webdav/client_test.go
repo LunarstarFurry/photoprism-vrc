@@ -1,11 +1,17 @@
 package webdav
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"path"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/photoprism/photoprism/pkg/fs"
 	"github.com/photoprism/photoprism/pkg/rnd"
@@ -16,6 +22,161 @@ const (
 	testUser = "admin"
 	testPass = "photoprism"
 )
+
+// testWebDAVEntry represents a directory entry returned by the test WebDAV server.
+type testWebDAVEntry struct {
+	Href string
+	Dir  bool
+	Size int64
+}
+
+// testWebDAVTree defines the depth-1 PROPFIND responses returned by the test server.
+var testWebDAVTree = map[string][]testWebDAVEntry{
+	"/": {
+		{Href: "/", Dir: true},
+		{Href: "/Photos/", Dir: true},
+		{Href: "/Shared/", Dir: true},
+	},
+	"/Photos": {
+		{Href: "/Photos/", Dir: true},
+		{Href: "/Photos/2020/", Dir: true},
+		{Href: "/Photos/2021/", Dir: true},
+	},
+	"/Photos/2020": {
+		{Href: "/Photos/2020/", Dir: true},
+		{Href: "/Photos/2020/03/", Dir: true},
+	},
+	"/Photos/2020/03": {
+		{Href: "/Photos/2020/03/", Dir: true},
+	},
+	"/Photos/2021": {
+		{Href: "/Photos/2021/", Dir: true},
+	},
+	"/Shared": {
+		{Href: "/Shared/", Dir: true},
+	},
+}
+
+// newTestWebDAVServer returns a minimal WebDAV endpoint for recursive listing tests.
+func newTestWebDAVServer(rejectInfinity bool) *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "PROPFIND" {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		requestPath := testWebDAVCollectionPath(r.URL.Path)
+		depth := strings.ToLower(strings.TrimSpace(r.Header.Get("Depth")))
+
+		if depth == "" {
+			depth = "infinity"
+		}
+
+		if depth == "infinity" && rejectInfinity {
+			http.Error(w, `webdav: Depth: infinity is not supported`, http.StatusBadRequest)
+			return
+		}
+
+		var entries []testWebDAVEntry
+
+		switch depth {
+		case "1":
+			entries = testWebDAVDepthOneEntries(requestPath)
+		case "infinity":
+			entries = testWebDAVDepthInfinityEntries(requestPath)
+		default:
+			http.Error(w, "unsupported depth", http.StatusBadRequest)
+			return
+		}
+
+		if len(entries) == 0 {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+		w.WriteHeader(http.StatusMultiStatus)
+		_, _ = w.Write([]byte(testWebDAVMultiStatus(entries)))
+	}))
+}
+
+// testWebDAVCollectionPath normalizes collection paths used by the test server.
+func testWebDAVCollectionPath(value string) string {
+	if value = path.Clean("/" + strings.TrimSpace(value)); value != "." {
+		return value
+	}
+
+	return "/"
+}
+
+// testWebDAVDepthOneEntries returns the direct child entries for a collection path.
+func testWebDAVDepthOneEntries(collectionPath string) []testWebDAVEntry {
+	return testWebDAVTree[testWebDAVCollectionPath(collectionPath)]
+}
+
+// testWebDAVDepthInfinityEntries returns the full subtree for a collection path.
+func testWebDAVDepthInfinityEntries(collectionPath string) (result []testWebDAVEntry) {
+	queue := []string{testWebDAVCollectionPath(collectionPath)}
+	traversed := map[string]bool{testWebDAVCollectionPath(collectionPath): true}
+	seen := map[string]bool{}
+
+	for len(queue) > 0 {
+		current := queue[0]
+		queue = queue[1:]
+
+		for _, entry := range testWebDAVDepthOneEntries(current) {
+			entryPath := testWebDAVCollectionPath(entry.Href)
+
+			if !seen[entryPath] {
+				seen[entryPath] = true
+				result = append(result, entry)
+			}
+
+			if entry.Dir && entryPath != current && !traversed[entryPath] {
+				traversed[entryPath] = true
+				queue = append(queue, entryPath)
+			}
+		}
+	}
+
+	return result
+}
+
+// testWebDAVMultiStatus renders a simple 207 Multi-Status XML document for the test server.
+func testWebDAVMultiStatus(entries []testWebDAVEntry) string {
+	var builder strings.Builder
+
+	builder.WriteString(`<?xml version="1.0" encoding="utf-8"?>`)
+	builder.WriteString(`<D:multistatus xmlns:D="DAV:">`)
+
+	for _, entry := range entries {
+		builder.WriteString(`<D:response>`)
+		builder.WriteString(`<D:href>`)
+		builder.WriteString(entry.Href)
+		builder.WriteString(`</D:href>`)
+		builder.WriteString(`<D:propstat><D:prop><D:resourcetype>`)
+
+		if entry.Dir {
+			builder.WriteString(`<D:collection/>`)
+		}
+
+		builder.WriteString(`</D:resourcetype>`)
+		builder.WriteString(`<D:getlastmodified>Mon, 02 Jan 2006 15:04:05 GMT</D:getlastmodified>`)
+
+		if !entry.Dir {
+			builder.WriteString(`<D:getcontentlength>`)
+			builder.WriteString(strconv.FormatInt(entry.Size, 10))
+			builder.WriteString(`</D:getcontentlength>`)
+		}
+
+		builder.WriteString(`</D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat>`)
+		builder.WriteString(`</D:response>`)
+	}
+
+	builder.WriteString(`</D:multistatus>`)
+
+	return builder.String()
+}
 
 func TestClientUrl(t *testing.T) {
 	result, err := clientUrl(testUrl, testUser, testPass)
@@ -113,6 +274,33 @@ func TestClient_Directories(t *testing.T) {
 		if len(dirs) < 2 {
 			t.Fatal("at least 2 directories expected")
 		}
+	})
+}
+
+func TestClient_DirectoriesDepthFallback(t *testing.T) {
+	expected := []string{"/", "/Photos", "/Photos/2020", "/Photos/2020/03", "/Photos/2021", "/Shared"}
+
+	t.Run("RecursiveFastPath", func(t *testing.T) {
+		server := newTestWebDAVServer(false)
+		t.Cleanup(server.Close)
+
+		client, err := NewClient(server.URL+"/", "", "", TimeoutLow, "")
+		require.NoError(t, err)
+
+		dirs, err := client.Directories("", true, MaxRequestDuration)
+		require.NoError(t, err)
+		assert.ElementsMatch(t, expected, dirs.Abs())
+	})
+	t.Run("DepthOneFallback", func(t *testing.T) {
+		server := newTestWebDAVServer(true)
+		t.Cleanup(server.Close)
+
+		client, err := NewClient(server.URL+"/", "", "", TimeoutLow, "")
+		require.NoError(t, err)
+
+		dirs, err := client.Directories("", true, MaxRequestDuration)
+		require.NoError(t, err)
+		assert.ElementsMatch(t, expected, dirs.Abs())
 	})
 }
 

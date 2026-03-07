@@ -105,15 +105,101 @@ func (c *Client) withTimeout(timeout time.Duration) *webdav.Client {
 	return client
 }
 
+// effectiveTimeout returns the effective request timeout used by WebDAV calls.
+func (c *Client) effectiveTimeout(timeout time.Duration) time.Duration {
+	if timeout < 0 {
+		return -1
+	} else if timeout == 0 {
+		return c.timeout
+	}
+
+	return timeout
+}
+
+// timeoutContext returns a request context bounded by the configured timeout when applicable.
+func (c *Client) timeoutContext(timeout time.Duration) (context.Context, context.CancelFunc) {
+	if timeout = c.effectiveTimeout(timeout); timeout > 0 {
+		return context.WithTimeout(c.ctx, timeout)
+	}
+
+	return c.ctx, func() {}
+}
+
+// readDirContext returns the contents of the specified directory using the provided request context.
+func (c *Client) readDirContext(ctx context.Context, dir string, recursive bool, timeout time.Duration) ([]webdav.FileInfo, error) {
+	dir = trimPath(dir)
+	return c.withTimeout(timeout).ReadDir(ctx, dir, recursive)
+}
+
 // readDirWithTimeout returns the contents of the specified directory with a request time limit if timeout is not negative.
 func (c *Client) readDirWithTimeout(dir string, recursive bool, timeout time.Duration) ([]webdav.FileInfo, error) {
-	dir = trimPath(dir)
-	return c.withTimeout(timeout).ReadDir(c.ctx, dir, recursive)
+	return c.readDirContext(c.ctx, dir, recursive, timeout)
 }
 
 // readDir returns the contents of the specified directory without a request timeout.
 func (c *Client) readDir(dir string, recursive bool) ([]webdav.FileInfo, error) {
 	return c.readDirWithTimeout(dir, recursive, -1)
+}
+
+// appendUniqueEntries adds new WebDAV entries only once while preserving response order.
+func appendUniqueEntries(result []webdav.FileInfo, found []webdav.FileInfo, seen map[string]bool) []webdav.FileInfo {
+	for _, entry := range found {
+		entryPath := trimPath(entry.Path)
+
+		if seen[entryPath] {
+			continue
+		}
+
+		seen[entryPath] = true
+		result = append(result, entry)
+	}
+
+	return result
+}
+
+// appendTraversalDirs adds unseen child directories from a non-recursive PROPFIND response to the queue.
+func appendTraversalDirs(queue []string, current string, found []webdav.FileInfo, seen map[string]bool) []string {
+	current = trimPath(current)
+
+	for _, entry := range found {
+		if !entry.IsDir {
+			continue
+		}
+
+		entryPath := trimPath(entry.Path)
+
+		if entryPath == "" || entryPath == current || seen[entryPath] {
+			continue
+		}
+
+		seen[entryPath] = true
+		queue = append(queue, entryPath)
+	}
+
+	return queue
+}
+
+// readDirFallback traverses directories with repeated non-recursive PROPFIND requests.
+func (c *Client) readDirFallback(ctx context.Context, dir string, timeout time.Duration) (result []webdav.FileInfo, err error) {
+	queue := []string{trimPath(dir)}
+	traversed := map[string]bool{trimPath(dir): true}
+	seenEntries := map[string]bool{}
+
+	for len(queue) > 0 {
+		current := queue[0]
+		queue = queue[1:]
+
+		found, readErr := c.readDirContext(ctx, current, false, timeout)
+
+		if readErr != nil {
+			return result, readErr
+		}
+
+		result = appendUniqueEntries(result, found, seenEntries)
+		queue = appendTraversalDirs(queue, current, found, traversed)
+	}
+
+	return result, nil
 }
 
 // Files returns information about files in a directory, optionally recursively.
@@ -147,11 +233,24 @@ func (c *Client) Files(dir string, recursive bool) (result fs.FileInfos, err err
 	return result, nil
 }
 
-// Directories returns all subdirectories in a path as string slice.
+// Directories returns all subdirectories in a path and falls back to iterative Depth: 1 traversal when needed.
 func (c *Client) Directories(dir string, recursive bool, timeout time.Duration) (result fs.FileInfos, err error) {
 	dir = trimPath(dir)
+	ctx, cancel := c.timeoutContext(timeout)
+	defer cancel()
 
-	found, err := c.readDirWithTimeout(dir, recursive, timeout)
+	found, err := c.readDirContext(ctx, dir, recursive, timeout)
+
+	if err != nil && recursive {
+		if fallback, fallbackErr := c.readDirFallback(ctx, dir, timeout); fallbackErr == nil {
+			log.Infof("webdav: recursive PROPFIND failed for %s, using iterative Depth: 1 fallback (%s)", clean.Log(path.Join("/", dir)), clean.Error(err))
+			found = fallback
+			err = nil
+		} else {
+			log.Warnf("webdav: recursive PROPFIND failed for %s (%s)", clean.Log(path.Join("/", dir)), clean.Error(err))
+			log.Debugf("webdav: Depth: 1 fallback failed for %s (%s)", clean.Log(path.Join("/", dir)), clean.Error(fallbackErr))
+		}
+	}
 
 	if err != nil {
 		return result, err

@@ -139,7 +139,7 @@ main() {
   local http_mode
   local depth
   for http_mode in "--http2" "--http1.1"; do
-    for depth in 0 1; do
+    for depth in 0 1 infinity; do
       local label mode_name file
       mode_name="${http_mode#--}"
       label="propfind_${mode_name}_depth${depth}"
