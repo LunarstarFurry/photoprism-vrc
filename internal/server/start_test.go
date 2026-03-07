@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/crypto/acme/autocert"
+
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 
@@ -102,5 +104,71 @@ func TestNewHTTPServer(t *testing.T) {
 		assert.Equal(t, 0*time.Second, server.WriteTimeout)
 		assert.Equal(t, config.DefaultHttpIdleTimeout, server.IdleTimeout)
 		assert.Equal(t, config.DefaultHttpHeaderBytes, server.MaxHeaderBytes)
+	})
+}
+
+func TestCanonicalRedirectTarget(t *testing.T) {
+	t.Run("UsesConfiguredSiteHostInsteadOfRequestHost", func(t *testing.T) {
+		conf := config.NewConfig(config.CliTestContext())
+		conf.Options().SiteUrl = "https://photos.example.com:7443/library/"
+
+		req := httptest.NewRequest(http.MethodGet, "http://evil.example.test/library/login?next=%2Flibrary", nil)
+		req.Host = "evil.example.test"
+
+		target := canonicalRedirectTarget(req, conf)
+
+		assert.Equal(t, "https://photos.example.com:7443/library/login?next=%2Flibrary", target)
+	})
+	t.Run("FallsBackToRequestHostWithoutConfig", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "http://localhost:2342/library", nil)
+		req.Host = "localhost:2342"
+
+		target := canonicalRedirectTarget(req, nil)
+
+		assert.Equal(t, "https://localhost:2342/library", target)
+	})
+}
+
+func TestAutoTLSHTTPHandler(t *testing.T) {
+	t.Run("UsesCanonicalHostForFallbackRedirect", func(t *testing.T) {
+		conf := config.NewConfig(config.CliTestContext())
+		conf.Options().SiteUrl = "https://photos.example.com:7443/library/"
+
+		handler := (&autocert.Manager{
+			HostPolicy: autocert.HostWhitelist(conf.SiteDomain()),
+		}).HTTPHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			redirect(w, r, conf)
+		}))
+
+		req := httptest.NewRequest(http.MethodGet, "http://evil.example.test/library/login?next=%2Flibrary", nil)
+		req.Host = "evil.example.test"
+
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+
+		assert.Equal(t, httpsRedirect, w.Code)
+		assert.Equal(t, "https://photos.example.com:7443/library/login?next=%2Flibrary", w.Header().Get(header.Location))
+	})
+	t.Run("HandlesAcmeChallengeWithoutFallbackRedirect", func(t *testing.T) {
+		conf := config.NewConfig(config.CliTestContext())
+		conf.Options().SiteUrl = "https://photos.example.com/"
+
+		fallbackCalled := false
+		handler := (&autocert.Manager{
+			HostPolicy: autocert.HostWhitelist(conf.SiteDomain()),
+		}).HTTPHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			fallbackCalled = true
+			redirect(w, r, conf)
+		}))
+
+		req := httptest.NewRequest(http.MethodGet, "http://photos.example.com/.well-known/acme-challenge/test-token", nil)
+		req.Host = conf.SiteDomain()
+
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+
+		assert.False(t, fallbackCalled)
+		assert.Equal(t, http.StatusNotFound, w.Code)
+		assert.Empty(t, w.Header().Get(header.Location))
 	})
 }

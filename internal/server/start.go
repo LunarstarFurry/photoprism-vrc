@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"time"
 
@@ -279,7 +280,9 @@ func StartAutoTLS(s *http.Server, m *autocert.Manager, conf *config.Config) {
 	var g errgroup.Group
 
 	g.Go(func() error {
-		redirectSrv := newHTTPServer(m.HTTPHandler(http.HandlerFunc(redirect)), conf)
+		redirectSrv := newHTTPServer(m.HTTPHandler(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			redirect(w, req, conf)
+		})), conf)
 		redirectSrv.Addr = fmt.Sprintf("%s:%d", conf.HttpHost(), conf.HttpPort())
 
 		return redirectSrv.ListenAndServe()
@@ -298,10 +301,46 @@ func StartAutoTLS(s *http.Server, m *autocert.Manager, conf *config.Config) {
 	}
 }
 
-func redirect(w http.ResponseWriter, req *http.Request) {
-	target := "https://" + req.Host + req.RequestURI
+// redirect sends HTTP requests to the configured HTTPS site host.
+func redirect(w http.ResponseWriter, req *http.Request, conf *config.Config) {
+	target := canonicalRedirectTarget(req, conf)
 
 	http.Redirect(w, req, target, httpsRedirect)
+}
+
+// canonicalRedirectTarget returns the HTTPS redirect target using the configured public site host.
+func canonicalRedirectTarget(req *http.Request, conf *config.Config) string {
+	target := &url.URL{
+		Scheme:   "https",
+		Host:     "",
+		Path:     "/",
+		RawPath:  "",
+		RawQuery: "",
+	}
+
+	if req != nil {
+		target.Host = req.Host
+	}
+
+	if conf != nil {
+		if host := conf.SiteHost(); host != "" {
+			target.Host = host
+		}
+	}
+
+	if req != nil && req.URL != nil {
+		target.Path = req.URL.Path
+		target.RawPath = req.URL.RawPath
+		target.RawQuery = req.URL.RawQuery
+	} else if req != nil && req.RequestURI != "" {
+		if u, err := url.ParseRequestURI(req.RequestURI); err == nil {
+			target.Path = u.Path
+			target.RawPath = u.RawPath
+			target.RawQuery = u.RawQuery
+		}
+	}
+
+	return target.String()
 }
 
 // newHTTPServer creates an HTTP server with hardened header and idle settings.
