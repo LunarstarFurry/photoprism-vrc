@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"path"
@@ -46,6 +47,37 @@ func clientUrl(serverUrl, user, pass string) (*url.URL, error) {
 	return result, nil
 }
 
+// newTransferHTTPClient returns an HTTP client with connection-level safeguards but no total transfer deadline.
+func newTransferHTTPClient(cidrs []*net.IPNet) *http.Client {
+	client := service.NewHTTPClient(0, cidrs)
+	transport, ok := client.Transport.(*http.Transport)
+
+	if !ok || transport == nil {
+		return client
+	}
+
+	transport = transport.Clone()
+
+	if baseDial := transport.DialContext; baseDial != nil {
+		transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+			if transferConnectTimeout > 0 {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(ctx, transferConnectTimeout)
+				defer cancel()
+			}
+
+			return baseDial(ctx, network, addr)
+		}
+	}
+
+	transport.TLSHandshakeTimeout = transferTLSHandshakeTimeout
+	transport.IdleConnTimeout = transferIdleConnTimeout
+	transport.ExpectContinueTimeout = transferExpectContinueTimeout
+	client.Transport = transport
+
+	return client
+}
+
 // NewClient creates a new WebDAV client for the specified endpoint.
 func NewClient(serverUrl, user, pass string, timeout Timeout, servicesCIDR string) (*Client, error) {
 	endpoint, err := clientUrl(serverUrl, user, pass)
@@ -68,7 +100,7 @@ func NewClient(serverUrl, user, pass string, timeout Timeout, servicesCIDR strin
 
 	log.Debugf("webdav: connecting to %s", clean.Log(serverUrl))
 
-	client, err := webdav.NewClient(service.NewHTTPClient(0, allowedCIDRs), serverUrl)
+	client, err := webdav.NewClient(newTransferHTTPClient(allowedCIDRs), serverUrl)
 
 	if err != nil {
 		return nil, err
@@ -176,7 +208,7 @@ func appendTraversalDirs(queue []string, current string, found []webdav.FileInfo
 }
 
 // readDirFallback traverses directories with repeated non-recursive PROPFIND requests.
-func (c *Client) readDirFallback(ctx context.Context, dir string, timeout time.Duration) (result []webdav.FileInfo, err error) {
+func (c *Client) readDirFallback(ctx context.Context, dir string, timeout time.Duration) (result []webdav.FileInfo, requests int, err error) {
 	queue := []string{trimPath(dir)}
 	traversed := map[string]bool{trimPath(dir): true}
 	seenEntries := map[string]bool{}
@@ -184,18 +216,19 @@ func (c *Client) readDirFallback(ctx context.Context, dir string, timeout time.D
 	for len(queue) > 0 {
 		current := queue[0]
 		queue = queue[1:]
+		requests++
 
 		found, readErr := c.readDirContext(ctx, current, false, timeout)
 
 		if readErr != nil {
-			return result, readErr
+			return result, requests, readErr
 		}
 
 		result = appendUniqueEntries(result, found, seenEntries)
 		queue = appendTraversalDirs(queue, current, found, traversed)
 	}
 
-	return result, nil
+	return result, requests, nil
 }
 
 // Files returns information about files in a directory, optionally recursively.
@@ -240,13 +273,15 @@ func (c *Client) Directories(dir string, recursive bool, timeout time.Duration) 
 	found, err := c.readDirContext(ctx, dir, recursive, timeout)
 
 	if err != nil && recursive {
-		if fallback, fallbackErr := c.readDirFallback(ctx, dir, timeout); fallbackErr == nil {
-			log.Infof("webdav: recursive PROPFIND failed for %s, using iterative Depth: 1 fallback (%s)", clean.Log(path.Join("/", dir)), clean.Error(err))
+		started := time.Now()
+
+		if fallback, requests, fallbackErr := c.readDirFallback(ctx, dir, timeout); fallbackErr == nil {
+			log.Infof("webdav: recursive PROPFIND failed for %s, using iterative Depth: 1 fallback after %d requests [%s] (%s)", clean.Log(path.Join("/", dir)), requests, time.Since(started).Round(time.Millisecond), clean.Error(err))
 			found = fallback
 			err = nil
 		} else {
 			log.Warnf("webdav: recursive PROPFIND failed for %s (%s)", clean.Log(path.Join("/", dir)), clean.Error(err))
-			log.Debugf("webdav: Depth: 1 fallback failed for %s (%s)", clean.Log(path.Join("/", dir)), clean.Error(fallbackErr))
+			log.Debugf("webdav: Depth: 1 fallback failed for %s after %d requests [%s] (%s)", clean.Log(path.Join("/", dir)), requests, time.Since(started).Round(time.Millisecond), clean.Error(fallbackErr))
 		}
 	}
 

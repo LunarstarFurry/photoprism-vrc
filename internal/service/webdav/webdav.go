@@ -57,6 +57,18 @@ const Second = time.Second
 // MaxRequestDuration is the maximum request duration for large recursive directory listings, including fallback traversal.
 const MaxRequestDuration = 30 * time.Minute
 
+// transferConnectTimeout limits TCP connect time for upload and download requests without imposing a total transfer deadline.
+const transferConnectTimeout = 30 * time.Second
+
+// transferTLSHandshakeTimeout limits TLS handshakes for upload and download requests.
+const transferTLSHandshakeTimeout = 20 * time.Second
+
+// transferIdleConnTimeout limits how long pooled idle WebDAV connections are kept for transfer operations.
+const transferIdleConnTimeout = 90 * time.Second
+
+// transferExpectContinueTimeout limits how long transfer requests wait for an initial 100-continue response.
+const transferExpectContinueTimeout = 10 * time.Second
+
 // Durations maps Timeout options to specific time durations.
 var Durations = map[Timeout]time.Duration{
 	TimeoutHigh:    120 * Second,

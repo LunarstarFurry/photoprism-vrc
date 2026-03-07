@@ -32,6 +32,12 @@ type testWebDAVEntry struct {
 	Size int64
 }
 
+// testWebDAVServerOptions controls quirks exposed by the local WebDAV fixture.
+type testWebDAVServerOptions struct {
+	rejectInfinity    bool
+	duplicateDepthOne bool
+}
+
 // testWebDAVTree defines the depth-1 PROPFIND responses returned by the test server.
 var testWebDAVTree = map[string][]testWebDAVEntry{
 	"/": {
@@ -74,6 +80,11 @@ var testWebDAVTree = map[string][]testWebDAVEntry{
 
 // newTestWebDAVServer returns a minimal WebDAV endpoint for recursive listing tests.
 func newTestWebDAVServer(rejectInfinity bool) *httptest.Server {
+	return newTestWebDAVServerWithOptions(testWebDAVServerOptions{rejectInfinity: rejectInfinity})
+}
+
+// newTestWebDAVServerWithOptions returns a minimal WebDAV endpoint with optional quirks for regression coverage.
+func newTestWebDAVServerWithOptions(options testWebDAVServerOptions) *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "PROPFIND" {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -87,7 +98,7 @@ func newTestWebDAVServer(rejectInfinity bool) *httptest.Server {
 			depth = "infinity"
 		}
 
-		if depth == "infinity" && rejectInfinity {
+		if depth == "infinity" && options.rejectInfinity {
 			http.Error(w, `webdav: Depth: infinity is not supported`, http.StatusBadRequest)
 			return
 		}
@@ -97,6 +108,13 @@ func newTestWebDAVServer(rejectInfinity bool) *httptest.Server {
 		switch depth {
 		case "1":
 			entries = testWebDAVDepthOneEntries(requestPath)
+
+			if options.duplicateDepthOne && requestPath == "/Photos" {
+				entries = append(entries,
+					testWebDAVEntry{Href: "/Photos/2020/", Dir: true},
+					testWebDAVEntry{Href: "/Photos/cover.jpg", Size: 4},
+				)
+			}
 		case "infinity":
 			entries = testWebDAVDepthInfinityEntries(requestPath)
 		default:
@@ -117,25 +135,32 @@ func newTestWebDAVServer(rejectInfinity bool) *httptest.Server {
 }
 
 // newSlowWebDAVServer returns a WebDAV-like server that responds after a fixed delay.
-func newSlowWebDAVServer(delay time.Duration) *httptest.Server {
+func newSlowWebDAVServer(delay time.Duration, slowHeaders bool) *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		time.Sleep(delay)
-
 		switch r.Method {
 		case "MKCOL":
+			time.Sleep(delay)
 			w.WriteHeader(http.StatusCreated)
 		case http.MethodDelete:
+			time.Sleep(delay)
 			w.WriteHeader(http.StatusNoContent)
 		case "PROPFIND":
+			time.Sleep(delay)
 			w.Header().Set("Content-Type", "application/xml; charset=utf-8")
 			w.WriteHeader(http.StatusMultiStatus)
 			_, _ = io.WriteString(w, testWebDAVMultiStatus(testWebDAVDepthOneEntries("/")))
 		case http.MethodGet:
+			if slowHeaders {
+				time.Sleep(delay)
+			}
 			w.WriteHeader(http.StatusOK)
 			_, _ = io.WriteString(w, "test")
 		case http.MethodPut:
 			_, _ = io.Copy(io.Discard, r.Body)
 			_ = r.Body.Close()
+			if slowHeaders {
+				time.Sleep(delay)
+			}
 			w.WriteHeader(http.StatusCreated)
 		default:
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -347,6 +372,21 @@ func TestClient_DirectoriesDepthFallback(t *testing.T) {
 	})
 }
 
+func TestClient_DirectoriesDepthFallback_DeduplicatesEntries(t *testing.T) {
+	server := newTestWebDAVServerWithOptions(testWebDAVServerOptions{
+		rejectInfinity:    true,
+		duplicateDepthOne: true,
+	})
+	t.Cleanup(server.Close)
+
+	client, err := NewClient(server.URL+"/", "", "", TimeoutLow, "")
+	require.NoError(t, err)
+
+	dirs, err := client.Directories("Photos", true, MaxRequestDuration)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"/Photos", "/Photos/2020", "/Photos/2020/03", "/Photos/2021"}, dirs.Abs())
+}
+
 func TestClient_FilesExcludeHiddenEntries(t *testing.T) {
 	server := newTestWebDAVServer(false)
 	t.Cleanup(server.Close)
@@ -374,7 +414,7 @@ func TestClient_FilesExcludeHiddenEntries(t *testing.T) {
 }
 
 func TestClient_OperationTimeouts(t *testing.T) {
-	server := newSlowWebDAVServer(200 * time.Millisecond)
+	server := newSlowWebDAVServer(200*time.Millisecond, false)
 	t.Cleanup(server.Close)
 
 	client, err := NewClient(server.URL+"/", "", "", TimeoutLow, "")
@@ -399,7 +439,7 @@ func TestClient_OperationTimeouts(t *testing.T) {
 }
 
 func TestClient_TransferOperationsIgnoreServiceTimeout(t *testing.T) {
-	server := newSlowWebDAVServer(200 * time.Millisecond)
+	server := newSlowWebDAVServer(200*time.Millisecond, false)
 	t.Cleanup(server.Close)
 
 	client, err := NewClient(server.URL+"/", "", "", TimeoutLow, "")
@@ -419,6 +459,26 @@ func TestClient_TransferOperationsIgnoreServiceTimeout(t *testing.T) {
 		data, readErr := os.ReadFile(dest)
 		require.NoError(t, readErr)
 		assert.Equal(t, "test", string(data))
+	})
+}
+
+func TestClient_TransferOperationsIgnoreSlowResponseHeaders(t *testing.T) {
+	server := newSlowWebDAVServer(200*time.Millisecond, true)
+	t.Cleanup(server.Close)
+
+	client, err := NewClient(server.URL+"/", "", "", TimeoutLow, "")
+	require.NoError(t, err)
+	client.timeout = 25 * time.Millisecond
+
+	t.Run("UploadResponseHeaders", func(t *testing.T) {
+		err := client.Upload(fs.Abs("testdata/example.jpg"), "slow-upload.jpg")
+		require.NoError(t, err)
+	})
+	t.Run("DownloadResponseHeaders", func(t *testing.T) {
+		dest := filepath.Join(t.TempDir(), "slow.txt")
+		err := client.Download("/slow.txt", dest, false)
+		require.NoError(t, err)
+		assert.True(t, fs.FileExists(dest))
 	})
 }
 

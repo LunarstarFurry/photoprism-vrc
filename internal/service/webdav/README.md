@@ -41,6 +41,7 @@ Available timeout settings for `Service.AccTimeout` and `webdav.Timeout`:
 
 - `Timeout` values map to total HTTP request timeouts for non-transfer WebDAV calls such as directory discovery, file listing, directory creation, and delete operations.
 - `Upload()` and `Download()` intentionally bypass the service timeout so long-running file transfers are not aborted by a total request deadline.
+- Transfer requests still apply connection-level safeguards such as connect, TLS handshake, and pooled idle connection limits to avoid hanging before a transfer is established.
 - In timeout-aware helper calls, `timeout=0` means "use the client's configured default timeout" (`c.timeout`), not "disable timeouts".
 - A negative helper timeout means "do not override the current client/request timeout behavior"; this is used internally for legacy no-override call paths.
 - Recursive directory discovery also applies the effective timeout as an overall traversal deadline, so iterative fallback walks do not run indefinitely.
@@ -48,7 +49,7 @@ Available timeout settings for `Service.AccTimeout` and `webdav.Timeout`:
 
 ### Logging
 
-When a recursive `PROPFIND` fails, the client logs the failure and emits an informational message if it successfully switches to the iterative `Depth: 1` fallback. This gives operators enough context to diagnose depth-limited servers without reducing the user-facing API response to only "could not connect".
+When a recursive `PROPFIND` fails, the client logs the failure and emits an informational message if it successfully switches to the iterative `Depth: 1` fallback. Successful fallback logs include the number of follow-up `PROPFIND` requests and the elapsed traversal time so operators can diagnose depth-limited servers without reducing the user-facing API response to only "could not connect".
 
 ### Package Layout
 
