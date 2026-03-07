@@ -310,22 +310,29 @@ func redirect(w http.ResponseWriter, req *http.Request, conf *config.Config) {
 
 // canonicalRedirectTarget returns the HTTPS redirect target using the configured public site host.
 func canonicalRedirectTarget(req *http.Request, conf *config.Config) string {
-	target := &url.URL{
-		Scheme:   "https",
-		Host:     "",
-		Path:     "/",
-		RawPath:  "",
-		RawQuery: "",
-	}
+	targetHost := ""
 
 	if req != nil {
-		target.Host = req.Host
+		targetHost = req.Host
 	}
 
 	if conf != nil {
 		if host := conf.SiteHost(); host != "" {
-			target.Host = host
+			targetHost = host
 		}
+	}
+
+	return HTTPSRedirectTarget(req, targetHost)
+}
+
+// HTTPSRedirectTarget returns the HTTPS redirect target for the provided request and host.
+func HTTPSRedirectTarget(req *http.Request, host string) string {
+	target := &url.URL{
+		Scheme:   "https",
+		Host:     host,
+		Path:     "/",
+		RawPath:  "",
+		RawQuery: "",
 	}
 
 	if req != nil && req.URL != nil {
