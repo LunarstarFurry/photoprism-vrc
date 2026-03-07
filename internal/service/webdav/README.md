@@ -4,7 +4,7 @@
 
 ### Overview
 
-`internal/service/webdav` contains the outbound WebDAV client used by PhotoPrism services and background workers. It wraps `github.com/emersion/go-webdav` with PhotoPrism-specific URL validation, request timeouts, filesystem mapping, and error/logging behavior for remote uploads, downloads, and synchronization.
+`internal/service/webdav` contains the outbound WebDAV client used by PhotoPrism services and background workers. It wraps `github.com/emersion/go-webdav` with PhotoPrism-specific URL validation, control-operation timeouts, filesystem mapping, and error/logging behavior for remote uploads, downloads, and synchronization.
 
 ### Main Responsibilities
 
@@ -12,6 +12,7 @@
 - Normalize remote paths and expose them as `pkg/fs.FileInfo` values.
 - Support uploads, downloads, deletes, and remote directory creation.
 - Enumerate remote directories for service folder browsing and sync refresh jobs.
+- Exclude hidden dotfiles and entries inside hidden dot-directories because these are often lock files, partial uploads, or provider-managed metadata.
 
 ### Recursive Directory Discovery
 
@@ -28,7 +29,20 @@ This behavior exists because some providers and appliances accept `Depth: 1` but
 
 ### Timeout Behavior
 
-- `Timeout` values map to total HTTP request timeouts for outbound WebDAV calls.
+Available timeout settings for `Service.AccTimeout` and `webdav.Timeout`:
+
+| Setting | Value      | Effective Timeout |
+|:--------|:-----------|:------------------|
+| Default | `""`       | `60s`             |
+| Medium  | `"medium"` | `60s`             |
+| Low     | `"low"`    | `30s`             |
+| High    | `"high"`   | `120s`            |
+| None    | `"none"`   | no timeout        |
+
+- `Timeout` values map to total HTTP request timeouts for non-transfer WebDAV calls such as directory discovery, file listing, directory creation, and delete operations.
+- `Upload()` and `Download()` intentionally bypass the service timeout so long-running file transfers are not aborted by a total request deadline.
+- In timeout-aware helper calls, `timeout=0` means "use the client's configured default timeout" (`c.timeout`), not "disable timeouts".
+- A negative helper timeout means "do not override the current client/request timeout behavior"; this is used internally for legacy no-override call paths.
 - Recursive directory discovery also applies the effective timeout as an overall traversal deadline, so iterative fallback walks do not run indefinitely.
 - `MaxRequestDuration` is used for long-running recursive directory discovery, including the `Depth: 1` fallback.
 

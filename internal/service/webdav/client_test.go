@@ -1,6 +1,7 @@
 package webdav
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -9,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -34,13 +36,26 @@ type testWebDAVEntry struct {
 var testWebDAVTree = map[string][]testWebDAVEntry{
 	"/": {
 		{Href: "/", Dir: true},
+		{Href: "/.locks/", Dir: true},
+		{Href: "/.partial-upload", Size: 1},
 		{Href: "/Photos/", Dir: true},
 		{Href: "/Shared/", Dir: true},
 	},
+	"/.locks": {
+		{Href: "/.locks/", Dir: true},
+		{Href: "/.locks/upload.tmp", Size: 2},
+	},
 	"/Photos": {
 		{Href: "/Photos/", Dir: true},
+		{Href: "/Photos/.upload.part", Size: 3},
+		{Href: "/Photos/.staging/", Dir: true},
+		{Href: "/Photos/cover.jpg", Size: 4},
 		{Href: "/Photos/2020/", Dir: true},
 		{Href: "/Photos/2021/", Dir: true},
+	},
+	"/Photos/.staging": {
+		{Href: "/Photos/.staging/", Dir: true},
+		{Href: "/Photos/.staging/incomplete.jpg", Size: 5},
 	},
 	"/Photos/2020": {
 		{Href: "/Photos/2020/", Dir: true},
@@ -96,7 +111,35 @@ func newTestWebDAVServer(rejectInfinity bool) *httptest.Server {
 
 		w.Header().Set("Content-Type", "application/xml; charset=utf-8")
 		w.WriteHeader(http.StatusMultiStatus)
+		//nolint:gosec // test fixture emits locally generated WebDAV XML only
 		_, _ = w.Write([]byte(testWebDAVMultiStatus(entries)))
+	}))
+}
+
+// newSlowWebDAVServer returns a WebDAV-like server that responds after a fixed delay.
+func newSlowWebDAVServer(delay time.Duration) *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(delay)
+
+		switch r.Method {
+		case "MKCOL":
+			w.WriteHeader(http.StatusCreated)
+		case http.MethodDelete:
+			w.WriteHeader(http.StatusNoContent)
+		case "PROPFIND":
+			w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+			w.WriteHeader(http.StatusMultiStatus)
+			_, _ = io.WriteString(w, testWebDAVMultiStatus(testWebDAVDepthOneEntries("/")))
+		case http.MethodGet:
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, "test")
+		case http.MethodPut:
+			_, _ = io.Copy(io.Discard, r.Body)
+			_ = r.Body.Close()
+			w.WriteHeader(http.StatusCreated)
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
 	}))
 }
 
@@ -301,6 +344,81 @@ func TestClient_DirectoriesDepthFallback(t *testing.T) {
 		dirs, err := client.Directories("", true, MaxRequestDuration)
 		require.NoError(t, err)
 		assert.ElementsMatch(t, expected, dirs.Abs())
+	})
+}
+
+func TestClient_FilesExcludeHiddenEntries(t *testing.T) {
+	server := newTestWebDAVServer(false)
+	t.Cleanup(server.Close)
+
+	client, err := NewClient(server.URL+"/", "", "", TimeoutLow, "")
+	require.NoError(t, err)
+
+	t.Run("NonRecursive", func(t *testing.T) {
+		files, err := client.Files("Photos", false)
+		require.NoError(t, err)
+		require.Len(t, files, 1)
+		assert.Equal(t, "/Photos/cover.jpg", files[0].Abs)
+	})
+	t.Run("Recursive", func(t *testing.T) {
+		files, err := client.Files("", true)
+		require.NoError(t, err)
+
+		paths := files.Abs()
+		assert.Contains(t, paths, "/Photos/cover.jpg")
+		assert.NotContains(t, paths, "/.partial-upload")
+		assert.NotContains(t, paths, "/.locks/upload.tmp")
+		assert.NotContains(t, paths, "/Photos/.upload.part")
+		assert.NotContains(t, paths, "/Photos/.staging/incomplete.jpg")
+	})
+}
+
+func TestClient_OperationTimeouts(t *testing.T) {
+	server := newSlowWebDAVServer(200 * time.Millisecond)
+	t.Cleanup(server.Close)
+
+	client, err := NewClient(server.URL+"/", "", "", TimeoutLow, "")
+	require.NoError(t, err)
+	client.timeout = 25 * time.Millisecond
+
+	t.Run("Mkdir", func(t *testing.T) {
+		err := client.Mkdir("slow-dir")
+		require.Error(t, err)
+		assert.True(t, strings.Contains(err.Error(), "Client.Timeout") || strings.Contains(err.Error(), "context deadline exceeded"))
+	})
+	t.Run("Files", func(t *testing.T) {
+		_, err := client.Files("", false)
+		require.Error(t, err)
+		assert.True(t, strings.Contains(err.Error(), "Client.Timeout") || strings.Contains(err.Error(), "context deadline exceeded"))
+	})
+	t.Run("Delete", func(t *testing.T) {
+		err := client.Delete("/slow.txt")
+		require.Error(t, err)
+		assert.True(t, strings.Contains(err.Error(), "Client.Timeout") || strings.Contains(err.Error(), "context deadline exceeded"))
+	})
+}
+
+func TestClient_TransferOperationsIgnoreServiceTimeout(t *testing.T) {
+	server := newSlowWebDAVServer(200 * time.Millisecond)
+	t.Cleanup(server.Close)
+
+	client, err := NewClient(server.URL+"/", "", "", TimeoutLow, "")
+	require.NoError(t, err)
+	client.timeout = 25 * time.Millisecond
+
+	t.Run("Upload", func(t *testing.T) {
+		err := client.Upload(fs.Abs("testdata/example.jpg"), "slow-upload.jpg")
+		require.NoError(t, err)
+	})
+	t.Run("Download", func(t *testing.T) {
+		dest := filepath.Join(t.TempDir(), "slow.txt")
+		err := client.Download("/slow.txt", dest, false)
+		require.NoError(t, err)
+
+		//nolint:gosec // test reads back a file created in t.TempDir()
+		data, readErr := os.ReadFile(dest)
+		require.NoError(t, readErr)
+		assert.Equal(t, "test", string(data))
 	})
 }
 

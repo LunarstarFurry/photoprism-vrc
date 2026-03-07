@@ -125,20 +125,16 @@ func (c *Client) timeoutContext(timeout time.Duration) (context.Context, context
 	return c.ctx, func() {}
 }
 
+// timeoutRequest returns a timeout-aware client and context for outbound WebDAV calls.
+func (c *Client) timeoutRequest(timeout time.Duration) (*webdav.Client, context.Context, context.CancelFunc) {
+	ctx, cancel := c.timeoutContext(timeout)
+	return c.withTimeout(timeout), ctx, cancel
+}
+
 // readDirContext returns the contents of the specified directory using the provided request context.
 func (c *Client) readDirContext(ctx context.Context, dir string, recursive bool, timeout time.Duration) ([]webdav.FileInfo, error) {
 	dir = trimPath(dir)
 	return c.withTimeout(timeout).ReadDir(ctx, dir, recursive)
-}
-
-// readDirWithTimeout returns the contents of the specified directory with a request time limit if timeout is not negative.
-func (c *Client) readDirWithTimeout(dir string, recursive bool, timeout time.Duration) ([]webdav.FileInfo, error) {
-	return c.readDirContext(c.ctx, dir, recursive, timeout)
-}
-
-// readDir returns the contents of the specified directory without a request timeout.
-func (c *Client) readDir(dir string, recursive bool) ([]webdav.FileInfo, error) {
-	return c.readDirWithTimeout(dir, recursive, -1)
 }
 
 // appendUniqueEntries adds new WebDAV entries only once while preserving response order.
@@ -168,7 +164,7 @@ func appendTraversalDirs(queue []string, current string, found []webdav.FileInfo
 
 		entryPath := trimPath(entry.Path)
 
-		if entryPath == "" || entryPath == current || seen[entryPath] {
+		if entryPath == "" || entryPath == current || isHiddenPath(entryPath) || seen[entryPath] {
 			continue
 		}
 
@@ -211,8 +207,10 @@ func (c *Client) Files(dir string, recursive bool) (result fs.FileInfos, err err
 	}()
 
 	dir = trimPath(dir)
+	ctx, cancel := c.timeoutContext(0)
+	defer cancel()
 
-	found, err := c.readDir(dir, recursive)
+	found, err := c.readDirContext(ctx, dir, recursive, 0)
 
 	if err != nil {
 		return result, err
@@ -221,7 +219,7 @@ func (c *Client) Files(dir string, recursive bool) (result fs.FileInfos, err err
 	result = make(fs.FileInfos, 0, len(found))
 
 	for _, f := range found {
-		if f.IsDir || f.Path == "" || strings.HasPrefix(f.Path, ".") {
+		if f.IsDir || f.Path == "" || isHiddenPath(f.Path) {
 			continue
 		}
 
@@ -259,7 +257,7 @@ func (c *Client) Directories(dir string, recursive bool, timeout time.Duration) 
 	result = make(fs.FileInfos, 0, len(found))
 
 	for _, f := range found {
-		if !f.IsDir || f.Path == "" || strings.HasPrefix(f.Path, ".") {
+		if !f.IsDir || f.Path == "" || isHiddenPath(f.Path) {
 			continue
 		}
 
@@ -302,8 +300,10 @@ func (c *Client) Mkdir(dir string) error {
 	}
 
 	c.mkdir[dir] = true
+	client, ctx, cancel := c.timeoutRequest(0)
+	defer cancel()
 
-	err := c.client.Mkdir(c.ctx, dir)
+	err := client.Mkdir(ctx, dir)
 
 	if err == nil {
 		return nil
@@ -342,7 +342,6 @@ func (c *Client) Upload(src, dest string) (err error) {
 	}()
 
 	var writer io.WriteCloser
-
 	writer, err = c.client.Create(c.ctx, dest)
 
 	if err != nil {
@@ -393,7 +392,6 @@ func (c *Client) Download(src, dest string, force bool) (err error) {
 	}
 
 	var reader io.ReadCloser
-
 	// Start download.
 	reader, err = c.client.Open(c.ctx, src)
 
@@ -465,5 +463,7 @@ func (c *Client) DownloadDir(src, dest string, recursive, force bool) (errs []er
 // Delete deletes a single file or directory on a remote server.
 func (c *Client) Delete(dir string) error {
 	dir = trimPath(dir)
-	return c.client.RemoveAll(c.ctx, dir)
+	client, ctx, cancel := c.timeoutRequest(0)
+	defer cancel()
+	return client.RemoveAll(ctx, dir)
 }
