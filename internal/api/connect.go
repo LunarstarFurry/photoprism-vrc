@@ -45,7 +45,7 @@ func Connect(router *gin.RouterGroup) {
 		}
 
 		if frm.Invalid() {
-			log.Warnf("connect: invalid token %s", clean.Log(frm.Token))
+			log.Warnf("connect: invalid connect token (%s)", clean.Log(name))
 			Abort(c, http.StatusBadRequest, i18n.ErrAccountConnect)
 			return
 		}
