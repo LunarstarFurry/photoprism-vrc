@@ -2,6 +2,7 @@ package photoprism
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/dustin/go-humanize/english"
 
@@ -70,7 +71,14 @@ func (w *Faces) Cluster(opt FacesOptions) (added entity.Faces, err error) {
 			results[n-1] = append(results[n-1], embeddings[i])
 		}
 
-		for _, cluster := range results {
+		start := time.Now()
+		resultLen := len(results)
+
+		for i, cluster := range results {
+			if time.Since(start) > time.Duration(time.Minute*15) {
+				log.Infof("cluster: added %d of %d faces", i, resultLen)
+				start = time.Now()
+			}
 			if f := entity.NewFace("", entity.SrcAuto, cluster); f == nil {
 				log.Errorf("faces: face must not be nil - you may have found a bug")
 			} else if f.SkipMatching() {

@@ -3,6 +3,9 @@ package alg
 
 import (
 	"sync"
+	"time"
+
+	"github.com/photoprism/photoprism/internal/event"
 )
 
 type dbscanClusterer struct {
@@ -154,7 +157,12 @@ func (c *dbscanClusterer) run() {
 		ns, nss    = make([]int, 0), make([]int, 0)
 	)
 
+	start := time.Now()
 	for i := 0; i < c.l; i++ {
+		if time.Since(start) > time.Duration(time.Minute*15) {
+			event.Log.Infof("cluster: processing %d of %d", i, c.l)
+			start = time.Now()
+		}
 		if c.v[i] {
 			continue
 		}
