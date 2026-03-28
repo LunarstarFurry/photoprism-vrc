@@ -188,10 +188,6 @@ body > .v-overlay-container .v-overlay__scrim {
     margin: 8px 0;
 }
 
-.v-dialog--upload .v-file-upload .v-btn.v-btn--flat {
-    background: rgb(var(--v-theme-highlight));
-}
-
 .v-overlay.v-dialog.v-dialog--sidepanel:not(.v-dialog--fullscreen) .v-overlay__content {
     height: 100vh;
     min-width: 940px;
