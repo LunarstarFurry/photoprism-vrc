@@ -77,6 +77,7 @@
 - Cached thumbnails are written as JPEG or PNG and may be reopened through bounded helper paths for crop, preview, and AI follow-up work.
 - TIFF is intentionally excluded from generic Go decoder registration in this package and related callers so future code paths cannot reach the unsafe generic TIFF dispatch by accident.
 - Already-decoded `image.Image` values are resized, cropped, rotated, and saved through stdlib plus `golang.org/x/image/draw` helpers so the package no longer depends on `github.com/disintegration/imaging`.
+- HEIC/HEIF and AVIF originals are converted through `vipsConvert`, which uses libvips (via libheif) to load and export the image. Because libheif always applies ISOBMFF `irot`/`imir` container transforms during decode and the HEIF spec treats EXIF orientation as informational only (see `strukturag/libheif#227`), `vipsConvert` skips explicit EXIF-based rotation entirely for images loaded through `heifload`. Older Apple HEIC files without `irot` (e.g. iPhone 7) that carry EXIF orientation are non-conformant per the spec and are not auto-rotated by this path.
 
 ### Go 1.26 JPEG Notes
 

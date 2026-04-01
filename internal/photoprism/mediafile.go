@@ -1177,10 +1177,10 @@ func (m *MediaFile) SkipTranscoding() bool {
 	return !m.NeedsTranscoding()
 }
 
-// IsImageOther returns true if this is a PNG, GIF, BMP, TIFF, or WebP file.
+// IsImageOther returns true if this is a PNG, GIF, BMP, TIFF, HEIC/HEIF, AVIF, or WebP file.
 func (m *MediaFile) IsImageOther() bool {
 	switch {
-	case m.IsPng(), m.IsGif(), m.IsTiff(), m.IsBmp(), m.IsWebp():
+	case m.IsPng(), m.IsGif(), m.IsTiff(), m.IsBmp(), m.IsHeic(), m.IsAvif(), m.IsWebp():
 		return true
 	default:
 		return false
