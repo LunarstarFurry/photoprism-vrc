@@ -25,7 +25,7 @@ This file tells automated coding agents (and humans) where to find the single so
 
 ### Local Agent Progress
 
-- Use root-level task files to track progress and handoff notes across sessions/environments:
+- Use the following task files to track progress and handoff notes across sessions/environments:
   - `.agents/TODO.md` for actionable tasks.
   - `.agents/DONE.md` for completed tasks.
 - These files are local workflow aids and may not exist yet in a given workspace.
