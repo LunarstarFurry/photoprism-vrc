@@ -133,8 +133,54 @@ func SanitizeTitle(title string) string {
 	return result
 }
 
+var (
+	vrcxWorldRegexp      = regexp.MustCompile(`"?world"?\s*:\s*\{[^}]*"?name"?\s*:\s*"?([^,"}]+)"?`)
+	vrcxAuthorRegexp     = regexp.MustCompile(`"?author"?\s*:\s*\{[^}]*"?displayName"?\s*:\s*"?([^,"}]+)"?`)
+	vrcxPlayersRegexp    = regexp.MustCompile(`"?players"?\s*:\s*\[(.*?)\]`)
+	vrcxPlayerNameRegexp = regexp.MustCompile(`"?displayName"?\s*:\s*"?([^,"}]+)"?`)
+)
+
+// FormatVRCX formats embedded VRChat metadata.
+func FormatVRCX(s string) string {
+	if !strings.Contains(s, "application:VRCX") && !strings.Contains(s, "\"application\":\"VRCX\"") {
+		return s
+	}
+
+	var parts []string
+
+	// Extract world name
+	if m := vrcxWorldRegexp.FindStringSubmatch(s); len(m) > 1 {
+		parts = append(parts, "World: "+m[1])
+	}
+
+	// Extract author
+	if m := vrcxAuthorRegexp.FindStringSubmatch(s); len(m) > 1 {
+		parts = append(parts, "Author: "+m[1])
+	}
+
+	// Extract players
+	if m := vrcxPlayersRegexp.FindStringSubmatch(s); len(m) > 1 {
+		playersStr := m[1]
+		matches := vrcxPlayerNameRegexp.FindAllStringSubmatch(playersStr, -1)
+		var players []string
+		for _, match := range matches {
+			players = append(players, match[1])
+		}
+		if len(players) > 0 {
+			parts = append(parts, "Players: "+strings.Join(players, ", "))
+		}
+	}
+
+	if len(parts) > 0 {
+		return "VRChat - " + strings.Join(parts, " | ")
+	}
+
+	return s
+}
+
 // SanitizeCaption normalizes metadata captions and removes unwanted text.
 func SanitizeCaption(s string) string {
+	s = FormatVRCX(s)
 	s = SanitizeString(s)
 
 	switch {
