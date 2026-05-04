@@ -85,6 +85,8 @@ func SanitizeString(s string) string {
 		return ""
 	}
 
+	s = FormatVRCX(s)
+
 	return SanitizeUnicode(strings.ReplaceAll(s, "\"", ""))
 }
 
@@ -180,7 +182,6 @@ func FormatVRCX(s string) string {
 
 // SanitizeCaption normalizes metadata captions and removes unwanted text.
 func SanitizeCaption(s string) string {
-	s = FormatVRCX(s)
 	s = SanitizeString(s)
 
 	switch {

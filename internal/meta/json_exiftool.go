@@ -392,6 +392,7 @@ func (data *Data) Exiftool(jsonData []byte, originalName string) (err error) {
 	data.Title = SanitizeTitle(data.Title)
 	data.Subject = SanitizeMeta(data.Subject)
 	data.Artist = SanitizeMeta(data.Artist)
+	data.Notes = SanitizeString(data.Notes)
 
 	// Ignore numeric model names as they are probably invalid.
 	if txt.IsUInt(data.LensModel) {
