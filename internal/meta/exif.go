@@ -323,6 +323,12 @@ func (data *Data) Exif(fileName string, fileFormat fs.Type, bruteForce bool) (er
 		data.Caption = SanitizeCaption(value)
 	}
 
+	if value, ok := data.exif["UserComment"]; ok {
+		data.Notes = SanitizeString(value)
+	} else if value, ok := data.exif["Comment"]; ok {
+		data.Notes = SanitizeString(value)
+	}
+
 	if value, ok := data.exif["ProjectionType"]; ok {
 		data.AddKeywords(KeywordPanorama)
 		data.Projection = projection.New(SanitizeString(value)).String()
