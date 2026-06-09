@@ -6,6 +6,11 @@ This specific fork of PhotoPrism introduces support for displaying metadata from
 
 Important Limitation: This feature has only been tested in read-only mode. Using non-read-only modes with this branch is currently untested and not recommended, as it may result in unexpected behavior. Feel free to yolo tho.
 
+## Screenshots of this Custom Brench ##
+<img width="1806" height="1126" alt="image" src="https://github.com/user-attachments/assets/f1d95b2a-ab59-409a-8b14-158ee7f648b0" />
+<img width="1668" height="1114" alt="image" src="https://github.com/user-attachments/assets/86161fc2-91ea-47ea-9f01-562154df3121" />
+
+
 
 [![License: AGPL](https://img.shields.io/badge/license-AGPL%203.0-454377.svg)](https://docs.photoprism.app/license/agpl/)
 [![Documentation](https://img.shields.io/badge/read-the%20docs-4d6a91.svg)](https://docs.photoprism.app/)
