@@ -412,10 +412,10 @@ func (data *Data) Exiftool(jsonData []byte, originalName string) (err error) {
 
 			if len(parts) > 0 {
 				vrcStr := "VRChat - " + strings.Join(parts, " | ")
-				if data.Notes == "" {
-					data.Notes = vrcStr
+				if data.Caption == "" {
+					data.Caption = vrcStr
 				} else {
-					data.Notes = data.Notes + " / " + vrcStr
+					data.Caption = data.Caption + " / " + vrcStr
 				}
 			}
 		}
