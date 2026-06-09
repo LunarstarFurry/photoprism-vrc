@@ -394,6 +394,33 @@ func (data *Data) Exiftool(jsonData []byte, originalName string) (err error) {
 	data.Artist = SanitizeMeta(data.Artist)
 	data.Notes = SanitizeString(data.Notes)
 
+	// Fallback for native VRChat metadata
+	if data.VRCWorldName != "" || data.VRCWorldID != "" || data.VRCAuthorID != "" {
+		if !strings.Contains(data.Caption, "VRChat - ") && !strings.Contains(data.Notes, "VRChat - ") {
+			var parts []string
+			if data.VRCWorldName != "" {
+				parts = append(parts, "World: "+data.VRCWorldName)
+			} else if data.VRCWorldID != "" {
+				parts = append(parts, "World: "+data.VRCWorldID)
+			}
+
+			if data.Artist != "" {
+				parts = append(parts, "Author: "+data.Artist)
+			} else if data.VRCAuthorID != "" {
+				parts = append(parts, "Author: "+data.VRCAuthorID)
+			}
+
+			if len(parts) > 0 {
+				vrcStr := "VRChat - " + strings.Join(parts, " | ")
+				if data.Notes == "" {
+					data.Notes = vrcStr
+				} else {
+					data.Notes = data.Notes + " / " + vrcStr
+				}
+			}
+		}
+	}
+
 	// Ignore numeric model names as they are probably invalid.
 	if txt.IsUInt(data.LensModel) {
 		data.LensModel = ""

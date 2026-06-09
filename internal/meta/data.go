@@ -41,7 +41,7 @@ type Data struct {
 	Keywords         Keywords      `meta:"Keywords"`
 	Favorite         bool          `meta:"Favorite"`
 	Notes            string        `meta:"Comment,UserComment"`
-	Artist           string        `meta:"Artist,Creator,By-line,OwnerName,Owner" xmp:"Creator"`
+	Artist           string        `meta:"Artist,Creator,Author,By-line,OwnerName,Owner" xmp:"Creator"`
 	Copyright        string        `meta:"Rights,Copyright,CopyrightNotice,WebStatement" xmp:"Rights,Rights.Alt"`
 	License          string        `meta:"UsageTerms,License"`
 	Projection       string        `meta:"ProjectionType"`
@@ -64,6 +64,9 @@ type Data struct {
 	GPSPosition      string        `meta:"GPSPosition"`
 	GPSLatitude      string        `meta:"GPSLatitude"`
 	GPSLongitude     string        `meta:"GPSLongitude"`
+	VRCWorldID       string        `meta:"WorldID"`
+	VRCWorldName     string        `meta:"WorldDisplayName"`
+	VRCAuthorID      string        `meta:"AuthorID"`
 	Lat              float64       `meta:"-"`
 	Lng              float64       `meta:"-"`
 	Altitude         float64       `meta:"GlobalAltitude,GPSAltitude"`
