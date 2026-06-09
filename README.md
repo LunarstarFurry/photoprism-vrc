@@ -2,7 +2,7 @@ PhotoPrism: Browse Your Life in Pictures
 ========================================
 
 ⚠️ About this Custom Branch:
-This specific fork of PhotoPrism introduces support for displaying metadata from Native VRC (VRChat) and VRCX directly within the descriptions of your photos. Including World Take, Author, and players if VRCX are installed.
+This specific fork of PhotoPrism introduces support for displaying metadata from Native VRC (VRChat) and VRCX directly within the descriptions of your photos. Including World Taken, Author, and players if VRCX are installed.
 
 Important Limitation: This feature has only been tested in read-only mode. Using non-read-only modes with this branch is currently untested and not recommended, as it may result in unexpected behavior. Feel free to yolo tho.
 
