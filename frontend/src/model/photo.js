@@ -143,7 +143,7 @@ export class Photo extends RestModel {
       const title = values.Title !== undefined ? values.Title : this.Title;
 
       // Format auto-generated titles to match the viewer's local time zone
-      if (takenAt && (titleSrc === "auto" || !title)) {
+      if (takenAt && (!titleSrc || titleSrc === "auto" || !title)) {
         try {
           const timeZone = $config.get("timeZone") || "local";
           const fmt = DateTime.fromISO(takenAt, { zone: timeZone }).toFormat("yyyy-MM-dd HH:mm:ss");
