@@ -6,8 +6,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/dustin/go-humanize/english"
-
 	"github.com/photoprism/photoprism/internal/ai/classify"
 	"github.com/photoprism/photoprism/pkg/clean"
 	"github.com/photoprism/photoprism/pkg/fs"
