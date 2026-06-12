@@ -136,6 +136,31 @@ export class Photo extends RestModel {
     };
   }
 
+  setValues(values, scalarOnly) {
+    if (values) {
+      const takenAt = values.TakenAt !== undefined ? values.TakenAt : this.TakenAt;
+      const titleSrc = values.TitleSrc !== undefined ? values.TitleSrc : this.TitleSrc;
+      const title = values.Title !== undefined ? values.Title : this.Title;
+
+      // Format auto-generated titles to match the viewer's local time zone
+      if (takenAt && (titleSrc === "auto" || !title)) {
+        try {
+          const timeZone = $config.get("timeZone") || "local";
+          const fmt = DateTime.fromISO(takenAt, { zone: timeZone }).toFormat("yyyy-MM-dd HH:mm:ss");
+          if (fmt && fmt !== "Invalid DateTime") {
+            values.Title = fmt;
+          }
+        } catch (e) {
+          console.error(e);
+        }
+      }
+    }
+
+    super.setValues(values, scalarOnly);
+
+    return this;
+  }
+
   classes() {
     return this.generateClasses(this.isPlayable(), PhotoClipboard.has(this), this.Portrait, this.Favorite, this.Private, this.isStack());
   }

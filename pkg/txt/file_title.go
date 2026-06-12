@@ -50,6 +50,21 @@ func FileTitle(s string) string {
 		}
 	}
 
+	// Remove trailing date numbers if there are multiple consecutive ones (indicating a timestamp).
+	var dateNumbers int
+	for i := len(result) - 1; i >= 0; i-- {
+		if IsDateNumber(result[i]) {
+			dateNumbers++
+		} else {
+			break
+		}
+	}
+
+	if dateNumbers > 1 {
+		result = result[:len(result)-dateNumbers]
+		found = len(result)
+	}
+
 	if found == 0 {
 		return ""
 	}

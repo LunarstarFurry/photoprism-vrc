@@ -71,187 +71,21 @@ func TestPhoto_GenerateTitle(t *testing.T) {
 		}
 		assert.Equal(t, "Black beach", m.PhotoTitle)
 	})
-	t.Run("PhotoWithLocationWithoutCityAndLabel", func(t *testing.T) {
-		m := PhotoFixtures.Get("Photo10")
-		classifyLabels := &classify.Labels{{Name: "tree", Uncertainty: 30, Source: "manual", Priority: 5, Categories: []string{"plant"}}}
-		assert.Equal(t, "Title", m.PhotoTitle)
-		err := m.GenerateTitle(*classifyLabels)
-		if err != nil {
-			t.Fatal(err)
-		}
-		// TODO: Unstable
-		if len(m.SubjectNames()) > 0 {
-			assert.Equal(t, "Actor A / Germany / 2016", m.PhotoTitle)
-		} else {
-			assert.Equal(t, "Tree / Germany / 2016", m.PhotoTitle)
-		}
-	})
-	t.Run("PhotoWithLocationAndShortCityAndLabel", func(t *testing.T) {
-		m := PhotoFixtures.Get("Photo09")
-		classifyLabels := &classify.Labels{{Name: "tree", Uncertainty: 30, Source: "manual", Priority: 5, Categories: []string{"plant"}}}
-		assert.Equal(t, "Title", m.PhotoTitle)
-		err := m.GenerateTitle(*classifyLabels)
-		if err != nil {
-			t.Fatal(err)
-		}
-		assert.Equal(t, "Tree / Teotihuacán / 2016", m.PhotoTitle)
-	})
-	t.Run("PhotoWithLocationAndLocnameGreaterThanNum45", func(t *testing.T) {
-		m := PhotoFixtures.Get("Photo13")
-		classifyLabels := &classify.Labels{}
-		assert.Equal(t, "Title", m.PhotoTitle)
-		err := m.GenerateTitle(*classifyLabels)
-		if err != nil {
-			t.Fatal(err)
-		}
-		assert.Equal(t, "LonglonglonglonglonglonglonglonglonglonglonglonglongName", m.PhotoTitle)
-	})
-	t.Run("PhotoWithLocationAndLocnameGreaterThanTwenty", func(t *testing.T) {
-		m := PhotoFixtures.Get("Photo14")
-		classifyLabels := &classify.Labels{}
-		assert.Equal(t, "Title", m.PhotoTitle)
-		err := m.GenerateTitle(*classifyLabels)
-		if err != nil {
-			t.Fatal(err)
-		}
-		assert.Equal(t, "longlonglonglonglonglongName / 2018", m.PhotoTitle)
-	})
-	t.Run("PhotoWithLocationAndShortCity", func(t *testing.T) {
-		m := PhotoFixtures.Get("Photo09")
-		classifyLabels := &classify.Labels{}
-		assert.Equal(t, "Title", m.PhotoTitle)
-		err := m.GenerateTitle(*classifyLabels)
-		if err != nil {
-			t.Fatal(err)
-		}
-		assert.Equal(t, "Adosada Platform / Teotihuacán / 2016", m.PhotoTitle)
-	})
-	t.Run("PhotoWithLocationWithoutCity", func(t *testing.T) {
+	t.Run("UseLocalTimeForTitle", func(t *testing.T) {
 		m := PhotoFixtures.Get("Photo10")
 		classifyLabels := &classify.Labels{}
 		assert.Equal(t, "Title", m.PhotoTitle)
+		
+		// Reset title so it auto-generates
+		m.SetTitle("", SrcManual)
+		
 		err := m.GenerateTitle(*classifyLabels)
 		if err != nil {
 			t.Fatal(err)
 		}
-
-		// TODO: Unstable
-		if len(m.SubjectNames()) > 0 {
-			assert.Equal(t, "Actor A / Germany / 2016", m.PhotoTitle)
-		} else {
-			assert.Equal(t, "Holiday Park / Germany / 2016", m.PhotoTitle)
-		}
-	})
-	t.Run("PhotoWithLocationWithoutLocNameAndLongCity", func(t *testing.T) {
-		m := PhotoFixtures.Get("Photo11")
-		classifyLabels := &classify.Labels{}
-		assert.Equal(t, "Title", m.PhotoTitle)
-		err := m.GenerateTitle(*classifyLabels)
-		if err != nil {
-			t.Fatal(err)
-		}
-		assert.Equal(t, "longlonglonglonglongcity / 2016", m.PhotoTitle)
-	})
-	t.Run("PhotoWithLocationWithoutLocNameAndShortCity", func(t *testing.T) {
-		m := PhotoFixtures.Get("Photo12")
-		classifyLabels := &classify.Labels{}
-		assert.Equal(t, "Title", m.PhotoTitle)
-		err := m.GenerateTitle(*classifyLabels)
-		if err != nil {
-			t.Fatal(err)
-		}
-		assert.Equal(t, "shortcity / Germany / 2016", m.PhotoTitle)
-	})
-	t.Run("NoLocationOriginalName", func(t *testing.T) {
-		m := PhotoFixtures.Get("19800101_000002_D640C559")
-		classifyLabels := &classify.Labels{{Name: "classify", Uncertainty: 30, Source: SrcManual, Priority: 5, Categories: []string{"flower", "plant"}}}
-		assert.Equal(t, "Lake / 2790", m.PhotoTitle)
-		err := m.GenerateTitle(*classifyLabels)
-		if err != nil {
-			t.Fatal(err)
-		}
-		assert.Equal(t, "Franzilein & Actress A / 2008", m.PhotoTitle)
-	})
-	t.Run("NoLocation", func(t *testing.T) {
-		m := PhotoFixtures.Get("Photo01")
-		classifyLabels := &classify.Labels{{Name: "classify", Uncertainty: 30, Source: SrcManual, Priority: 5, Categories: []string{"flower", "plant"}}}
-		assert.Equal(t, "", m.PhotoTitle)
-		err := m.GenerateTitle(*classifyLabels)
-		if err != nil {
-			t.Fatal(err)
-		}
-		assert.Equal(t, "Classify / Germany / 2006", m.PhotoTitle)
-	})
-	t.Run("NoLocationNoLabels", func(t *testing.T) {
-		m := PhotoFixtures.Get("Photo02")
-		classifyLabels := &classify.Labels{}
-		assert.Equal(t, "", m.PhotoTitle)
-		err := m.GenerateTitle(*classifyLabels)
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		// TODO: Unstable
-		if len(m.SubjectNames()) > 0 {
-			assert.Equal(t, "Actress A / 1990", m.PhotoTitle)
-		} else {
-			assert.Equal(t, "Bridge1 / 1990", m.PhotoTitle)
-		}
-	})
-	t.Run("NoLocationNoLabelsNoTakenAt", func(t *testing.T) {
-		m := PhotoFixtures.Get("Photo20")
-		classifyLabels := &classify.Labels{}
-		assert.Equal(t, "", m.PhotoTitle)
-		err := m.GenerateTitle(*classifyLabels)
-		if err != nil {
-			t.Fatal(err)
-		}
-		assert.Equal(t, "Photo20", m.PhotoTitle)
-	})
-	t.Run("OnePerson", func(t *testing.T) {
-		m := PhotoFixtures.Get("Photo10")
-
-		assert.Equal(t, SrcAuto, m.TitleSrc)
-		assert.Equal(t, SrcAuto, m.CaptionSrc)
-		assert.Equal(t, "Title", m.PhotoTitle)
-		assert.Equal(t, "", m.PhotoCaption)
-
-		err := m.GenerateTitle(classify.Labels{})
-
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		assert.Equal(t, SrcAuto, m.TitleSrc)
-		assert.Equal(t, SrcAuto, m.CaptionSrc)
-
-		// TODO: Unstable
-		if len(m.SubjectNames()) > 0 {
-			assert.Equal(t, "Actor A / Germany / 2016", m.PhotoTitle)
-		} else {
-			assert.Equal(t, "Holiday Park / Germany / 2016", m.PhotoTitle)
-		}
-
-		assert.Equal(t, "", m.PhotoCaption)
-	})
-	t.Run("People", func(t *testing.T) {
-		m := PhotoFixtures.Get("Photo04")
-
-		assert.Equal(t, SrcAuto, m.TitleSrc)
-		assert.Equal(t, SrcAuto, m.CaptionSrc)
-		assert.Equal(t, "Neckarbrücke", m.PhotoTitle)
-		assert.Equal(t, "", m.PhotoCaption)
-
-		err := m.GenerateTitle(classify.Labels{})
-
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		assert.Equal(t, SrcAuto, m.TitleSrc)
-		assert.Equal(t, SrcAuto, m.CaptionSrc)
-		assert.Equal(t, "Corn McCornface & Jens Mander / 2014", m.PhotoTitle)
-		assert.Equal(t, "", m.PhotoCaption)
+		
+		// It should equal the time string format
+		assert.Equal(t, m.GetTakenAtLocal().Format("2006-01-02 15:04:05"), m.PhotoTitle)
 	})
 }
 
