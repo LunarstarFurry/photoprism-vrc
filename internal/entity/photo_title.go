@@ -88,34 +88,34 @@ func (m *Photo) GenerateTitle(labels classify.Labels) error {
 			if l := len([]rune(names)); l > 35 {
 				m.SetTitle(names, SrcAuto)
 			} else if l > 20 && (loc.NoCity() || loc.LongCity()) {
-				m.SetTitle(fmt.Sprintf("%s / %s", names, m.TakenAt.Format("2006")), SrcAuto)
+				m.SetTitle(fmt.Sprintf("%s / %s", names, m.GetTakenAtLocal().Format("2006")), SrcAuto)
 			} else if l > 20 {
 				m.SetTitle(fmt.Sprintf("%s / %s", names, loc.City()), SrcAuto)
 			} else if loc.NoCity() || loc.LongCity() {
-				m.SetTitle(fmt.Sprintf("%s / %s / %s", names, loc.CountryName(), m.TakenAt.Format("2006")), SrcAuto)
+				m.SetTitle(fmt.Sprintf("%s / %s / %s", names, loc.CountryName(), m.GetTakenAtLocal().Format("2006")), SrcAuto)
 			} else {
-				m.SetTitle(fmt.Sprintf("%s / %s / %s", names, loc.City(), m.TakenAt.Format("2006")), SrcAuto)
+				m.SetTitle(fmt.Sprintf("%s / %s / %s", names, loc.City(), m.GetTakenAtLocal().Format("2006")), SrcAuto)
 			}
 		} else if title := labels.Title(loc.Name()); title != "" {
 			log.Debugf("photo: %s title based on label %s", m.String(), clean.Log(title))
 			if loc.NoCity() || loc.LongCity() || loc.CityContains(title) {
-				m.SetTitle(fmt.Sprintf("%s / %s / %s", txt.Title(title), loc.CountryName(), m.TakenAt.Format("2006")), SrcAuto)
+				m.SetTitle(fmt.Sprintf("%s / %s / %s", txt.Title(title), loc.CountryName(), m.GetTakenAtLocal().Format("2006")), SrcAuto)
 			} else {
-				m.SetTitle(fmt.Sprintf("%s / %s / %s", txt.Title(title), loc.City(), m.TakenAt.Format("2006")), SrcAuto)
+				m.SetTitle(fmt.Sprintf("%s / %s / %s", txt.Title(title), loc.City(), m.GetTakenAtLocal().Format("2006")), SrcAuto)
 			}
 		} else if loc.Name() != "" && loc.City() != "" {
 			if len(loc.Name()) > 45 {
 				m.SetTitle(txt.Title(loc.Name()), SrcAuto)
 			} else if len(loc.Name()) > 20 || len(loc.City()) > 16 || strings.Contains(loc.Name(), loc.City()) {
-				m.SetTitle(fmt.Sprintf("%s / %s", loc.Name(), m.TakenAt.Format("2006")), SrcAuto)
+				m.SetTitle(fmt.Sprintf("%s / %s", loc.Name(), m.GetTakenAtLocal().Format("2006")), SrcAuto)
 			} else {
-				m.SetTitle(fmt.Sprintf("%s / %s / %s", loc.Name(), loc.City(), m.TakenAt.Format("2006")), SrcAuto)
+				m.SetTitle(fmt.Sprintf("%s / %s / %s", loc.Name(), loc.City(), m.GetTakenAtLocal().Format("2006")), SrcAuto)
 			}
 		} else if loc.City() != "" && loc.CountryName() != "" {
 			if len(loc.City()) > 20 {
-				m.SetTitle(fmt.Sprintf("%s / %s", loc.City(), m.TakenAt.Format("2006")), SrcAuto)
+				m.SetTitle(fmt.Sprintf("%s / %s", loc.City(), m.GetTakenAtLocal().Format("2006")), SrcAuto)
 			} else {
-				m.SetTitle(fmt.Sprintf("%s / %s / %s", loc.City(), loc.CountryName(), m.TakenAt.Format("2006")), SrcAuto)
+				m.SetTitle(fmt.Sprintf("%s / %s / %s", loc.City(), loc.CountryName(), m.GetTakenAtLocal().Format("2006")), SrcAuto)
 			}
 		}
 	} else if m.PlaceLoaded() {
@@ -127,26 +127,26 @@ func (m *Photo) GenerateTitle(labels classify.Labels) error {
 			if l := len([]rune(names)); l > 35 {
 				m.SetTitle(names, SrcAuto)
 			} else if l > 20 && (m.Place.NoCity() || m.Place.LongCity()) {
-				m.SetTitle(fmt.Sprintf("%s / %s", names, m.TakenAt.Format("2006")), SrcAuto)
+				m.SetTitle(fmt.Sprintf("%s / %s", names, m.GetTakenAtLocal().Format("2006")), SrcAuto)
 			} else if l > 20 {
 				m.SetTitle(fmt.Sprintf("%s / %s", names, m.Place.City()), SrcAuto)
 			} else if m.Place.NoCity() || m.Place.LongCity() {
-				m.SetTitle(fmt.Sprintf("%s / %s / %s", names, m.Place.CountryName(), m.TakenAt.Format("2006")), SrcAuto)
+				m.SetTitle(fmt.Sprintf("%s / %s / %s", names, m.Place.CountryName(), m.GetTakenAtLocal().Format("2006")), SrcAuto)
 			} else {
-				m.SetTitle(fmt.Sprintf("%s / %s / %s", names, m.Place.City(), m.TakenAt.Format("2006")), SrcAuto)
+				m.SetTitle(fmt.Sprintf("%s / %s / %s", names, m.Place.City(), m.GetTakenAtLocal().Format("2006")), SrcAuto)
 			}
 		} else if title := labels.Title(fileTitle); title != "" {
 			log.Debugf("photo: %s title based on label %s", m.String(), clean.Log(title))
 			if m.Place.NoCity() || m.Place.LongCity() || m.Place.CityContains(title) {
-				m.SetTitle(fmt.Sprintf("%s / %s / %s", txt.Title(title), m.Place.CountryName(), m.TakenAt.Format("2006")), SrcAuto)
+				m.SetTitle(fmt.Sprintf("%s / %s / %s", txt.Title(title), m.Place.CountryName(), m.GetTakenAtLocal().Format("2006")), SrcAuto)
 			} else {
-				m.SetTitle(fmt.Sprintf("%s / %s / %s", txt.Title(title), m.Place.City(), m.TakenAt.Format("2006")), SrcAuto)
+				m.SetTitle(fmt.Sprintf("%s / %s / %s", txt.Title(title), m.Place.City(), m.GetTakenAtLocal().Format("2006")), SrcAuto)
 			}
 		} else if m.Place.City() != "" && m.Place.CountryName() != "" {
 			if len(m.Place.City()) > 20 {
-				m.SetTitle(fmt.Sprintf("%s / %s", m.Place.City(), m.TakenAt.Format("2006")), SrcAuto)
+				m.SetTitle(fmt.Sprintf("%s / %s", m.Place.City(), m.GetTakenAtLocal().Format("2006")), SrcAuto)
 			} else {
-				m.SetTitle(fmt.Sprintf("%s / %s / %s", m.Place.City(), m.Place.CountryName(), m.TakenAt.Format("2006")), SrcAuto)
+				m.SetTitle(fmt.Sprintf("%s / %s / %s", m.Place.City(), m.Place.CountryName(), m.GetTakenAtLocal().Format("2006")), SrcAuto)
 			}
 		}
 	}
@@ -154,12 +154,12 @@ func (m *Photo) GenerateTitle(labels classify.Labels) error {
 	if !knownLocation || m.NoTitle() {
 		if names != "" {
 			if len([]rune(names)) <= 35 && m.TakenSrc != SrcAuto {
-				m.SetTitle(fmt.Sprintf("%s / %s", names, m.TakenAt.Format("2006")), SrcAuto)
+				m.SetTitle(fmt.Sprintf("%s / %s", names, m.GetTakenAtLocal().Format("2006")), SrcAuto)
 			} else {
 				m.SetTitle(names, SrcAuto)
 			}
 		} else if fileTitle != "" && len(fileTitle) <= 20 && !m.TakenAtLocal.IsZero() && m.TakenSrc != SrcAuto {
-			m.SetTitle(fmt.Sprintf("%s / %s", fileTitle, m.TakenAtLocal.Format("2006")), SrcAuto)
+			m.SetTitle(fmt.Sprintf("%s / %s", fileTitle, m.GetTakenAtLocal().Format("2006")), SrcAuto)
 		} else if fileTitle != "" {
 			m.SetTitle(fileTitle, SrcAuto)
 		} else {
