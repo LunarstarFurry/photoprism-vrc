@@ -86,10 +86,10 @@
                 </td>
                 <td
                   class="meta-data meta-title col-auto text-start clickable"
-                  :title="m.Title"
+                  :title="m.getLocalizedTitle()"
                   @click.exact="isSharedView ? openPhoto(index) : editPhoto(index)"
                 >
-                  <div class="text-truncate">{{ showTitles && m.Title ? m.Title : m.getOriginalName() }}</div>
+                  <div class="text-truncate">{{ showTitles && m.Title ? m.getLocalizedTitle() : m.getOriginalName() }}</div>
                   <div v-if="context === contexts.Hidden && hiddenReason(m)" :title="hiddenReason(m)" class="meta-error text-truncate">
                     {{ hiddenReason(m) }}
                   </div>

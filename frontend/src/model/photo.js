@@ -359,6 +359,27 @@ export class Photo extends RestModel {
     return this.Title;
   }
 
+  // getLocalizedTitle returns the photo's taken time formatted as "YYYY-MM-DD HH:MM:SS"
+  // in the viewer's local browser timezone. This is used for VRChat screenshots so that
+  // each viewer sees the time adapted to their own timezone.
+  getLocalizedTitle() {
+    if (!this.TakenAt || this.Year === YearUnknown) {
+      return this.Title || $gettext("Unknown");
+    }
+
+    // Build a timezone-aware DateTime from the photo's taken time.
+    // localDate() reconstructs the exact moment using TakenAtLocal + TimeZone,
+    // then we convert it to the viewer's browser timezone with toLocal().
+    const dt = this.localDate().toLocal();
+
+    if (!dt || !dt.isValid) {
+      return this.Title || $gettext("Unknown");
+    }
+
+    // Format as "YYYY-MM-DD HH:MM:SS" in the viewer's local timezone.
+    return dt.toFormat("yyyy-MM-dd HH:mm:ss");
+  }
+
   getGoogleMapsLink() {
     return "https://www.google.com/maps/place/" + this.Lat + "," + this.Lng;
   }
