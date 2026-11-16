@@ -11,6 +11,7 @@ import (
 
 	"github.com/photoprism/photoprism/internal/auth/acl"
 	"github.com/photoprism/photoprism/internal/entity"
+	"github.com/photoprism/photoprism/internal/entity/search"
 )
 
 // WorldResult represents an aggregated VRChat world entry returned by GET /api/v1/worlds.
@@ -26,50 +27,6 @@ type worldPhotoRow struct {
 	Notes        string
 	FileHash     string
 	TakenAt      time.Time
-}
-
-const vrcWorldPrefix = "VRChat - World: "
-
-// extractVRCWorld extracts the VRChat world name from a formatted caption or notes string.
-func extractVRCWorld(s string) string {
-	idx := strings.Index(s, vrcWorldPrefix)
-	if idx == -1 {
-		return ""
-	}
-
-	rest := s[idx+len(vrcWorldPrefix):]
-
-	for _, sep := range []string{" | ", " / ", "\n", "\r"} {
-		if end := strings.Index(rest, sep); end != -1 {
-			rest = rest[:end]
-		}
-	}
-
-	return strings.TrimSpace(rest)
-}
-
-// normalizeVRCWorld strips trailing parenthetical/bracketed event or version tags
-// (e.g. "Polydance Studio (Just Dance Scoring Now Live!)" -> "Polydance Studio")
-// so renamed variants of the same world group together.
-func normalizeVRCWorld(name string) string {
-	n := strings.TrimSpace(name)
-	for {
-		trimmed := n
-		if strings.HasSuffix(trimmed, ")") {
-			if idx := strings.LastIndex(trimmed, "("); idx > 0 {
-				trimmed = strings.TrimSpace(trimmed[:idx])
-			}
-		} else if strings.HasSuffix(trimmed, "]") {
-			if idx := strings.LastIndex(trimmed, "["); idx > 0 {
-				trimmed = strings.TrimSpace(trimmed[:idx])
-			}
-		}
-		if trimmed == n || trimmed == "" {
-			break
-		}
-		n = trimmed
-	}
-	return n
 }
 
 // GetWorlds finds and returns VRChat worlds extracted from photo metadata as JSON.
@@ -103,7 +60,7 @@ func GetWorlds(router *gin.RouterGroup) {
 			Joins("JOIN files ON files.photo_id = photos.id AND files.file_primary = 1 AND files.deleted_at IS NULL").
 			Joins("LEFT JOIN details ON details.photo_id = photos.id").
 			Where("photos.deleted_at IS NULL").
-			Where("photos.photo_caption LIKE ? OR details.notes LIKE ?", "%"+vrcWorldPrefix+"%", "%"+vrcWorldPrefix+"%").
+			Where("photos.photo_caption LIKE ? OR details.notes LIKE ?", "%"+search.VRCWorldPrefix+"%", "%"+search.VRCWorldPrefix+"%").
 			Order("photos.taken_at DESC")
 
 		if acl.Rules.Deny(acl.ResourcePhotos, s.GetUserRole(), acl.AccessPrivate) {
@@ -117,41 +74,51 @@ func GetWorlds(router *gin.RouterGroup) {
 			return
 		}
 
-		byName := make(map[string]*WorldResult)
+		var groups []*WorldResult
 		for _, row := range rows {
-			name := extractVRCWorld(row.PhotoCaption)
-			if name == "" {
-				name = extractVRCWorld(row.Notes)
+			rawName := search.ExtractVRCWorld(row.PhotoCaption)
+			if rawName == "" {
+				rawName = search.ExtractVRCWorld(row.Notes)
 			}
-			name = normalizeVRCWorld(name)
-			if name == "" {
+			normName := search.NormalizeVRCWorld(rawName)
+			if normName == "" {
 				continue
 			}
 
-			if q != "" && !strings.Contains(strings.ToLower(name), q) {
-				continue
+			var target *WorldResult
+			for _, g := range groups {
+				if search.MatchVRCWorld(g.Name, normName) {
+					target = g
+					break
+				}
 			}
 
-			existing, ok := byName[name]
-			if !ok {
-				byName[name] = &WorldResult{
-					Name:       name,
+			if target == nil {
+				groups = append(groups, &WorldResult{
+					Name:       normName,
 					PhotoCount: 1,
 					Thumb:      row.FileHash,
 					TakenAt:    row.TakenAt,
-				}
+				})
 				continue
 			}
 
-			existing.PhotoCount++
-			if existing.Thumb == "" && row.FileHash != "" {
-				existing.Thumb = row.FileHash
+			target.PhotoCount++
+			// Prefer the shorter/cleaner display name for the group label.
+			if len(normName) < len(target.Name) {
+				target.Name = normName
+			}
+			if target.Thumb == "" && row.FileHash != "" {
+				target.Thumb = row.FileHash
 			}
 		}
 
-		results := make([]WorldResult, 0, len(byName))
-		for _, w := range byName {
-			results = append(results, *w)
+		results := make([]WorldResult, 0, len(groups))
+		for _, g := range groups {
+			if q != "" && !strings.Contains(strings.ToLower(g.Name), q) {
+				continue
+			}
+			results = append(results, *g)
 		}
 
 		sort.Slice(results, func(i, j int) bool {

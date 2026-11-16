@@ -715,24 +715,36 @@ func searchPhotos(frm form.SearchPhotos, sess *entity.Session, resultCols string
 		}
 	}
 
-	// Filter by VRChat world name stored in photo_caption or details.notes.
-	// Matches exact world names as well as variants with trailing (...) or [...] tags.
+	// Filter by VRChat world name stored in photo_caption or details.notes using loose similarity matching.
 	if txt.NotEmpty(frm.World) {
-		replacer := strings.NewReplacer("!", "!!", "%", "!%", "_", "!_")
-		escaped := replacer.Replace(strings.TrimSpace(frm.World))
-		withPipe := "%VRChat - World: " + escaped + " |%"
-		withParen := "%VRChat - World: " + escaped + " (%"
-		withParenTight := "%VRChat - World: " + escaped + "(%"
-		withBracket := "%VRChat - World: " + escaped + " [%"
-		withBracketTight := "%VRChat - World: " + escaped + "[%"
-		atEnd := "%VRChat - World: " + escaped
-		cond := "(d.notes LIKE ? ESCAPE '!' OR d.notes LIKE ? ESCAPE '!' OR d.notes LIKE ? ESCAPE '!' OR d.notes LIKE ? ESCAPE '!' OR d.notes LIKE ? ESCAPE '!' OR d.notes LIKE ? ESCAPE '!')"
-		photoCond := "(photos.photo_caption LIKE ? ESCAPE '!' OR photos.photo_caption LIKE ? ESCAPE '!' OR photos.photo_caption LIKE ? ESCAPE '!' OR photos.photo_caption LIKE ? ESCAPE '!' OR photos.photo_caption LIKE ? ESCAPE '!' OR photos.photo_caption LIKE ? ESCAPE '!' OR EXISTS (SELECT 1 FROM details d WHERE d.photo_id = photos.id AND " + cond + "))"
-		s = s.Where(
-			photoCond,
-			withPipe, withParen, withParenTight, withBracket, withBracketTight, atEnd,
-			withPipe, withParen, withParenTight, withBracket, withBracketTight, atEnd,
-		)
+		type worldCandidate struct {
+			ID           uint
+			PhotoCaption string
+			Notes        string
+		}
+		var candidates []worldCandidate
+		if err := UnscopedDb().Table("photos").
+			Select("photos.id, photos.photo_caption, COALESCE(details.notes, '') AS notes").
+			Joins("LEFT JOIN details ON details.photo_id = photos.id").
+			Where("photos.deleted_at IS NULL").
+			Where("photos.photo_caption LIKE ? OR details.notes LIKE ?", "%"+VRCWorldPrefix+"%", "%"+VRCWorldPrefix+"%").
+			Scan(&candidates).Error; err == nil {
+			var matchedIDs []uint
+			for _, cand := range candidates {
+				w := ExtractVRCWorld(cand.PhotoCaption)
+				if w == "" {
+					w = ExtractVRCWorld(cand.Notes)
+				}
+				if w != "" && MatchVRCWorld(w, frm.World) {
+					matchedIDs = append(matchedIDs, cand.ID)
+				}
+			}
+			if len(matchedIDs) > 0 {
+				s = s.Where("photos.id IN (?)", matchedIDs)
+			} else {
+				s = s.Where("1 = 0")
+			}
+		}
 	}
 
 	// Filter by file hash.
