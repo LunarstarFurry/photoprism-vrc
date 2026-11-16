@@ -26,26 +26,29 @@ func ExtractVRCWorld(s string) string {
 }
 
 // NormalizeVRCWorld strips leading and trailing parenthetical/bracketed event or version tags
-// (e.g. "[Event] Polydance Studio (Just Dance Scoring Now Live!)" -> "Polydance Studio").
+// (including fullwidth （...） / 【...】 used in native VRChat XMP metadata).
 func NormalizeVRCWorld(name string) string {
 	n := strings.TrimSpace(name)
+	pairs := [][2]string{
+		{"(", ")"},
+		{"[", "]"},
+		{"（", "）"},
+		{"【", "】"},
+	}
 	for {
 		trimmed := n
-		if strings.HasSuffix(trimmed, ")") {
-			if idx := strings.LastIndex(trimmed, "("); idx > 0 {
-				trimmed = strings.TrimSpace(trimmed[:idx])
-			}
-		} else if strings.HasSuffix(trimmed, "]") {
-			if idx := strings.LastIndex(trimmed, "["); idx > 0 {
-				trimmed = strings.TrimSpace(trimmed[:idx])
-			}
-		} else if strings.HasPrefix(trimmed, "(") {
-			if idx := strings.Index(trimmed, ")"); idx != -1 && idx < len(trimmed)-1 {
-				trimmed = strings.TrimSpace(trimmed[idx+1:])
-			}
-		} else if strings.HasPrefix(trimmed, "[") {
-			if idx := strings.Index(trimmed, "]"); idx != -1 && idx < len(trimmed)-1 {
-				trimmed = strings.TrimSpace(trimmed[idx+1:])
+		for _, p := range pairs {
+			open, close := p[0], p[1]
+			if strings.HasSuffix(trimmed, close) {
+				if idx := strings.LastIndex(trimmed, open); idx > 0 {
+					trimmed = strings.TrimSpace(trimmed[:idx])
+					break
+				}
+			} else if strings.HasPrefix(trimmed, open) {
+				if idx := strings.Index(trimmed, close); idx != -1 && idx < len(trimmed)-len(close) {
+					trimmed = strings.TrimSpace(trimmed[idx+len(close):])
+					break
+				}
 			}
 		}
 		if trimmed == n || trimmed == "" {
