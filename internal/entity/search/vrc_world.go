@@ -25,8 +25,8 @@ func ExtractVRCWorld(s string) string {
 	return strings.TrimSpace(rest)
 }
 
-// NormalizeVRCWorld strips trailing parenthetical/bracketed event or version tags
-// (e.g. "Polydance Studio (Just Dance Scoring Now Live!)" -> "Polydance Studio").
+// NormalizeVRCWorld strips leading and trailing parenthetical/bracketed event or version tags
+// (e.g. "[Event] Polydance Studio (Just Dance Scoring Now Live!)" -> "Polydance Studio").
 func NormalizeVRCWorld(name string) string {
 	n := strings.TrimSpace(name)
 	for {
@@ -38,6 +38,14 @@ func NormalizeVRCWorld(name string) string {
 		} else if strings.HasSuffix(trimmed, "]") {
 			if idx := strings.LastIndex(trimmed, "["); idx > 0 {
 				trimmed = strings.TrimSpace(trimmed[:idx])
+			}
+		} else if strings.HasPrefix(trimmed, "(") {
+			if idx := strings.Index(trimmed, ")"); idx != -1 && idx < len(trimmed)-1 {
+				trimmed = strings.TrimSpace(trimmed[idx+1:])
+			}
+		} else if strings.HasPrefix(trimmed, "[") {
+			if idx := strings.Index(trimmed, "]"); idx != -1 && idx < len(trimmed)-1 {
+				trimmed = strings.TrimSpace(trimmed[idx+1:])
 			}
 		}
 		if trimmed == n || trimmed == "" {
@@ -109,11 +117,11 @@ func MatchVRCWorld(a, b string) bool {
 		return true
 	}
 
-	// Prefix match for worlds that append text without parentheses/brackets.
-	if len(ka) >= 6 && strings.HasPrefix(kb, ka) {
+	// Substring match for worlds that prepend or append extra text (e.g. "NEW! Polydance Studio" or "Polydance Studio v2").
+	if len(ka) >= 7 && strings.Contains(kb, ka) {
 		return true
 	}
-	if len(kb) >= 6 && strings.HasPrefix(ka, kb) {
+	if len(kb) >= 7 && strings.Contains(ka, kb) {
 		return true
 	}
 
