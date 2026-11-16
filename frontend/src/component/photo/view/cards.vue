@@ -26,7 +26,7 @@
           <div v-if="!isSharedView && m.Quality < 3 && context === contexts.Review" class="review" />
           <div class="meta">
             <button v-if="!showTitles || m.Title" class="action-title-edit meta-title text-truncate">
-              {{ showTitles ? m.Title : m.getOriginalName() }}
+              {{ showTitles ? m.getLocalizedTitle() : m.getOriginalName() }}
             </button>
             <button v-if="showCaptions && m.Caption" class="meta-caption">
               {{ m.Caption }}
@@ -83,7 +83,7 @@
         </div>
         <div v-else :data-id="m.ID" :data-uid="m.UID" class="media result" :class="m.classes()" @contextmenu.stop="onContextMenu($event, index)">
           <div
-            :title="m.Title"
+            :title="m.getLocalizedTitle()"
             :style="`background-image: url(${m.thumbnailUrl('tile_500')})`"
             class="preview"
             @touchstart.passive="input.touchStart($event, index)"
@@ -185,11 +185,11 @@
           <div class="meta">
             <button
               v-if="!showTitles || m.Title"
-              :title="m.Title"
+              :title="m.getLocalizedTitle()"
               class="action-title-edit meta-title text-truncate"
               @click.exact="isSharedView ? openPhoto(index) : editPhoto(index)"
             >
-              {{ showTitles ? m.Title : m.getOriginalName() }}
+              {{ showTitles ? m.getLocalizedTitle() : m.getOriginalName() }}
             </button>
             <button v-if="showCaptions && m.Caption" :title="$gettext('Caption')" class="meta-caption" @click.exact="editPhoto(index)">
               {{ m.Caption }}

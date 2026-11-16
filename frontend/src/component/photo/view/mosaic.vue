@@ -36,7 +36,7 @@
             v-else
             :data-id="m.ID"
             :data-uid="m.UID"
-            :title="showTitles && m.Title ? m.Title : m.getOriginalName()"
+            :title="showTitles && m.Title ? m.getLocalizedTitle() : m.getOriginalName()"
             :style="`background-image: url(${m.thumbnailUrl('tile_224')})`"
             :class="m.classes()"
             class="media result preview"

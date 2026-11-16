@@ -1501,7 +1501,7 @@ export default {
       let caption = "";
 
       if (model.Title) {
-        caption += `<h4>${this.$util.encodeHTML(model.Title.trim())}</h4>`;
+        caption += `<h4>${this.$util.encodeHTML(model.getLocalizedTitle())}</h4>`;
       }
 
       /*

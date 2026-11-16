@@ -367,6 +367,32 @@
             </template>
 
             <v-list-item
+              v-if="isMini && $config.allow('photos', 'search')"
+              :to="{ name: 'worlds' }"
+              variant="text"
+              class="nav-worlds"
+              :ripple="false"
+              @click.stop=""
+            >
+              <v-icon class="ma-auto">mdi-earth</v-icon>
+            </v-list-item>
+            <v-list-item
+              v-else-if="!isMini && $config.allow('photos', 'search')"
+              :to="{ name: 'worlds' }"
+              variant="text"
+              class="nav-worlds"
+              :ripple="false"
+              @click.stop=""
+            >
+              <v-list-item-title class="nav-menu-item">
+                <v-icon>mdi-earth</v-icon>
+                <p class="nav-item-title">
+                  {{ $gettext(`Worlds`) }}
+                </p>
+              </v-list-item-title>
+            </v-list-item>
+
+            <v-list-item
               v-if="isMini && $config.feature('calendar')"
               :to="{ name: 'calendar' }"
               variant="text"
