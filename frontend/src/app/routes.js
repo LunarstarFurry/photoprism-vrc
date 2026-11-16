@@ -27,6 +27,7 @@ import Photos from "page/photos.vue";
 import Albums from "page/albums.vue";
 import AlbumPhotos from "page/album/photos.vue";
 import Places from "page/places.vue";
+import Worlds from "page/worlds.vue";
 import Browse from "page/library/browse.vue";
 import Errors from "page/library/errors.vue";
 import Labels from "page/labels.vue";
@@ -326,6 +327,12 @@ export default [
     path: "/places",
     component: Places,
     meta: { title: $gettext("Places"), requiresAuth: true },
+  },
+  {
+    name: "worlds",
+    path: "/worlds",
+    component: Worlds,
+    meta: { title: $gettext("Worlds"), requiresAuth: true },
   },
   {
     name: "places_view",

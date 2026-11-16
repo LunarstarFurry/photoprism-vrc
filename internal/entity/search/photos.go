@@ -715,6 +715,19 @@ func searchPhotos(frm form.SearchPhotos, sess *entity.Session, resultCols string
 		}
 	}
 
+	// Filter by VRChat world name stored in photo_caption or details.notes.
+	if txt.NotEmpty(frm.World) {
+		replacer := strings.NewReplacer("!", "!!", "%", "!%", "_", "!_")
+		escaped := replacer.Replace(strings.TrimSpace(frm.World))
+		withPipe := "%VRChat - World: " + escaped + " |%"
+		atEnd := "%VRChat - World: " + escaped
+		s = s.Where(
+			"(photos.photo_caption LIKE ? ESCAPE '!' OR photos.photo_caption LIKE ? ESCAPE '!' OR "+
+				"EXISTS (SELECT 1 FROM details d WHERE d.photo_id = photos.id AND (d.notes LIKE ? ESCAPE '!' OR d.notes LIKE ? ESCAPE '!')))",
+			withPipe, atEnd, withPipe, atEnd,
+		)
+	}
+
 	// Filter by file hash.
 	if txt.NotEmpty(frm.Hash) {
 		s = s.Where("files.file_hash IN (?)", SplitOr(strings.ToLower(frm.Hash)))
