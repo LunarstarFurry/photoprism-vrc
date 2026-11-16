@@ -48,6 +48,30 @@ func extractVRCWorld(s string) string {
 	return strings.TrimSpace(rest)
 }
 
+// normalizeVRCWorld strips trailing parenthetical/bracketed event or version tags
+// (e.g. "Polydance Studio (Just Dance Scoring Now Live!)" -> "Polydance Studio")
+// so renamed variants of the same world group together.
+func normalizeVRCWorld(name string) string {
+	n := strings.TrimSpace(name)
+	for {
+		trimmed := n
+		if strings.HasSuffix(trimmed, ")") {
+			if idx := strings.LastIndex(trimmed, "("); idx > 0 {
+				trimmed = strings.TrimSpace(trimmed[:idx])
+			}
+		} else if strings.HasSuffix(trimmed, "]") {
+			if idx := strings.LastIndex(trimmed, "["); idx > 0 {
+				trimmed = strings.TrimSpace(trimmed[:idx])
+			}
+		}
+		if trimmed == n || trimmed == "" {
+			break
+		}
+		n = trimmed
+	}
+	return n
+}
+
 // GetWorlds finds and returns VRChat worlds extracted from photo metadata as JSON.
 //
 // GET /api/v1/worlds
@@ -99,6 +123,7 @@ func GetWorlds(router *gin.RouterGroup) {
 			if name == "" {
 				name = extractVRCWorld(row.Notes)
 			}
+			name = normalizeVRCWorld(name)
 			if name == "" {
 				continue
 			}

@@ -716,15 +716,22 @@ func searchPhotos(frm form.SearchPhotos, sess *entity.Session, resultCols string
 	}
 
 	// Filter by VRChat world name stored in photo_caption or details.notes.
+	// Matches exact world names as well as variants with trailing (...) or [...] tags.
 	if txt.NotEmpty(frm.World) {
 		replacer := strings.NewReplacer("!", "!!", "%", "!%", "_", "!_")
 		escaped := replacer.Replace(strings.TrimSpace(frm.World))
 		withPipe := "%VRChat - World: " + escaped + " |%"
+		withParen := "%VRChat - World: " + escaped + " (%"
+		withParenTight := "%VRChat - World: " + escaped + "(%"
+		withBracket := "%VRChat - World: " + escaped + " [%"
+		withBracketTight := "%VRChat - World: " + escaped + "[%"
 		atEnd := "%VRChat - World: " + escaped
+		cond := "(d.notes LIKE ? ESCAPE '!' OR d.notes LIKE ? ESCAPE '!' OR d.notes LIKE ? ESCAPE '!' OR d.notes LIKE ? ESCAPE '!' OR d.notes LIKE ? ESCAPE '!' OR d.notes LIKE ? ESCAPE '!')"
+		photoCond := "(photos.photo_caption LIKE ? ESCAPE '!' OR photos.photo_caption LIKE ? ESCAPE '!' OR photos.photo_caption LIKE ? ESCAPE '!' OR photos.photo_caption LIKE ? ESCAPE '!' OR photos.photo_caption LIKE ? ESCAPE '!' OR photos.photo_caption LIKE ? ESCAPE '!' OR EXISTS (SELECT 1 FROM details d WHERE d.photo_id = photos.id AND " + cond + "))"
 		s = s.Where(
-			"(photos.photo_caption LIKE ? ESCAPE '!' OR photos.photo_caption LIKE ? ESCAPE '!' OR "+
-				"EXISTS (SELECT 1 FROM details d WHERE d.photo_id = photos.id AND (d.notes LIKE ? ESCAPE '!' OR d.notes LIKE ? ESCAPE '!')))",
-			withPipe, atEnd, withPipe, atEnd,
+			photoCond,
+			withPipe, withParen, withParenTight, withBracket, withBracketTight, atEnd,
+			withPipe, withParen, withParenTight, withBracket, withBracketTight, atEnd,
 		)
 	}
 
