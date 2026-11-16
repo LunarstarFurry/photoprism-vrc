@@ -1,4 +1,5 @@
 import Model from "model.js";
+import { DateTime } from "luxon";
 import $api from "common/api";
 import $util from "common/util";
 import { $config } from "app/session.js";
@@ -16,6 +17,7 @@ export class Thumb extends Model {
       Caption: "",
       Lat: 0.0,
       Lng: 0.0,
+      TakenAt: "",
       TakenAtLocal: "",
       TimeZone: "",
       Favorite: false,
@@ -41,6 +43,20 @@ export class Thumb extends Model {
 
   hasId() {
     return !!this.getId();
+  }
+
+  getLocalizedTitle() {
+    if (!this.TakenAt) {
+      return this.Title || $gettext("Unknown");
+    }
+
+    const dt = DateTime.fromISO(this.TakenAt, { zone: "utc" }).toLocal();
+
+    if (!dt || !dt.isValid) {
+      return this.Title || $gettext("Unknown");
+    }
+
+    return dt.toFormat("yyyy-MM-dd HH:mm:ss");
   }
 
   toggleLike() {
@@ -176,6 +192,7 @@ export class Thumb extends Model {
       Caption: "",
       Lat: 0.0,
       Lng: 0.0,
+      TakenAt: "",
       TakenAtLocal: "",
       TimeZone: "",
       Favorite: false,
@@ -246,6 +263,7 @@ export class Thumb extends Model {
       Caption: photo.Caption,
       Lat: photo.Lat,
       Lng: photo.Lng,
+      TakenAt: photo.TakenAt,
       TakenAtLocal: photo.TakenAtLocal,
       TimeZone: photo.TimeZone,
       Favorite: photo.Favorite,
@@ -286,6 +304,7 @@ export class Thumb extends Model {
       Caption: photo.Caption,
       Lat: photo.Lat,
       Lng: photo.Lng,
+      TakenAt: photo.TakenAt,
       TakenAtLocal: photo.TakenAtLocal,
       TimeZone: photo.TimeZone,
       Favorite: photo.Favorite,
