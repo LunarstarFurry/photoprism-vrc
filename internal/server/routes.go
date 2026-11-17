@@ -169,8 +169,9 @@ func registerRoutes(router *gin.Engine, conf *config.Config) {
 	api.LikeLabel(APIv1)
 	api.DislikeLabel(APIv1)
 
-	// VRChat Worlds.
+	// VRChat Worlds & Players.
 	api.GetWorlds(APIv1)
+	api.GetPlayers(APIv1)
 
 	// Files and Folders.
 	api.SearchFoldersOriginals(APIv1)

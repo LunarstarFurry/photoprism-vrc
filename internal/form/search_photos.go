@@ -24,6 +24,7 @@ type SearchPhotos struct {
 	Caption     string    `form:"caption" example:"caption:\"Lake*\"" notes:"Searches text in captions separated by |, or specify false to find content without a caption"`
 	Description string    `form:"description" example:"description:\"Lake*\"" notes:"Searches text in titles or captions separated by |, or specify false to find content without a title or caption"`
 	World       string    `form:"world" example:"world:\"Polydance Studio\"" notes:"Finds VRChat screenshots taken in the specified world"`
+	Player      string    `form:"player" example:"player:\"LunarstarFurry\"" notes:"Finds VRChat screenshots featuring or taken by the specified player"`
 	Hash        string    `form:"hash" example:"hash:2fd4e1c67a2d" notes:"SHA1 file hashes, separated by |"`
 	Primary     bool      `form:"primary" notes:"Finds primary JPEG or PNG files only"`
 	Stack       bool      `form:"stack" notes:"Finds content with more than one media file"`
