@@ -6,6 +6,7 @@ import (
 	"sync"
 
 	"github.com/photoprism/photoprism/pkg/http/scheme"
+	"github.com/photoprism/photoprism/pkg/media"
 )
 
 // ModelEngine represents the canonical identifier for a computer vision service engine.
@@ -16,13 +17,15 @@ const (
 	EngineVision ModelEngine = "vision"
 	// EngineTensorFlow represents on-device TensorFlow models.
 	EngineTensorFlow ModelEngine = "tensorflow"
+	// EngineONNX represents on-device ONNX Runtime models.
+	EngineONNX ModelEngine = "onnx"
 	// EngineLocal is used when no explicit engine can be determined.
 	EngineLocal ModelEngine = "local"
 )
 
 // RequestBuilder builds an API request for an engine based on the model configuration and input files.
 type RequestBuilder interface {
-	Build(ctx context.Context, model *Model, files Files) (*ApiRequest, error)
+	Build(ctx context.Context, model *Model, files Files, mediaSrc media.Src) (*ApiRequest, error)
 }
 
 // ResponseParser parses a raw engine response into the generic ApiResponse structure.
@@ -78,6 +81,8 @@ type EngineInfo struct {
 	DefaultModel      string
 	DefaultResolution int
 	DefaultKey        string // Optional placeholder key (e.g., ${OPENAI_API_KEY}); applied only when Service.Key is empty.
+	DefaultThink      string // Optional reasoning hint (e.g., "false"); applied only when Service.Think is empty.
+	DefaultNormalize  string // Label name normalization used when Model.Normalize is empty, see NormalizeTypes.
 }
 
 // RegisterEngineAlias maps a logical engine name (e.g., "ollama") to a

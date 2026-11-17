@@ -2,11 +2,14 @@ package meta
 
 import (
 	"math"
+	"path/filepath"
 	"time"
 
+	"github.com/photoprism/photoprism/pkg/clean"
 	"github.com/photoprism/photoprism/pkg/geo/s2"
 	"github.com/photoprism/photoprism/pkg/media"
 	"github.com/photoprism/photoprism/pkg/rnd"
+	"github.com/photoprism/photoprism/pkg/time/tz"
 )
 
 // Extended image type constants extracted from vendor-specific metadata.
@@ -15,18 +18,28 @@ const (
 )
 
 // Data represents image metadata.
+//
+// Note: the meta:"…", xmp:"…", and dc:"…" struct tags below are read by
+// internal/meta/report.go via reflection to render the metadata-source
+// columns of `photoprism show metadata`. Do not delete them as
+// "vestigial" — they are documentation that ships in the CLI report.
+//
+// The xmp:"…" tags list the namespaced properties the XMP reader consults,
+// in the priority order its chains apply (internal/meta/xmp_document.go);
+// the dc:"…" tags name the Dublin Core properties among them.
 type Data struct {
 	FileName         string        `meta:"FileName"`
 	MimeType         string        `meta:"MIMEType" report:"-"`
-	DocumentID       string        `meta:"ContentIdentifier,MediaGroupUUID,BurstUUID,OriginalDocumentID,DocumentID,ImageUniqueID,DigitalImageGUID"` // see https://exiftool.org/forum/index.php?topic=14874.0
-	InstanceID       string        `meta:"InstanceID,DocumentID"`
-	CreatedAt        time.Time     `meta:"SubSecCreateDate,CreationTime,CreationDate,CreateDate,MediaCreateDate,ContentCreateDate,TrackCreateDate"`
-	TakenAt          time.Time     `meta:"SubSecDateTimeOriginal,SubSecDateTimeCreated,DateTimeOriginal,CreationTime,CreationDate,DateTimeCreated,DateTime,DateTimeDigitized" xmp:"DateCreated,CreationTime"`
-	TakenAtLocal     time.Time     `meta:"SubSecDateTimeOriginal,SubSecDateTimeCreated,DateTimeOriginal,CreationDate,DateTimeCreated,DateTime,DateTimeDigitized"`
-	TakenGps         time.Time     `meta:"GPSDateTime,GPSDateStamp"`
+	DocumentID       string        `meta:"ContentIdentifier,MediaGroupUUID,BurstUUID,OriginalDocumentID,DocumentID,ImageUniqueID,DigitalImageGUID" xmp:"xmpMM:OriginalDocumentID,xmpMM:DocumentID,dc:identifier" dc:"identifier"` // see https://exiftool.org/forum/index.php?topic=14874.0
+	InstanceID       string        `meta:"InstanceID,DocumentID" xmp:"xmpMM:InstanceID"`
+	CreatedAt        time.Time     `meta:"SubSecCreateDate,CreationTime,CreationDate,CreateDate,MediaCreateDate,ContentCreateDate,TrackCreateDate" xmp:"xmp:CreateDate,xmpDM:CreationDate"`
+	ModifiedAt       time.Time     `meta:"ModifyDate,DateTime"`
+	TakenAt          time.Time     `meta:"SubSecDateTimeOriginal,SubSecDateTimeCreated,DateTimeOriginal,CreationTime,CreationDate,DateTimeCreated,DateTimeDigitized" xmp:"photoshop:DateCreated,exif:DateTimeOriginal,xmp:CreateDate"`
+	TakenAtLocal     time.Time     `meta:"SubSecDateTimeOriginal,SubSecDateTimeCreated,DateTimeOriginal,CreationDate,DateTimeCreated,DateTimeDigitized" xmp:"photoshop:DateCreated,exif:DateTimeOriginal,xmp:CreateDate"`
+	TakenGps         time.Time     `meta:"GPSDateTime,GPSDateStamp" xmp:"exif:GPSTimeStamp,exif:GPSDateStamp"`
 	TakenNs          int           `meta:"-"`
 	TimeZone         string        `meta:"-"`
-	TimeOffset       string        `meta:"OffsetTime,OffsetTimeOriginal,OffsetTimeDigitized"`
+	TimeOffset       string        `meta:"OffsetTime,OffsetTimeOriginal,OffsetTimeDigitized" xmp:"exif:OffsetTimeOriginal,exif:OffsetTime,exif:OffsetTimeDigitized"`
 	MediaType        media.Type    `meta:"-"`
 	HasThumbEmbedded bool          `meta:"ThumbnailImage,PhotoshopThumbnail" report:"-"`
 	HasVideoEmbedded bool          `meta:"EmbeddedVideoFile,MotionPhoto,MotionPhotoVideo,MicroVideo" report:"-"`
@@ -34,42 +47,45 @@ type Data struct {
 	FPS              float64       `meta:"VideoFrameRate,VideoAvgFrameRate"`
 	Frames           int           `meta:"FrameCount,AnimationFrames"`
 	Pages            int           `meta:"PageCount,NPages,Pages"`
-	Codec            string        `meta:"CompressorID,VideoCodecID,CodecID,OtherFormat,FileType"`
-	Title            string        `meta:"Title,Headline" xmp:"dc:title" dc:"title,title.Alt"`
-	Caption          string        `meta:"Description,ImageDescription,Caption,Caption-Abstract" xmp:"Description,Description.Alt"`
-	Subject          string        `meta:"Subject,PersonInImage,ObjectName,HierarchicalSubject,CatalogSets" xmp:"Subject"`
+	Codec            string        `meta:"CompressorID,VideoCodecID,CodecID,OtherFormat,VideoCodec,FileType"`
+	Title            string        `meta:"Title,Headline" xmp:"dc:title,photoshop:Headline" dc:"title,title.Alt"`
+	Caption          string        `meta:"Description,ImageDescription,Caption,Caption-Abstract" xmp:"dc:description,tiff:ImageDescription" dc:"description,description.Alt"`
+	Subject          string        `meta:"Subject,PersonInImage,ObjectName,HierarchicalSubject,CatalogSets" xmp:"dc:subject,Iptc4xmpExt:PersonInImage,lr:hierarchicalSubject" dc:"subject"`
 	Keywords         Keywords      `meta:"Keywords"`
-	Favorite         bool          `meta:"Favorite"`
-	Notes            string        `meta:"Comment,UserComment"`
-	Artist           string        `meta:"Artist,Creator,Author,XMP-xmp:Author,By-line,OwnerName,Owner" xmp:"Creator"`
-	Copyright        string        `meta:"Rights,Copyright,CopyrightNotice,WebStatement" xmp:"Rights,Rights.Alt"`
-	License          string        `meta:"UsageTerms,License"`
-	Projection       string        `meta:"ProjectionType"`
-	ColorProfile     string        `meta:"ICCProfileName,ProfileDescription"`
-	CameraMake       string        `meta:"CameraMake,Make" xmp:"Make"`
-	CameraModel      string        `meta:"CameraModel,Model,CameraID,UniqueCameraModel" xmp:"CameraModel,Model"`
-	CameraOwner      string        `meta:"OwnerName"`
-	CameraSerial     string        `meta:"SerialNumber"`
-	LensMake         string        `meta:"LensMake"`
-	LensModel        string        `meta:"LensModel,Lens,LensID" xmp:"LensModel,Lens"`
-	Software         string        `meta:"Software,Producer,CreatorTool,Creator,CreatorSubTool,HistorySoftwareAgent,ProcessingSoftware"`
-	Flash            bool          `meta:"FlashFired"`
-	FocalLength      int           `meta:"FocalLength,FocalLengthIn35mmFormat"`
+	Faces            []Face        `meta:"-"`
+	FacesDeclared    bool          `meta:"-"`
+	FacesPartial     bool          `meta:"-"`
+	Favorite         bool          `meta:"Favorite" xmp:"fstop:favorite"`
+	Notes            string        `meta:"Comment,UserComment" xmp:"exif:UserComment"`
+	Artist           string        `meta:"Artist,Creator,Author,XMP-xmp:Author,By-line,OwnerName,Owner" xmp:"dc:creator" dc:"creator"`
+	Copyright        string        `meta:"Rights,Copyright,CopyrightNotice,WebStatement" xmp:"dc:rights,tiff:Copyright,xmpRights:WebStatement" dc:"rights,rights.Alt"`
+	License          string        `meta:"UsageTerms,License" xmp:"xmpRights:UsageTerms"`
+	Projection       string        `meta:"ProjectionType" xmp:"GPano:ProjectionType"`
+	ColorProfile     string        `meta:"ICCProfileName,ProfileDescription" xmp:"photoshop:ICCProfile"`
+	CameraMake       string        `meta:"CameraMake,Make" xmp:"tiff:Make"`
+	CameraModel      string        `meta:"CameraModel,Model,CameraID,UniqueCameraModel" xmp:"tiff:Model"`
+	CameraOwner      string        `meta:"OwnerName" xmp:"aux:OwnerName"`
+	CameraSerial     string        `meta:"SerialNumber" xmp:"exifEX:BodySerialNumber,aux:SerialNumber"`
+	LensMake         string        `meta:"LensMake" xmp:"exifEX:LensMake"`
+	LensModel        string        `meta:"LensModel,Lens,LensID" xmp:"exifEX:LensModel,aux:Lens,aux:LensID"`
+	Software         string        `meta:"Software,Producer,CreatorTool,CreatorSubTool,HistorySoftwareAgent,ProcessingSoftware" xmp:"xmp:CreatorTool,tiff:Software"`
+	Flash            bool          `meta:"FlashFired" xmp:"exif:Flash/exif:Fired"`
+	FocalLength      int           `meta:"FocalLengthIn35mmFormat,FocalLength" xmp:"exif:FocalLengthIn35mmFilm,exif:FocalLength"`
 	FocalDistance    float64       `meta:"HyperfocalDistance"`
-	Exposure         string        `meta:"ExposureTime,ShutterSpeedValue,ShutterSpeed,TargetExposureTime"`
-	Aperture         float32       `meta:"ApertureValue,Aperture"`
-	FNumber          float32       `meta:"FNumber"`
-	Iso              int           `meta:"ISO"`
+	Exposure         string        `meta:"ExposureTime,ShutterSpeedValue,ShutterSpeed,TargetExposureTime" xmp:"exif:ExposureTime,exif:ShutterSpeedValue"`
+	Aperture         float32       `meta:"ApertureValue,Aperture" xmp:"exif:ApertureValue"`
+	FNumber          float32       `meta:"FNumber" xmp:"exif:FNumber"`
+	Iso              int           `meta:"ISO" xmp:"exifEX:PhotographicSensitivity,exif:ISOSpeedRatings"`
 	ImageType        int           `meta:"HDRImageType"`
 	GPSPosition      string        `meta:"GPSPosition"`
-	GPSLatitude      string        `meta:"GPSLatitude"`
-	GPSLongitude     string        `meta:"GPSLongitude"`
+	GPSLatitude      string        `meta:"GPSLatitude" xmp:"exif:GPSLatitude"`
+	GPSLongitude     string        `meta:"GPSLongitude" xmp:"exif:GPSLongitude"`
 	VRCWorldID       string        `meta:"WorldID,XMP-vrc:WorldID,vrc:WorldID"`
 	VRCWorldName     string        `meta:"WorldDisplayName,XMP-vrc:WorldDisplayName,vrc:WorldDisplayName"`
 	VRCAuthorID      string        `meta:"AuthorID,XMP-vrc:AuthorID,vrc:AuthorID"`
 	Lat              float64       `meta:"-"`
 	Lng              float64       `meta:"-"`
-	Altitude         float64       `meta:"GlobalAltitude,GPSAltitude"`
+	Altitude         float64       `meta:"GlobalAltitude,GPSAltitude" xmp:"exif:GPSAltitude"`
 	Width            int           `meta:"ImageWidth,PixelXDimension,ExifImageWidth,SourceImageWidth"`
 	Height           int           `meta:"ImageHeight,ImageLength,PixelYDimension,ExifImageHeight,SourceImageHeight"`
 	Orientation      int           `meta:"-"`
@@ -124,7 +140,7 @@ func (data Data) HasInstanceID() bool {
 	return rnd.IsUUID(data.InstanceID)
 }
 
-// HasTimeAndPlace if data contains a time and GPS position.
+// HasTimeAndPlace if data contains the time the picture was taken and a GPS position.
 func (data Data) HasTimeAndPlace() bool {
 	return !data.TakenAt.IsZero() && data.Lat != 0 && data.Lng != 0
 }
@@ -150,4 +166,25 @@ func (data Data) ActualHeight() int {
 // CellID returns the S2 cell ID.
 func (data Data) CellID() string {
 	return s2.PrefixedToken(float64(data.Lat), float64(data.Lng))
+}
+
+// TakenOrModified returns the time the picture was taken, or else the time the file was last modified, resolved to
+// UTC, local time, and time zone like TakenAt; modified reports whether the time the file was modified was used.
+func (data Data) TakenOrModified() (utc, local time.Time, zone string, modified bool) {
+	if !data.TakenAt.IsZero() || data.ModifiedAt.IsZero() {
+		return data.TakenAt, data.TakenAtLocal, data.TimeZone, false
+	}
+
+	fallback := data
+	fallback.TakenAt = data.ModifiedAt.UTC()
+	fallback.TakenNs = 0
+
+	// QuickTime stores times in UTC, which ResolveTimeZone assumes for videos without a local time.
+	if data.MimeType != MimeVideoMp4 && data.MimeType != MimeQuicktime {
+		fallback.TakenAtLocal = tz.Strip(data.ModifiedAt)
+	}
+
+	fallback.ResolveTimeZone(clean.Log(filepath.Base(data.FileName)))
+
+	return fallback.TakenAt, fallback.TakenAtLocal, fallback.TimeZone, true
 }

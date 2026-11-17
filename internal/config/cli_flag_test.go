@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/urfave/cli/v2"
 )
 
@@ -141,6 +142,85 @@ func TestCliFlag_Default(t *testing.T) {
 	assert.Equal(t, "", nodefault.Default())
 }
 
+// TestCliFlag_DefaultStringDefault verifies that the literal source-code
+// default of a StringFlag is returned with quotes stripped, not the %q
+// representation urfave/cli uses for documentation output.
+func TestCliFlag_DefaultStringDefault(t *testing.T) {
+	t.Run("Empty", func(t *testing.T) {
+		f := CliFlag{
+			Flag: &cli.StringFlag{
+				Name:    "flag-empty-default",
+				EnvVars: []string{"PHOTOPRISM_TEST_EMPTY"},
+			},
+		}
+
+		assert.Equal(t, "", f.Default())
+	})
+	t.Run("Literal", func(t *testing.T) {
+		f := CliFlag{
+			Flag: &cli.StringFlag{
+				Name:    "flag-literal-default",
+				EnvVars: []string{"PHOTOPRISM_TEST_LITERAL"},
+				Value:   "hello",
+			},
+		}
+
+		assert.Equal(t, "hello", f.Default())
+	})
+}
+
+// TestCliFlag_DefaultIgnoresEnvOverride verifies that an env-supplied
+// runtime value never replaces the documented default.
+func TestCliFlag_DefaultIgnoresEnvOverride(t *testing.T) {
+	t.Setenv("PHOTOPRISM_TEST_OVERRIDE", "secret-runtime-value")
+
+	flag := &cli.StringFlag{
+		Name:    "flag-env-override",
+		EnvVars: []string{"PHOTOPRISM_TEST_OVERRIDE"},
+		Value:   "documented-default",
+	}
+
+	app := cli.NewApp()
+	app.Flags = []cli.Flag{flag}
+	app.Action = func(*cli.Context) error { return nil }
+	require.NoError(t, app.Run([]string{"app"}))
+
+	wrapped := CliFlag{Flag: flag}
+
+	assert.Equal(t, "secret-runtime-value", flag.GetValue(), "sanity: urfave/cli should expose the env value via GetValue")
+	assert.Equal(t, "documented-default", wrapped.Default(), "Default() must keep returning the documented default after env override")
+}
+
+// TestCliFlag_DefaultSecret verifies that flags carrying secret data
+// never echo the runtime value (or the source-code default) through
+// Default(). Operators can attach a placeholder via DocDefault when one
+// is desirable; otherwise Default() returns the empty string.
+func TestCliFlag_DefaultSecret(t *testing.T) {
+	t.Setenv("PHOTOPRISM_TEST_SECRET", "hunter2-runtime-secret")
+
+	flag := &cli.StringFlag{
+		Name:    "flag-secret",
+		EnvVars: []string{"PHOTOPRISM_TEST_SECRET"},
+		Value:   "compiled-default",
+	}
+
+	app := cli.NewApp()
+	app.Flags = []cli.Flag{flag}
+	app.Action = func(*cli.Context) error { return nil }
+	require.NoError(t, app.Run([]string{"app"}))
+
+	t.Run("EmptyPlaceholder", func(t *testing.T) {
+		f := CliFlag{Flag: flag, Secret: true}
+
+		assert.Equal(t, "", f.Default())
+	})
+	t.Run("DocDefaultPlaceholder", func(t *testing.T) {
+		f := CliFlag{Flag: flag, Secret: true, DocDefault: "[redacted]"}
+
+		assert.Equal(t, "[redacted]", f.Default())
+	})
+}
+
 func TestCliFlag_EnvVar(t *testing.T) {
 	hasDefault := CliFlag{
 		Flag: &cli.StringFlag{
@@ -207,4 +287,32 @@ func TestCliFlag_Usage(t *testing.T) {
 	assert.Contains(t, essentials.Usage(), "*essentials*")
 	assert.Contains(t, plus.Usage(), "*plus*")
 	assert.Contains(t, pro.Usage(), "*pro*")
+}
+
+// TestCliFlags_ApplyDocDefaults checks that an option whose getter reads zero as "derive it"
+// advertises what it derives rather than "(default: 0)", which reads as a value in force.
+func TestCliFlags_ApplyDocDefaults(t *testing.T) {
+	t.Run("Applied", func(t *testing.T) {
+		for _, flag := range Flags {
+			if flag.DocDefault == "" || flag.Secret {
+				continue
+			}
+
+			assert.Equal(t, flag.DocDefault, flag.Flag.GetDefaultText(), flag.Name())
+		}
+	})
+	t.Run("KeepsAnExplicitDefaultText", func(t *testing.T) {
+		flags := CliFlags{{Flag: &cli.IntFlag{Name: "test", DefaultText: "explicit"}, DocDefault: "auto"}}
+
+		flags.ApplyDocDefaults()
+
+		assert.Equal(t, "explicit", flags[0].Flag.GetDefaultText())
+	})
+	t.Run("NoDocDefault", func(t *testing.T) {
+		flags := CliFlags{{Flag: &cli.IntFlag{Name: "test", Value: 7}}}
+
+		flags.ApplyDocDefaults()
+
+		assert.Equal(t, "7", flags[0].Flag.GetDefaultText())
+	})
 }

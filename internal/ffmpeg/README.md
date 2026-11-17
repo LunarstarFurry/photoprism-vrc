@@ -1,10 +1,10 @@
 ## PhotoPrism — FFmpeg Integration
 
-**Last Updated:** November 22, 2025
+**Last Updated:** October 8, 2026
 
 ### Overview
 
-`internal/ffmpeg` wraps the `ffmpeg` CLI to transcode videos to AVC/H.264, remux containers, and extract preview frames in a predictable, testable way. Command builders share option structs so CLI tools, workers, and tests can select software or hardware encoders without duplicating flag logic.
+`internal/ffmpeg` wraps the `ffmpeg` CLI to transcode videos to AVC/H.264, remux containers, extract preview frames, and dewarp fisheye 360° originals to equirectangular in a predictable, testable way. Command builders share option structs so CLI tools, workers, and tests can select software or hardware encoders without duplicating flag logic.
 
 #### Constraints
 
@@ -12,6 +12,7 @@
 - Inputs are internal filenames and option structs (not user input); exec invocations are annotated with `#nosec G204`.
 - Downstream jobs may run concurrently, so `TranscodeCmd` returns a `useMutex` hint to serialize expensive work.
 - Remux and extract commands honor `Force` and reuse shared map flags; metadata copying is limited to safe defaults.
+- `v360` is a software-only filter, so callers that dewarp must select the software AVC encoder; the field of view comes from `entity.CameraFisheyeFov` or the `ffmpeg-fisheye-fov` option.
 
 #### Goals
 
@@ -31,17 +32,19 @@
 - **NVIDIA NVENC:** `internal/ffmpeg/nvidia` (`h264_nvenc`).
 - **Apple VideoToolbox:** `internal/ffmpeg/apple` (`h264_videotoolbox`).
 - **VA-API:** `internal/ffmpeg/vaapi` (`h264_vaapi`) supporting optional device paths.
+- **Vulkan:** `internal/ffmpeg/vulkan` (`h264_vulkan`), requires FFmpeg 8 or later.
 - **V4L2 M2M:** `internal/ffmpeg/v4l` (`h264_v4l2m2m`) for ARM/embedded targets.
 - **Containers:** MP4 is the primary target (`fs.VideoMp4`); `RemuxCmd` can handle other `fs.Type` values when provided.
 - **Streaming flags:** `encode.MovFlags` defaults to `use_metadata_tags+faststart` to keep outputs stream-friendly.
 
 ### Package Layout (Code Map)
 
-- `encode/` — shared option structs, quality helpers, default map/metadata flags, software AVC command builder.
-- `apple/`, `intel/`, `nvidia/`, `vaapi/`, `v4l/` — hardware-specific AVC command builders.
+- `encode/` — shared option structs, quality and preset helpers, default map/metadata flags, software AVC command builder, and `InputArgs`, which every builder uses to open a source file.
+- `apple/`, `intel/`, `nvidia/`, `vaapi/`, `vulkan/`, `v4l/` — hardware-specific AVC command builders.
 - `remux.go` — container-only transfers with metadata copy and temp-file safety.
 - `transcode_cmd.go` — selects encoder, handles animated image inputs, and signals mutex usage.
 - `extract_image_cmd.go` — JPEG/PNG preview frame extraction with color-space presets.
+- `v360.go` — `v360` filter strings and dewarp commands that turn fisheye/dual-fisheye 360° sources into equirectangular JPEG or AVC derivatives, including the two lens streams of separate files (`DewarpDualFisheyePair*`) or of one file (`DewarpDualStream*`), which are stacked side by side first. These lens videos are read with the MOV/MP4 demuxer (`-f mov`).
 - `test.go` & `*_test.go` — reusable command runner and smoke tests (use fixtures in `testdata/`).
 - `ffmpeg.go` — package logger hook.
 
@@ -55,13 +58,16 @@
 
 - Clamp size and quality via `NewVideoOptions` to `[1, 15360]` pixels and the defined quality bounds.
 - Remuxing respects `Options.Force`; without it existing outputs are preserved.
+- Input formats: `encode.InputArgs` reads JPEG and `.insp` sources as JPEG (`-f jpeg_pipe`), `.insv` and `.lrv` sources as MOV/MP4 (`-f mov`), and limits every other source to the demuxers in `encode.InputFormats` (`-format_whitelist`); `.mjpg` and `.mjpeg` sources may also be read as a JPEG stream (`jpeg_pipe`). `encode.InputFormatArgs` returns the same options without `-i` for ffprobe. A supported file type whose container is not in that list needs an entry there.
+- Commands that write one image pass `-update 1`, so the output name is used as given.
 - Metadata copying uses `-map_metadata` and `clean` sanitizers; only safe string fields (title, description, comment, author, creation_time) are added when set.
-- Hardware helpers expect the matching FFmpeg build and devices; callers should gate selection via config or environment (see `PHOTOPRISM_FFMPEG_ENCODER` guidance in `AGENTS.md`).
+- Hardware helpers expect the matching FFmpeg build and devices; callers select one at runtime with `PHOTOPRISM_FFMPEG_ENCODER`.
 
 ### Testing
 
 - Run unit tests: `go test ./internal/ffmpeg/...`
-- Hardware-specific tests assume the encoder is available; keep runs gated via config when adding new cases.
+- By default the transcode tests only assert the generated command strings. To additionally run a real hardware transcode, set `PHOTOPRISM_FFMPEG_TEST_ENCODER` to the encoder under test (e.g. `vaapi`, `intel`, or `nvidia`) on a host with the matching device. The runtime `PHOTOPRISM_FFMPEG_ENCODER` is intentionally ignored so a development-environment value can't trigger hardware runs by accident.
+- Hardware-specific tests assume the encoder is available; keep runs gated via this opt-in variable when adding new cases.
 
 ### Operational Tips
 

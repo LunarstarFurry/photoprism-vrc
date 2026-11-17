@@ -4,10 +4,13 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
+	"github.com/photoprism/photoprism/internal/auth/acl"
 	"github.com/photoprism/photoprism/internal/entity"
 	"github.com/photoprism/photoprism/internal/entity/sortby"
 	"github.com/photoprism/photoprism/internal/form"
+	"github.com/photoprism/photoprism/pkg/rnd"
 )
 
 func TestUsers(t *testing.T) {
@@ -167,4 +170,67 @@ func TestUsers(t *testing.T) {
 			}
 		}
 	})
+	t.Run("SortByLogin", func(t *testing.T) {
+		if results, err := Users(form.SearchUsers{Count: 100, Offset: 0, Order: sortby.Login}); err != nil {
+			t.Fatal(err)
+		} else {
+			// t.Logf("users: %#v", results)
+			assert.LessOrEqual(t, 1, len(results))
+			if len(results) > 0 {
+				assert.Equal(t, "Gandalf", results[0].DisplayName)
+				assert.Equal(t, "Jane Dow", results[1].DisplayName)
+			}
+		}
+	})
+	t.Run("SortByLoginReversed", func(t *testing.T) {
+		if results, err := Users(form.SearchUsers{Count: 100, Offset: 0, Order: sortby.Login, Reverse: true}); err != nil {
+			t.Fatal(err)
+		} else {
+			// t.Logf("users: %#v", results)
+			assert.LessOrEqual(t, 1, len(results))
+			if len(results) > 0 {
+				assert.Equal(t, "2FA Enabled", results[0].DisplayName)
+				assert.Equal(t, "Not Local", results[1].DisplayName)
+			}
+		}
+	})
+	t.Run("SortByDeleted", func(t *testing.T) {
+		if results, err := Users(form.SearchUsers{Count: 100, Offset: 0, Order: sortby.Deleted, Deleted: true}); err != nil {
+			t.Fatal(err)
+		} else {
+			// t.Logf("users: %#v", results)
+			if assert.Equal(t, 1, len(results)) {
+				assert.Equal(t, "deleted", results[0].UserName)
+			}
+		}
+	})
+	t.Run("SortByDeletedReversed", func(t *testing.T) {
+		if results, err := Users(form.SearchUsers{Count: 100, Offset: 0, Order: sortby.Deleted, Reverse: true, Deleted: true}); err != nil {
+			t.Fatal(err)
+		} else {
+			// t.Logf("users: %#v", results)
+			if assert.Equal(t, 1, len(results)) {
+				assert.Equal(t, "deleted", results[0].UserName)
+			}
+		}
+	})
+}
+
+func TestUsers_Literal(t *testing.T) {
+	base := "zzl" + rnd.Base36(5)
+
+	for _, name := range []string{base + "_a", base + "Xa"} {
+		u := entity.NewUser()
+		u.UserName = name
+		u.UserRole = acl.RoleUser.String()
+		require.NoError(t, u.Create())
+		t.Cleanup(func() { _ = entity.UnscopedDb().Delete(u).Error })
+	}
+
+	result, err := Users(form.SearchUsers{Query: base + "_a", Count: 100})
+	require.NoError(t, err)
+
+	if assert.Len(t, result, 1) {
+		assert.Equal(t, base+"_a", result[0].UserName)
+	}
 }

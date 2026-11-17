@@ -13,16 +13,28 @@ fi
 NUMERIC='^[0-9]+$'
 BUILD_DATE=$(/bin/date -u +%y%m%d)
 
+# Use a builder name per host, so that builds started on different hosts
+# get their own buildkit container on the shared remote arm node.
+BUILDER="multibuilder-$(hostname -s)"
+
 # Remove existing multibuilder.
 echo "Removing old multibuilder..."
-docker buildx rm multibuilder 2>/dev/null
+docker buildx rm "$BUILDER" 2>/dev/null
 sleep 3
 echo "Done."
 
 # Create new multibuilder and add remote host for native arm builds.
+# BUILDKIT_STEP_LOG_MAX_SIZE raised from default 2 MiB → 5 MiB so long apt-get
+# transcripts (especially on unstable Ubuntu releases) don't get truncated.
 echo "Creating new multibuilder..."
-docker buildx create --name multibuilder --use 1>/dev/null || { echo 'buildx: failed to create multibuilder'; exit 1; }
-docker buildx create --name multibuilder --append ssh://arm 2>/dev/null || echo 'buildx: failed to add remote host for native arm builds'
+docker buildx create --name "$BUILDER" \
+    --driver-opt env.BUILDKIT_STEP_LOG_MAX_SIZE=5242880 \
+    --driver-opt env.BUILDKIT_STEP_LOG_MAX_SPEED=10485760 \
+    --use 1>/dev/null || { echo "buildx: failed to create $BUILDER"; exit 1; }
+docker buildx create --name "$BUILDER" --append \
+    --driver-opt env.BUILDKIT_STEP_LOG_MAX_SIZE=5242880 \
+    --driver-opt env.BUILDKIT_STEP_LOG_MAX_SPEED=10485760 \
+    ssh://arm 2>/dev/null || echo 'buildx: failed to add remote host for native arm builds'
 echo "Done."
 
 echo "Starting 'photoprism/$1' multi-arch build based on docker/${1/-//}$4/Dockerfile..."
@@ -103,7 +115,13 @@ else
       --push .
 fi
 
+# Capture the buildx exit code so we can still run cleanup below
+# and propagate the failure to make. Without this, a failed build
+# would silently exit 0 because the trailing `echo` succeeds.
+rc=$?
+
 echo "Removing multibuilder..."
-docker buildx rm multibuilder
+docker buildx rm "$BUILDER"
 
 echo "Done."
+exit "$rc"

@@ -1,3 +1,5 @@
+import $util from "common/util";
+
 export default {
   global: {
     ripple: false,
@@ -49,6 +51,16 @@ export default {
     validateOn: "invalid-input",
     hideDetails: "auto",
   },
+  VDateInput: {
+    flat: true,
+    variant: "solo-filled",
+    color: "surface-variant",
+    validateOn: "invalid-input",
+    hideDetails: "auto",
+    // The default hangs a calendar icon outside the field, where nothing else in the app puts one.
+    prependIcon: "",
+    prependInnerIcon: "mdi-calendar",
+  },
   VOtpInput: {
     variant: "outlined",
     baseColor: "on-surface-variant",
@@ -82,6 +94,12 @@ export default {
     itemValue: "value",
     validateOn: "invalid-input",
     hideDetails: "auto",
+  },
+  VTooltip: {
+    openDelay: 0,
+    closeDelay: 0,
+    disabled: $util.isMobile(),
+    transition: false,
   },
   VMenu: {
     origin: "auto",
@@ -176,7 +194,8 @@ export default {
     ripple: false,
   },
   VDataTable: {
-    color: "background",
+    // Forwarded to the footer only as the "items per page" select's active-item color (not the table).
+    color: "surface-variant",
     itemsPerPage: -1,
     hover: true,
   },

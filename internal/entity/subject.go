@@ -6,11 +6,13 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jinzhu/gorm"
+	"github.com/dustin/go-humanize/english"
+	"gorm.io/gorm"
 
 	"github.com/photoprism/photoprism/internal/event"
 	"github.com/photoprism/photoprism/internal/form"
 	"github.com/photoprism/photoprism/pkg/clean"
+	"github.com/photoprism/photoprism/pkg/dsn"
 	"github.com/photoprism/photoprism/pkg/rnd"
 	"github.com/photoprism/photoprism/pkg/txt"
 )
@@ -19,12 +21,13 @@ var subjectMutex = sync.Mutex{}
 
 // Subject represents a named photo subject, typically a person.
 type Subject struct {
-	SubjUID      string     `gorm:"type:VARBINARY(42);primary_key;auto_increment:false;" json:"UID" yaml:"UID"`
-	SubjType     string     `gorm:"type:VARBINARY(8);default:'';" json:"Type,omitempty" yaml:"Type,omitempty"`
-	SubjSrc      string     `gorm:"type:VARBINARY(8);default:'';" json:"Src,omitempty" yaml:"Src,omitempty"`
-	SubjSlug     string     `gorm:"type:VARBINARY(160);index;default:'';" json:"Slug" yaml:"-"`
-	SubjName     string     `gorm:"size:160;unique_index;default:'';" json:"Name" yaml:"Name"`
+	SubjUID      string     `gorm:"type:bytes;size:42;primaryKey;autoIncrement:false;" json:"UID" yaml:"UID"`
+	SubjType     string     `gorm:"type:bytes;size:8;default:'';" json:"Type,omitempty" yaml:"Type,omitempty"`
+	SubjSrc      string     `gorm:"type:bytes;size:8;default:'';" json:"Src,omitempty" yaml:"Src,omitempty"`
+	SubjSlug     string     `gorm:"type:bytes;size:160;index;default:'';" json:"Slug" yaml:"-"`
+	SubjName     string     `gorm:"size:160;uniqueIndex:uix_subjects_subj_name;default:'';" json:"Name" yaml:"Name"`
 	SubjAlias    string     `gorm:"size:160;default:'';" json:"Alias" yaml:"Alias"`
+	SubjBirthday *time.Time `json:"Birthday" yaml:"Birthday,omitempty"`
 	SubjAbout    string     `gorm:"size:512;" json:"About" yaml:"About,omitempty"`
 	SubjBio      string     `gorm:"size:2048;" json:"Bio" yaml:"Bio,omitempty"`
 	SubjNotes    string     `gorm:"size:1024;" json:"Notes,omitempty" yaml:"Notes,omitempty"`
@@ -32,13 +35,14 @@ type Subject struct {
 	SubjHidden   bool       `gorm:"default:false;" json:"Hidden" yaml:"Hidden,omitempty"`
 	SubjPrivate  bool       `gorm:"default:false;" json:"Private" yaml:"Private,omitempty"`
 	SubjExcluded bool       `gorm:"default:false;" json:"Excluded" yaml:"Excluded,omitempty"`
-	FileCount    int        `gorm:"default:0;" json:"FileCount" yaml:"-"`
-	PhotoCount   int        `gorm:"default:0;" json:"PhotoCount" yaml:"-"`
-	Thumb        string     `gorm:"type:VARBINARY(128);index;default:'';" json:"Thumb" yaml:"Thumb,omitempty"`
-	ThumbSrc     string     `gorm:"type:VARBINARY(8);default:'';" json:"ThumbSrc,omitempty" yaml:"ThumbSrc,omitempty"`
+	FileCount    int        `gorm:"default:0;size:32;" json:"FileCount" yaml:"-"`
+	PhotoCount   int        `gorm:"default:0;size:32;" json:"PhotoCount" yaml:"-"`
+	Verified     bool       `gorm:"default:false;" json:"Verified" yaml:"Verified,omitempty"`
+	Thumb        string     `gorm:"type:bytes;size:128;index;default:'';" json:"Thumb" yaml:"Thumb,omitempty"`
+	ThumbSrc     string     `gorm:"type:bytes;size:8;default:'';" json:"ThumbSrc,omitempty" yaml:"ThumbSrc,omitempty"`
 	CreatedAt    time.Time  `json:"CreatedAt" yaml:"-"`
 	UpdatedAt    time.Time  `json:"UpdatedAt" yaml:"-"`
-	DeletedAt    *time.Time `sql:"index" json:"DeletedAt,omitempty" yaml:"-"`
+	DeletedAt    DeletedAt  `gorm:"index" json:"DeletedAt,omitzero" yaml:"-"`
 }
 
 // TableName returns the entity table name.
@@ -46,24 +50,112 @@ func (Subject) TableName() string {
 	return "subjects"
 }
 
+// visiblePersonCond keeps a row whose joined person is visible. A row with no person joined is
+// kept, which is what a marker carrying no subject needs.
+const visiblePersonCond = "(%[1]s.subj_uid IS NULL OR (%[1]s.subj_private = FALSE AND %[1]s.subj_hidden = FALSE))"
+
+// NameWithheld reports whether the person's name is withheld from sessions denied private access
+// to people, and from generated titles, captions and keywords. Marking someone private or hidden
+// both have that effect.
+func (m *Subject) NameWithheld() bool {
+	return m.SubjPrivate || m.SubjHidden
+}
+
+// VisiblePeopleFilter returns the joins and the condition that together keep only the rows of the
+// given table whose people are visible. Both joins resolve a unique key, so each adds one index
+// lookup per row rather than a subquery the driver re-runs. withNames also resolves the person a
+// row's own marker_name points at; pass false for a table without that column, such as faces.
+func VisiblePeopleFilter(table string, withNames bool) (joins []string, cond string) {
+	subjTable := Subject{}.TableName()
+	linked := table + "_subj"
+
+	joins = []string{fmt.Sprintf("LEFT JOIN %s %s ON %s.subj_uid = %s.subj_uid",
+		subjTable, linked, linked, table)}
+	conds := []string{fmt.Sprintf(visiblePersonCond, linked)}
+
+	if withNames {
+		named := table + "_named"
+
+		joins = append(joins, fmt.Sprintf("LEFT JOIN %s %s ON %s.subj_name = %s.marker_name",
+			subjTable, named, named, table))
+		conds = append(conds, fmt.Sprintf(visiblePersonCond, named))
+	}
+
+	return joins, strings.Join(conds, " AND ")
+}
+
+// WithheldPeople is a set of the subject uids and names whose identity is withheld.
+type WithheldPeople struct {
+	uids  map[string]struct{}
+	names map[string]struct{}
+}
+
+// Withholds reports whether a marker names a withheld person, through its subject link or through
+// the name it carries. Either is enough, so a marker whose two disagree is withheld on both counts.
+func (w WithheldPeople) Withholds(subjUID, markerName string) bool {
+	if subjUID != "" {
+		if _, found := w.uids[subjUID]; found {
+			return true
+		}
+	}
+
+	if markerName != "" {
+		if _, found := w.names[strings.ToLower(markerName)]; found {
+			return true
+		}
+	}
+
+	return false
+}
+
+// FindWithheldPeople loads the people whose name is withheld, so a caller can classify identities
+// it already holds. It selects them all rather than filtering by the candidates: the set is a
+// handful in any library, and matching in Go is the only way to compare names the same way on both
+// drivers - subj_name is a case-insensitive VARCHAR on MariaDB and a case-sensitive one on SQLite.
+func FindWithheldPeople() (WithheldPeople, error) {
+	w := WithheldPeople{uids: make(map[string]struct{}), names: make(map[string]struct{})}
+
+	var found []struct {
+		SubjUID  string
+		SubjName string
+	}
+
+	stmt := UnscopedDb().Table(Subject{}.TableName()).
+		Select("subj_uid, subj_name").
+		Where("subj_private = TRUE OR subj_hidden = TRUE")
+
+	if err := stmt.Scan(&found).Error; err != nil {
+		return WithheldPeople{}, err
+	}
+
+	for _, s := range found {
+		w.uids[s.SubjUID] = struct{}{}
+		w.names[strings.ToLower(s.SubjName)] = struct{}{}
+	}
+
+	return w, nil
+}
+
 // BeforeCreate creates a random uid if needed before inserting a new row to the database.
-func (m *Subject) BeforeCreate(scope *gorm.Scope) error {
+func (m *Subject) BeforeCreate(tx *gorm.DB) error {
 	if rnd.IsUnique(m.SubjUID, 'j') {
 		return nil
 	}
 
-	return scope.SetColumn("SubjUID", rnd.GenerateUID('j'))
+	tx.Statement.SetColumn("SubjUID", rnd.GenerateUID('j'))
+
+	return nil
 }
 
 // AfterSave is a hook that updates the name cache after saving.
-func (m *Subject) AfterSave() (err error) {
-	SubjNames.Set(m.SubjUID, m.SubjName)
+func (m *Subject) AfterSave(tx *gorm.DB) (err error) {
+	setSubjName(m.SubjUID, m.SubjName)
 	return
 }
 
 // AfterFind is a hook that updates the name cache after querying.
-func (m *Subject) AfterFind() (err error) {
-	SubjNames.Set(m.SubjUID, m.SubjName)
+func (m *Subject) AfterFind(tx *gorm.DB) (err error) {
+	setSubjName(m.SubjUID, m.SubjName)
 	return
 }
 
@@ -131,7 +223,11 @@ func (m *Subject) Delete() error {
 
 	log.Infof("subject: flagged %s %s as missing", TypeString(m.SubjType), clean.Log(m.SubjName))
 
-	return Db().Delete(m).Error
+	if err := Db().Delete(m).Error; err != nil {
+		return err
+	}
+
+	return nil
 }
 
 // DeletePermanently permanently removes a subject from the index after is has been soft deleted.
@@ -148,8 +244,13 @@ func (m *Subject) DeletePermanently() error {
 	return UnscopedDb().Delete(m).Error
 }
 
-// AfterDelete resets file and photo counters when the entity was deleted.
+// AfterDelete resets file and photo counters when the entity was deleted. A delete by condition
+// runs it on an empty model, which names no subject to update.
 func (m *Subject) AfterDelete(tx *gorm.DB) (err error) {
+	if m.SubjUID == "" {
+		return nil
+	}
+
 	tx.Model(m).Updates(Values{
 		"FileCount":  0,
 		"PhotoCount": 0,
@@ -162,24 +263,24 @@ func (m *Subject) AfterDelete(tx *gorm.DB) (err error) {
 
 // Deleted returns true if the entity is deleted.
 func (m *Subject) Deleted() bool {
-	if m.DeletedAt == nil {
+	if !m.DeletedAt.Valid {
 		return false
 	}
 
-	return !m.DeletedAt.IsZero()
+	return !m.DeletedAt.Time.IsZero()
 }
 
 // Restore restores the entity in the database.
 func (m *Subject) Restore() error {
 	if m.Deleted() {
-		m.DeletedAt = nil
+		m.DeletedAt = DeletedAt{}
 
 		log.Infof("subject: restoring %s %s", TypeString(m.SubjType), clean.Log(m.SubjName))
 
-		event.EntitiesCreated("subjects", []*Subject{m})
+		event.EntitiesCreated("subjects", []string{m.SubjUID})
 
 		if m.IsPerson() {
-			event.EntitiesCreated("people", []*Person{m.Person()})
+			event.EntitiesCreated("people", []string{m.SubjUID})
 			event.Publish("count.people", event.Data{
 				"count": 1,
 			})
@@ -214,10 +315,10 @@ func FirstOrCreateSubject(m *Subject) *Subject {
 	} else if err := m.Create(); err == nil {
 		log.Infof("subject: added %s %s", TypeString(m.SubjType), clean.Log(m.SubjName))
 
-		event.EntitiesCreated("subjects", []*Subject{m})
+		event.EntitiesCreated("subjects", []string{m.SubjUID})
 
 		if m.IsPerson() {
-			event.EntitiesCreated("people", []*Person{m.Person()})
+			event.EntitiesCreated("people", []string{m.SubjUID})
 			event.Publish("count.people", event.Data{
 				"count": 1,
 			})
@@ -258,17 +359,17 @@ func FindSubjectByName(name string, restore bool) *Subject {
 
 	result := Subject{}
 
-	// Fetch existing record by uid, if possible
+	// Fetch existing record by uid, if possible, and only if it still carries the name.
 	if uid := SubjNames.Key(name); uid == "" {
-	} else if found := FindSubject(uid); found != nil {
-		result = *found
-	} else {
+	} else if found := FindSubject(uid); found == nil {
 		log.Debugf("subject: cannot find record for uid %s", clean.Log(uid))
+	} else if strings.ToLower(found.SubjName) == strings.ToLower(name) { //nolint:staticcheck // Compares like the cache key.
+		result = *found
 	}
 
 	// Search existing record by name, otherwise.
 	if result.SubjUID != "" {
-	} else if err := UnscopedDb().Where("subj_name LIKE ?", name).First(&result).Error; err != nil {
+	} else if err := UnscopedDb().Where(clean.SqlLikeCond(DbDialect(), false, "subj_name"), clean.SqlLike(name)).First(&result).Error; err != nil {
 		log.Debugf("subject: %s does not exist yet", clean.Log(name))
 		return nil
 	}
@@ -314,9 +415,63 @@ func (m *Subject) SetName(name string) error {
 	return nil
 }
 
+// BirthYearMin is the earliest year a subject may be born in, chosen so that the oldest person who
+// could plausibly have been photographed is still accepted: portrait photography starts in the 1840s,
+// and a sitter of that decade could have been born around 1800. It exists to catch a mistyped year.
+const BirthYearMin = 1800
+
+// NormalizeBirthday returns a date of birth at UTC midnight, or nil when the value is nil or zero.
+// The calendar date is read in the value's own location, so a client sending local midnight does not
+// store the day before - a birthday has no time and no zone, while the column has both.
+func NormalizeBirthday(t *time.Time) (born *time.Time, err error) {
+	if t == nil || t.IsZero() {
+		return nil, nil
+	}
+
+	y, month, d := t.Date()
+	utc := time.Date(y, month, d, 0, 0, 0, 0, time.UTC)
+
+	// A day of headroom, since a date-only value is legitimately ahead of UTC in eastern zones.
+	if utc.After(time.Now().UTC().AddDate(0, 0, 1)) {
+		return nil, fmt.Errorf("%w: birthday must not be in the future", ErrInvalidValue)
+	} else if y < BirthYearMin {
+		return nil, fmt.Errorf("%w: birthday must not be before %d", ErrInvalidValue, BirthYearMin)
+	}
+
+	return &utc, nil
+}
+
+// SetBirthday normalizes a date of birth and reports whether it changed, or clears it when the value
+// is nil or zero.
+func (m *Subject) SetBirthday(t *time.Time) (changed bool, err error) {
+	born, err := NormalizeBirthday(t)
+
+	if err != nil {
+		return false, err
+	}
+
+	return m.setBirthday(born), nil
+}
+
+// setBirthday stores an already normalized date of birth and reports whether it changed. Separate
+// from validating one, so a caller can refuse a bad value before writing anything and apply a good
+// one only once the writes it accompanies are known to be going ahead.
+func (m *Subject) setBirthday(born *time.Time) (changed bool) {
+	switch {
+	case born == nil && m.SubjBirthday == nil:
+		return false
+	case born != nil && m.SubjBirthday != nil && born.Equal(*m.SubjBirthday):
+		return false
+	}
+
+	m.SubjBirthday = born
+
+	return true
+}
+
 // Visible tests if the subject is generally visible and not hidden in any way.
 func (m *Subject) Visible() bool {
-	return m.DeletedAt == nil && !m.SubjHidden && !m.SubjExcluded && !m.SubjPrivate
+	return !m.DeletedAt.Valid && !m.SubjHidden && !m.SubjExcluded && !m.SubjPrivate
 }
 
 // SaveForm updates the subject from form values.
@@ -327,7 +482,36 @@ func (m *Subject) SaveForm(frm *form.Subject) (changed bool, err error) {
 		return false, fmt.Errorf("subject has no uid")
 	}
 
+	// Validated before the name and applied after it: the rename writes as it goes and may divert
+	// into a merge and return, so a value assigned before it is either committed alongside a
+	// refused request or left unsaved on the entity the handler serializes. This orders the writes
+	// rather than making them one - a rename is durable before the trailing Updates runs.
+
+	// Validate the thumbnail (hash with crop area).
+	thumbCrop := clean.ThumbCrop(frm.Thumb)
+	thumbChanged := false
+
+	if thumbCrop != "" && thumbCrop != m.Thumb {
+		if SrcPriority[frm.ThumbSrc] <= 0 {
+			return false, fmt.Errorf("%w: invalid thumb source", ErrInvalidValue)
+		}
+
+		thumbChanged = true
+	} else if frm.Thumb != "" && frm.Thumb != m.Thumb && frm.Thumb != thumbCrop {
+		return false, fmt.Errorf("%w: invalid thumb", ErrInvalidValue)
+	}
+
+	// Validate the date of birth.
+	born, bornErr := NormalizeBirthday(frm.SubjBirthday)
+
+	if bornErr != nil {
+		return false, bornErr
+	}
+
 	// Update name?
+	//
+	// A name another person already owns merges this one into them and returns, which is why nothing
+	// above has been applied yet: the rest of the form belongs to a subject that no longer exists.
 	if name := clean.Name(frm.SubjName); name != "" && name != m.SubjName {
 		existing, updateErr := m.UpdateName(name)
 
@@ -338,19 +522,16 @@ func (m *Subject) SaveForm(frm *form.Subject) (changed bool, err error) {
 		changed = true
 	}
 
-	// Update thumbnail (hash with crop area).
-	thumbChanged := false
-	if thumbCrop := clean.ThumbCrop(frm.Thumb); thumbCrop != "" && thumbCrop != m.Thumb {
-		if SrcPriority[frm.ThumbSrc] > 0 {
-			m.Thumb = thumbCrop
-			m.ThumbSrc = frm.ThumbSrc
-			thumbChanged = true
-			changed = true
-		} else {
-			return false, fmt.Errorf("invalid thumb source")
-		}
-	} else if frm.Thumb != "" && frm.Thumb != m.Thumb && frm.Thumb != thumbCrop {
-		return false, fmt.Errorf("invalid thumb")
+	// Apply the values validated above.
+	if thumbChanged {
+		m.Thumb = thumbCrop
+		m.ThumbSrc = frm.ThumbSrc
+		changed = true
+	}
+
+	// Compared after normalizing, so resending the same day in another zone is not a change.
+	if m.setBirthday(born) {
+		changed = true
 	}
 
 	// Change favorite status?
@@ -358,6 +539,20 @@ func (m *Subject) SaveForm(frm *form.Subject) (changed bool, err error) {
 		m.SubjFavorite = frm.SubjFavorite
 		changed = true
 	}
+
+	// Change verification?
+	//
+	// Set here and nowhere else. A flag the matcher, the clusterer, a propagation pass or an import
+	// could raise stops meaning "a person vouched for this name" within a release, which is how
+	// markers.q drifted from what it claimed until it was removed.
+	if m.Verified != frm.Verified {
+		m.Verified = frm.Verified
+		changed = true
+	}
+
+	// Generated titles, captions and keywords carry the names of the people in a picture, so a
+	// change to what NameWithheld reads has to reach the pictures that already carry one.
+	nameVisibilityChanged := m.SubjPrivate != frm.SubjPrivate || m.SubjHidden != frm.SubjHidden
 
 	// Change visibility?
 	if m.SubjHidden != frm.SubjHidden || m.SubjPrivate != frm.SubjPrivate || m.SubjExcluded != frm.SubjExcluded {
@@ -384,10 +579,12 @@ func (m *Subject) SaveForm(frm *form.Subject) (changed bool, err error) {
 	// Update index?
 	if changed {
 		values := Values{
+			"SubjBirthday": m.SubjBirthday,
 			"SubjFavorite": m.SubjFavorite,
 			"SubjHidden":   m.SubjHidden,
 			"SubjPrivate":  m.SubjPrivate,
 			"SubjExcluded": m.SubjExcluded,
+			"Verified":     m.Verified,
 		}
 
 		if thumbChanged {
@@ -395,17 +592,24 @@ func (m *Subject) SaveForm(frm *form.Subject) (changed bool, err error) {
 			values["ThumbSrc"] = m.ThumbSrc
 		}
 
-		if updateErr := m.Updates(values); updateErr == nil {
-			event.EntitiesUpdated("subjects", []*Subject{m})
-
-			if m.IsPerson() {
-				event.EntitiesUpdated("people", []*Person{m.Person()})
-			}
-
-			return true, nil
-		} else {
+		if updateErr := m.Updates(values); updateErr != nil {
 			return false, updateErr
 		}
+
+		// Flagged after the write, so a refused update leaves no pass scheduled for it.
+		if nameVisibilityChanged {
+			if refreshErr := m.RefreshPhotos(); refreshErr != nil {
+				log.Warnf("subject: %s while flagging the pictures of %s for maintenance", refreshErr, clean.Log(m.SubjUID))
+			}
+		}
+
+		event.EntitiesUpdated("subjects", []string{m.SubjUID})
+
+		if m.IsPerson() {
+			event.EntitiesUpdated("people", []string{m.SubjUID})
+		}
+
+		return true, nil
 	}
 
 	return false, nil
@@ -447,19 +651,43 @@ func (m *Subject) UpdateName(name string) (*Subject, error) {
 	} else if err = m.Updates(Values{"subj_name": m.SubjName, "subj_slug": m.SubjSlug}); err != nil {
 		return m, err
 	} else {
-		SubjNames.Set(m.SubjUID, m.SubjName)
+		setSubjName(m.SubjUID, m.SubjName)
 	}
 
 	// Log result.
 	log.Infof("subject: renamed %s to %s", TypeString(m.SubjType), clean.Log(m.SubjName))
 
-	event.EntitiesUpdated("subjects", []*Subject{m})
+	event.EntitiesUpdated("subjects", []string{m.SubjUID})
 
 	if m.IsPerson() {
-		event.EntitiesUpdated("people", []*Person{m.Person()})
+		event.EntitiesUpdated("people", []string{m.SubjUID})
 	}
 
 	return m, m.UpdateMarkerNames()
+}
+
+// ReassignSubject returns the person that already owns the given name when that is
+// someone other than subj, so callers can link to them instead of renaming subj.
+// A deleted record is not returned: UpdateName clears those out of the way and
+// renames instead.
+func ReassignSubject(subj *Subject, name string) *Subject {
+	if subj == nil {
+		return nil
+	}
+
+	name = clean.Name(name)
+
+	if name == "" || name == subj.SubjName {
+		return nil
+	}
+
+	existing := FindSubjectByName(name, false)
+
+	if existing == nil || existing.Deleted() || existing.SubjUID == subj.SubjUID {
+		return nil
+	}
+
+	return existing
 }
 
 // UpdateMarkerNames updates related marker names.
@@ -482,7 +710,9 @@ func (m *Subject) UpdateMarkerNames() error {
 	return m.RefreshPhotos()
 }
 
-// RefreshPhotos flags related photos for metadata maintenance.
+// RefreshPhotos flags related photos for metadata maintenance. It joins on markers.subj_uid, so a
+// picture linked to this person only through markers.marker_name is not requeued here and waits for
+// the ordinary age-based pass instead.
 func (m *Subject) RefreshPhotos() error {
 	if m.SubjUID == "" {
 		return fmt.Errorf("empty subject uid")
@@ -490,7 +720,7 @@ func (m *Subject) RefreshPhotos() error {
 
 	var err error
 	switch DbDialect() {
-	case MySQL:
+	case dsn.DialectMySQL:
 		update := fmt.Sprintf(`UPDATE photos p JOIN files f ON f.photo_id = p.id JOIN %s m ON m.file_uid = f.file_uid
 			SET p.checked_at = NULL WHERE m.subj_uid = ?`, Marker{}.TableName())
 		err = UnscopedDb().Exec(update, m.SubjUID).Error
@@ -528,10 +758,25 @@ func (m *Subject) MergeWith(other *Subject) error {
 		return err
 	}
 
+	// A merge states that the two subjects are one person, which retracts the premise every
+	// collision between their clusters was recorded on. Nothing else widens a collision radius, so
+	// leaving it gates those clusters permanently against faces that are now known to belong.
+	if cleared, colErr := ClearSubjectCollisions(other.SubjUID); colErr != nil {
+		return colErr
+	} else if cleared > 0 {
+		log.Infof("subject: cleared %s after merging into %s",
+			english.Plural(cleared, "face collision", "face collisions"), clean.Log(other.SubjName))
+	}
+
 	// Updated subject entity values.
+	//
+	// Verified carries over from either side: the flag records that somebody vouched for the
+	// person, and a merge does not withdraw that. Dropping it would leave the survivor unprotected
+	// by the orphan sweeps, so the next reset would delete the name the operator vouched for.
 	updates := Values{
 		"FileCount":  other.FileCount + m.FileCount,
 		"PhotoCount": other.PhotoCount + m.PhotoCount,
+		"Verified":   other.Verified || m.Verified,
 	}
 
 	// Use existing thumbnail image?
@@ -543,6 +788,18 @@ func (m *Subject) MergeWith(other *Subject) error {
 	// Update subject entity.
 	if err := UnscopedDb().Model(other).Updates(updates).Error; err != nil {
 		return err
+	}
+
+	other.Verified = other.Verified || m.Verified
+
+	// Cleared on the row about to be deleted: the survivor now carries the flag, so leaving it here
+	// would claim two people were vouched for where the operator vouched for one.
+	if m.Verified {
+		m.Verified = false
+
+		if err := m.Updates(Values{"Verified": false}); err != nil {
+			return err
+		}
 	}
 
 	return m.Delete()

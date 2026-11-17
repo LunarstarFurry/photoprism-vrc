@@ -1,7 +1,6 @@
 package commands
 
 import (
-	"encoding/json"
 	"fmt"
 
 	"github.com/urfave/cli/v2"
@@ -57,7 +56,7 @@ func clusterNodesShowAction(ctx *cli.Context) error {
 			return cli.Exit(fmt.Errorf("node not found"), 3)
 		}
 
-		opts := reg.NodeOpts{IncludeAdvertiseUrl: true, IncludeDatabase: true}
+		opts := reg.NodeOptsForOperator()
 		dto := reg.BuildClusterNode(*n, opts)
 
 		who := clusterAuditWho(ctx, conf)
@@ -68,7 +67,7 @@ func clusterNodesShowAction(ctx *cli.Context) error {
 		), clean.Log(dto.UUID))
 
 		if ctx.Bool("json") {
-			b, _ := json.Marshal(dto)
+			b, _ := report.MarshalJSON(dto)
 			fmt.Println(string(b))
 			return nil
 		}

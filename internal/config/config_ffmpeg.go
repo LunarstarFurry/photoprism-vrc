@@ -6,7 +6,9 @@ import (
 
 	"github.com/photoprism/photoprism/internal/ffmpeg/encode"
 	"github.com/photoprism/photoprism/internal/thumb"
+	"github.com/photoprism/photoprism/pkg/clean"
 	"github.com/photoprism/photoprism/pkg/fs"
+	"github.com/photoprism/photoprism/pkg/media/video"
 	"github.com/photoprism/photoprism/pkg/txt"
 )
 
@@ -45,7 +47,7 @@ func (c *Config) FFmpegEncoder() encode.Encoder {
 	return encode.FindEncoder(c.options.FFmpegEncoder)
 }
 
-// FFmpegSize returns the maximum ffmpeg video encoding size in pixels (720-7680).
+// FFmpegSize returns the maximum ffmpeg video encoding size in pixels (720-15360).
 func (c *Config) FFmpegSize() int {
 	return thumb.VideoSize(c.options.FFmpegSize).Width
 }
@@ -82,6 +84,21 @@ func (c *Config) FFmpegBitrate() int {
 	}
 }
 
+// FFmpegFisheyeFov returns the clamped field of view in degrees for the v360 dewarp filter.
+// Cameras recognized by entity.CameraFisheyeFov use their own angle instead of this value.
+func (c *Config) FFmpegFisheyeFov() int {
+	switch {
+	case c.options.FFmpegFisheyeFov <= 0:
+		return encode.DefaultFisheyeFov
+	case c.options.FFmpegFisheyeFov < encode.MinFisheyeFov:
+		return encode.MinFisheyeFov
+	case c.options.FFmpegFisheyeFov > encode.MaxFisheyeFov:
+		return encode.MaxFisheyeFov
+	default:
+		return c.options.FFmpegFisheyeFov
+	}
+}
+
 // FFmpegBitrateExceeded tests if the ffmpeg bitrate limit in Mbps is exceeded.
 func (c *Config) FFmpegBitrateExceeded(bitrate float64) bool {
 	if bitrate <= 0 {
@@ -94,13 +111,17 @@ func (c *Config) FFmpegBitrateExceeded(bitrate float64) bool {
 }
 
 // FFmpegPreset returns the ffmpeg encoding preset from "ultrafast" to "veryslow",
-// see https://trac.ffmpeg.org/wiki/Encode/H.264#Preset.
+// see https://trac.ffmpeg.org/wiki/Encode/H.264#Preset. Unknown names fall back to "fast".
 func (c *Config) FFmpegPreset() string {
-	if c.options.FFmpegPreset == "" {
-		return encode.PresetFast
+	preset, ok := encode.ParsePreset(c.options.FFmpegPreset)
+
+	if !ok {
+		if _, warned := c.warnedOnce.LoadOrStore("ffmpeg-preset: "+c.options.FFmpegPreset, true); !warned {
+			log.Warnf("config: unsupported ffmpeg preset %s, using %s", clean.LogQuote(c.options.FFmpegPreset), preset)
+		}
 	}
 
-	return c.options.FFmpegPreset
+	return preset
 }
 
 // FFmpegDevice returns the ffmpeg device path for supported hardware encoders (optional).
@@ -135,6 +156,13 @@ func (c *Config) FFmpegMapAudio() string {
 	return c.options.FFmpegMapAudio
 }
 
+// FFmpegExclude returns a comma-separated list of container and codec names
+// that must not be processed by FFmpeg, e.g. for transcoding, remuxing, or
+// still-frame extraction. Matching is case-insensitive.
+func (c *Config) FFmpegExclude() video.Formats {
+	return video.NewFormats(c.options.FFmpegExclude)
+}
+
 // FFmpegOptions returns the FFmpeg options to use for video transcoding.
 func (c *Config) FFmpegOptions(encoder encode.Encoder, bitrate string) (encode.Options, error) {
 	// Get options to transcode other formats with FFmpeg.
@@ -150,6 +178,11 @@ func (c *Config) FFmpegOptions(encoder encode.Encoder, bitrate string) (encode.O
 		return opt, fmt.Errorf("bitrate must not be empty")
 	case encoder.String() == "":
 		return opt, fmt.Errorf("encoder must not be empty")
+	}
+
+	// Set the peak bitrate target for encoders that support it, unless the limit is disabled.
+	if c.FFmpegBitrate() != encode.NoBitrateLimit {
+		opt.MaxBitrate = encode.ParseBitrate(bitrate)
 	}
 
 	return opt, nil

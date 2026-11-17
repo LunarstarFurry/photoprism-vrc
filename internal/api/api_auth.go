@@ -1,12 +1,17 @@
 package api
 
 import (
+	"crypto/subtle"
+	"errors"
+
 	"github.com/gin-gonic/gin"
 
 	"github.com/photoprism/photoprism/internal/ai/vision"
 	"github.com/photoprism/photoprism/internal/auth/acl"
 	"github.com/photoprism/photoprism/internal/entity"
 	"github.com/photoprism/photoprism/internal/event"
+	"github.com/photoprism/photoprism/internal/photoprism/get"
+	"github.com/photoprism/photoprism/internal/server/limiter"
 	"github.com/photoprism/photoprism/pkg/authn"
 	"github.com/photoprism/photoprism/pkg/clean"
 	"github.com/photoprism/photoprism/pkg/http/header"
@@ -22,6 +27,48 @@ func Auth(c *gin.Context, resource acl.Resource, perm acl.Permission) *entity.Se
 // AuthAny checks if the user is authorized to access a resource with any of the specified permissions
 // and returns the session or nil otherwise.
 func AuthAny(c *gin.Context, resource acl.Resource, perms acl.Permissions) (s *entity.Session) {
+	return authAny(c, "", resource, perms)
+}
+
+// AuthAccess checks the action like Auth and then requires any of the access levels, so that a
+// scope limited to read or write operations is checked against the action.
+func AuthAccess(c *gin.Context, resource acl.Resource, action acl.Permission, access acl.Permissions) *entity.Session {
+	s := Auth(c, resource, action)
+
+	// Cluster JWT sessions are authorized by their scope alone, as in Auth.
+	if s.Invalid() || s.GrantType == authn.GrantJwtBearer.String() {
+		return s
+	}
+
+	if s.DeniesAll(resource, access) {
+		auditAccessDenied(ClientIP(c), s, resource, access)
+		return entity.SessionStatusForbidden()
+	}
+
+	return s
+}
+
+// auditAccessDenied logs a refused access level with the segments authorizeSession uses for the role that refused it.
+// A refusal that neither role makes alone is logged like an owner refusal, which names both principals.
+func auditAccessDenied(clientIp string, s *entity.Session, resource acl.Resource, access acl.Permissions) {
+	switch {
+	case !s.IsClient():
+		event.AuditErr([]string{clientIp, "session %s", "%s %s as %s", status.Denied}, s.RefID, access.String(), string(resource), s.GetUserRole().String())
+	case s.NoUser() || acl.Rules.DenyAll(resource, s.GetClientRole(), access):
+		event.AuditErr([]string{clientIp, "client %s", "session %s", "%s %s", status.Denied}, clean.Log(s.GetClientInfo()), s.RefID, access.String(), string(resource))
+	default:
+		event.AuditErr([]string{clientIp, "client %s", "session %s", "%s %s as %s", status.Denied}, clean.Log(s.GetClientInfo()), s.RefID, access.String(), string(resource), s.GetUser().String())
+	}
+}
+
+// AuthAudience checks the authorization like Auth, and also accepts a session issued for the specified
+// audience, such as an app access token for the MCP endpoint.
+func AuthAudience(c *gin.Context, audience string, resource acl.Resource, perm acl.Permission) *entity.Session {
+	return authAny(c, audience, resource, acl.Permissions{perm})
+}
+
+// authAny implements AuthAny and AuthAudience.
+func authAny(c *gin.Context, audience string, resource acl.Resource, perms acl.Permissions) (s *entity.Session) {
 	// Prevent CDNs from caching responses that require authentication.
 	if header.IsCdn(c.Request) {
 		return entity.SessionStatusForbidden()
@@ -34,29 +81,91 @@ func AuthAny(c *gin.Context, resource acl.Resource, perms acl.Permissions) (s *e
 	// Disable response caching.
 	c.Header(header.CacheControl, header.CacheControlNoStore)
 
-	// Allow requests based on an access token for specific resources.
-	if resource == acl.ResourceVision && perms.Contains(acl.ActionUse) && vision.ServiceApi && vision.ServiceKey != "" && vision.ServiceKey == authToken {
+	// Warn if requests forwarded by the Portal are attributed to its own address.
+	warnUntrustedPortal(c, clientIp)
+
+	// Refuse clients that exceeded the authentication failure rate limit.
+	if limiter.Auth.Reject(clientIp) {
+		return entity.SessionStatusTooManyRequests()
+	}
+
+	// Allow requests based on an access token for specific resources. Session() counts a failed
+	// token with the format of an access token or app password against the rate limit above.
+	if resource == acl.ResourceVision && perms.Contains(acl.ActionUse) && vision.ServiceApi && vision.ServiceKey != "" && subtle.ConstantTimeCompare([]byte(vision.ServiceKey), []byte(authToken)) == 1 {
 		s = entity.NewSessionFromToken(c, authToken, acl.ResourceVision.String(), "service-key")
 		event.AuditInfo([]string{clientIp, "%s", "%s %s as %s", status.Granted}, s.RefID, perms.First(), string(resource), s.GetClientRole().String())
 		return s
 	}
 
 	// Find active session to perform authorization check or deny if no session was found.
-	if s = Session(clientIp, authToken); s == nil {
+	var err error
+
+	if s, err = lookupSession(clientIp, authToken, audience); s == nil {
+		// Refuse a client that exceeded the rate limit after the check above, again without an audit event.
+		if errors.Is(err, authn.ErrRateLimitExceeded) {
+			return entity.SessionStatusTooManyRequests()
+		}
+
 		if s = authAnyJWT(c, clientIp, authToken, resource, perms); s != nil {
 			event.AuditInfo([]string{clientIp, "session %s", "%s %s as %s", status.Granted}, s.RefID, perms.First(), string(resource), s.GetClientRole().String())
 			return s
 		}
-		event.AuditWarn([]string{clientIp, "%s %s without authentication", status.Denied}, perms.String(), string(resource))
+
+		// Log routine anonymous requests at debug level; warn only on a rejected token.
+		if authToken == "" {
+			event.AuditDebug([]string{clientIp, "%s %s without authentication", status.Denied}, perms.String(), string(resource))
+		} else {
+			event.AuditWarn([]string{clientIp, "%s %s with invalid authentication", status.Denied}, perms.String(), string(resource))
+		}
+
 		return entity.SessionStatusUnauthorized()
 	}
 
 	// Set client IP.
 	s.SetClientIP(clientIp)
 
-	// If the request is from a client application, check its authorization based
-	// on the allowed scope, the ACL, and the user account it belongs to (if any).
+	return authorizeSession(clientIp, s, resource, perms)
+}
+
+// authorizeSession applies the credential, scope, owner, and ACL checks to a resolved session, and returns
+// it, or a session carrying the HTTP status of the refusal.
+func authorizeSession(clientIp string, s *entity.Session, resource acl.Resource, perms acl.Permissions) *entity.Session {
+	// Refuse sessions of registered clients that are missing, deleted, or disabled.
+	if s.ClientDisabled() {
+		event.AuditErr([]string{clientIp, "client %s", "session %s", "%s %s", status.Disabled}, clean.Log(s.GetClientInfo()), s.RefID, perms.String(), string(resource))
+		return entity.SessionStatusUnauthorized()
+	}
+
+	// Enforce restrictions for app password sessions, identified by the "application" auth provider.
+	if s.IsApplication() {
+		// Reject app passwords when the feature is disabled.
+		if get.Config().DisableAppPasswords() {
+			event.AuditWarn([]string{clientIp, "session %s", "%s %s with app password", status.Disabled}, s.RefID, perms.String(), string(resource))
+			return entity.SessionStatusForbidden()
+		}
+
+		// Reject app passwords when the user is denied access to the Web UI/API.
+		if u := s.GetUser(); u.DenyLogIn() {
+			event.AuditWarn([]string{clientIp, "session %s", "%s %s with app password", status.Denied}, s.RefID, perms.String(), string(resource))
+			return entity.SessionStatusForbidden()
+		}
+	}
+
 	if s.IsClient() {
+		// If the request is from a client application, check its authorization based
+		// on the allowed scope, the ACL, and the user account it belongs to (if any).
+
+		// Read the owner first, as its scope applies to a client with full access. An owner that
+		// cannot be read, or may not use clients, is refused.
+		var u *entity.User
+
+		if s.HasUser() {
+			if u = s.GetUser(); u.DenyClientAccess() {
+				event.AuditErr([]string{clientIp, "client %s", "session %s", "%s %s as unauthorized user", status.Denied}, clean.Log(s.GetClientInfo()), s.RefID, perms.String(), string(resource))
+				return entity.SessionStatusForbidden()
+			}
+		}
+
 		// Check the resource and required permissions against the session scope.
 		if s.InsufficientScope(resource, perms) {
 			event.AuditErr([]string{clientIp, "client %s", "session %s", "access %s", status.Error(authn.ErrInsufficientScope)}, clean.Log(s.GetClientInfo()), s.RefID, string(resource))
@@ -69,32 +178,28 @@ func AuthAny(c *gin.Context, resource acl.Resource, perms acl.Permissions) (s *e
 			return entity.SessionStatusForbidden()
 		}
 
-		// Also check the request authorization against the user's ACL rules?
-		if s.NoUser() {
+		if u == nil {
 			// Allow access based on the ACL defaults for client applications.
 			event.AuditInfo([]string{clientIp, "client %s", "session %s", "%s %s", status.Granted}, clean.Log(s.GetClientInfo()), s.RefID, perms.String(), string(resource))
-		} else if u := s.GetUser(); !u.IsDisabled() && !u.IsUnknown() && u.IsRegistered() {
-			if acl.Rules.DenyAll(resource, u.AclRole(), perms) {
-				event.AuditErr([]string{clientIp, "client %s", "session %s", "%s %s as %s", status.Denied}, clean.Log(s.GetClientInfo()), s.RefID, perms.String(), string(resource), u.String())
-				return entity.SessionStatusForbidden()
-			}
+			return s
+		}
 
-			// Allow access based on the user role.
-			event.AuditInfo([]string{clientIp, "client %s", "session %s", "%s %s as %s", status.Granted}, clean.Log(s.GetClientInfo()), s.RefID, perms.String(), string(resource), u.String())
-		} else {
-			// Deny access if it is not a regular user account or the account has been disabled.
-			event.AuditErr([]string{clientIp, "client %s", "session %s", "%s %s as unauthorized user", status.Denied}, clean.Log(s.GetClientInfo()), s.RefID, perms.String(), string(resource))
+		// Also check the request authorization against the owner's ACL rules.
+		if acl.Rules.DenyAll(resource, u.AclRole(), perms) {
+			event.AuditErr([]string{clientIp, "client %s", "session %s", "%s %s as %s", status.Denied}, clean.Log(s.GetClientInfo()), s.RefID, perms.String(), string(resource), u.String())
 			return entity.SessionStatusForbidden()
 		}
 
+		// Allow access based on the user role.
+		event.AuditInfo([]string{clientIp, "client %s", "session %s", "%s %s as %s", status.Granted}, clean.Log(s.GetClientInfo()), s.RefID, perms.String(), string(resource), u.String())
 		return s
 	}
 
 	// Perform a regular ACL authorization check based on the user role.
 	u := s.GetUser()
 
-	// Reject requests from unknown or disabled users.
-	if u.IsUnknown() || u.IsDisabled() {
+	// Reject requests from unknown or disabled users, and app tokens of users who may not sign in.
+	if u.IsUnknown() || u.IsDisabled() || s.IsOAuthApp() && u.DenyLogIn() {
 		event.AuditWarn([]string{clientIp, "session %s", "%s %s as unauthorized user", status.Denied}, s.RefID, perms.String(), string(resource))
 		return entity.SessionStatusUnauthorized()
 	}
@@ -116,6 +221,23 @@ func AuthAny(c *gin.Context, resource acl.Resource, perms acl.Permissions) (s *e
 	// Permit access if all checks pass.
 	event.AuditInfo([]string{clientIp, "session %s", "%s %s as %s", status.Granted}, s.RefID, perms.String(), string(resource), u.AclRole().String())
 	return s
+}
+
+// AuthorizeSuperAdmin reports whether the session may grant super-admin status.
+// Only an authenticated super admin, or the trusted Portal cluster JWT service
+// principal (a user-less GrantJwtBearer with users-manage scope that IsSuperAdmin
+// cannot recognize), is permitted, so a lower-privilege admin cannot create or
+// restore a super-admin account and escalate. Mirrors the UpdateUser SaveForm gate.
+func AuthorizeSuperAdmin(s *entity.Session) bool {
+	if s == nil {
+		return false
+	}
+
+	if s.GrantType == authn.GrantJwtBearer.String() && s.ValidateScope(acl.ResourceUsers, acl.Permissions{acl.ActionManage}) {
+		return true
+	}
+
+	return s.GetUser().IsSuperAdmin()
 }
 
 // AuthToken returns the client authentication token from the request context if one was found,

@@ -36,7 +36,7 @@ func GetFace(router *gin.RouterGroup) {
 
 		f := form.SearchFaces{UID: c.Param("id"), Markers: true}
 
-		if results, err := search.Faces(f); err != nil || len(results) < 1 {
+		if results, err := search.UserFaces(f, s); err != nil || len(results) < 1 {
 			Abort(c, http.StatusNotFound, i18n.ErrFaceNotFound)
 			return
 		} else {
@@ -52,10 +52,10 @@ func GetFace(router *gin.RouterGroup) {
 //	@Tags		Faces
 //	@Accept		json
 //	@Produce	json
-//	@Success	200						{object}	entity.Face
-//	@Failure	400,401,403,404,429,500	{object}	i18n.Response
-//	@Param		id						path		string		true	"face id"
-//	@Param		face					body		form.Face	true	"properties to be updated"
+//	@Success	200								{object}	entity.Face
+//	@Failure	400,401,403,404,409,413,429,500	{object}	i18n.Response
+//	@Param		id								path		string		true	"face id"
+//	@Param		face							body		form.Face	true	"properties to be updated"
 //	@Router		/api/v1/faces/{id} [put]
 func UpdateFace(router *gin.RouterGroup) {
 	router.PUT("/faces/:id", func(c *gin.Context) {
@@ -63,6 +63,12 @@ func UpdateFace(router *gin.RouterGroup) {
 
 		// Abort if permission is not granted.
 		if s.Abort(c) {
+			return
+		}
+
+		// Hiding a cluster and naming one both write what a migration's finalize replaces, and
+		// a subject written mid-run also rolls that finalize back.
+		if faceMigrationRunning(c) {
 			return
 		}
 
@@ -89,6 +95,21 @@ func UpdateFace(router *gin.RouterGroup) {
 			return
 		}
 
+		// Resolve the person before any write, so a rejected request changes nothing. A person the
+		// session may not see is answered like an unknown one, as the subject handlers do.
+		subjUid := ""
+
+		if frm.SubjUID != "" {
+			subj := FindSubjectForSession(frm.SubjUID, s)
+
+			if subj == nil || !subj.IsPerson() {
+				Abort(c, http.StatusNotFound, i18n.ErrSubjectNotFound)
+				return
+			}
+
+			subjUid = subj.SubjUID
+		}
+
 		// Change visibility?
 		if !frm.FaceHidden && frm.FaceHidden == m.FaceHidden {
 			// Do nothing.
@@ -98,9 +119,9 @@ func UpdateFace(router *gin.RouterGroup) {
 		}
 
 		// Change subject?
-		if frm.SubjUID == "" {
+		if subjUid == "" {
 			// Do nothing.
-		} else if err := m.SetSubjectUID(frm.SubjUID); err != nil {
+		} else if err := m.SetSubjectUID(subjUid); err != nil {
 			c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": txt.UpperFirst(err.Error())})
 			return
 		}

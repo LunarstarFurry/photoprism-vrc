@@ -8,8 +8,10 @@ var RulesMutex = &sync.Mutex{}
 // Rules specifies granted permissions by Resource and Role.
 var Rules = ACL{
 	ResourceFiles: Roles{
-		RoleAdmin:  GrantFullAccess,
-		RoleClient: GrantFullAccess,
+		RoleAdmin:   GrantFullAccess,
+		RoleGuest:   GrantViewShared,
+		RoleVisitor: GrantViewShared,
+		RoleClient:  GrantFullAccess,
 	},
 	ResourceFolders: Roles{
 		RoleAdmin:   GrantFullAccess,
@@ -57,6 +59,16 @@ var Rules = ACL{
 		RoleAdmin:  GrantFullAccess,
 		RoleClient: GrantFullAccess,
 	},
+	ResourceCameras: Roles{
+		RoleAdmin:   GrantFullAccess,
+		RoleService: GrantFullAccess,
+		RoleClient:  GrantFullAccess,
+	},
+	ResourceLenses: Roles{
+		RoleAdmin:   GrantFullAccess,
+		RoleService: GrantFullAccess,
+		RoleClient:  GrantFullAccess,
+	},
 	ResourceConfig: Roles{
 		RoleAdmin:   GrantFullAccess,
 		RolePortal:  GrantFullAccess,
@@ -97,6 +109,8 @@ var Rules = ACL{
 		RolePortal:  GrantFullAccess,
 		RoleDefault: GrantOwn,
 	},
+	// ResourceClients grants no role, so ResourceDefault does not apply: clients are managed with the CLI.
+	ResourceClients: Roles{},
 	ResourceLogs: Roles{
 		RoleAdmin:  GrantFullAccess,
 		RolePortal: GrantFullAccess,
@@ -137,6 +151,13 @@ var Rules = ACL{
 	},
 	ResourceFeedback: Roles{
 		RoleAdmin: GrantFullAccess,
+	},
+	ResourceMCP: Roles{
+		RoleAdmin:    GrantFullAccess,
+		RoleInstance: GrantSearchAll,
+		RoleService:  GrantSearchAll,
+		RolePortal:   GrantSearchAll,
+		RoleClient:   GrantSearchAll,
 	},
 	ResourceDefault: Roles{
 		RoleAdmin:    GrantFullAccess,

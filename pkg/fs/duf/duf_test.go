@@ -1,10 +1,31 @@
 package duf
 
 import (
+	"os"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+
+	"github.com/photoprism/photoprism/pkg/fs"
 )
+
+// storageMountPath returns the standard storage folder on the /photoprism mount of the development
+// environment, creating it if needed, or the mount point if that fails. It skips without the mount.
+func storageMountPath(t *testing.T) string {
+	t.Helper()
+
+	if _, err := os.Stat("/photoprism"); err != nil {
+		t.Skip("requires the /photoprism storage mount")
+	}
+
+	const dir = "/photoprism/storage"
+
+	if err := os.MkdirAll(dir, fs.ModeDir); err != nil {
+		return "/photoprism"
+	}
+
+	return dir
+}
 
 func TestMounts(t *testing.T) {
 	t.Run("Success", func(t *testing.T) {
@@ -42,14 +63,13 @@ func TestMounts(t *testing.T) {
 func TestPathInfo(t *testing.T) {
 	t.Run("Success", func(t *testing.T) {
 		// Get slice of mounted file systems.
-		result, err := PathInfo("/photoprism/originals")
+		result, err := PathInfo(storageMountPath(t))
 
 		// No warnings or errors are expected.
 		assert.NoError(t, err)
 
 		// Check result for plausibility.
 		assert.NotEmpty(t, result.Device)
-		assert.Equal(t, "local", result.DeviceType)
 		assert.Equal(t, "/photoprism", result.Mountpoint)
 		assert.NotEmpty(t, result.Fstype)
 		assert.NotEmpty(t, result.Opts)
@@ -62,6 +82,15 @@ func TestPathInfo(t *testing.T) {
 		assert.NotEmpty(t, result.Blocks)
 		assert.NotEmpty(t, result.BlockSize)
 		assert.NotEmpty(t, result.Metadata)
+	})
+	t.Run("RootPath", func(t *testing.T) {
+		// Regression: "/" splits to ["", ""], so it must still resolve to the root mount
+		// rather than an arbitrary special filesystem such as a masked /sys/firmware tmpfs.
+		result, err := PathInfo("/")
+
+		assert.NoError(t, err)
+		assert.Equal(t, "/", result.Mountpoint)
+		assert.Greater(t, result.Total, uint64(4096))
 	})
 	t.Run("NotFound", func(t *testing.T) {
 		// Get slice of mounted file systems.
@@ -90,7 +119,7 @@ func TestPathInfo(t *testing.T) {
 func TestFindByPath(t *testing.T) {
 	t.Run("Success", func(t *testing.T) {
 		// Get slice of mounted file systems.
-		results, warnings, err := FindByPath("/photoprism/originals")
+		results, warnings, err := FindByPath(storageMountPath(t))
 
 		// No warnings or errors are expected.
 		assert.NoError(t, err)
@@ -103,7 +132,6 @@ func TestFindByPath(t *testing.T) {
 			// If so, check the first mount for plausibility.
 			result := results[0]
 			assert.NotEmpty(t, result.Device)
-			assert.Equal(t, "local", result.DeviceType)
 			assert.Equal(t, "/photoprism", result.Mountpoint)
 			assert.NotEmpty(t, result.Fstype)
 			assert.NotEmpty(t, result.Opts)

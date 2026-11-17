@@ -9,19 +9,39 @@ import (
 // SystemLog optionally records internal system events (background jobs, maintenance tasks).
 var SystemLog Logger
 
-// SystemPrefix prefixes messages sent to SystemLog.
+// SystemPrefix prefixes single-segment messages sent to SystemLog.
 var SystemPrefix = "system: "
 
+// systemPrefixSep separates a multi-segment event's leading category from the
+// rest of the message, e.g. the ": " in "config: database › connect".
+const systemPrefixSep = ": "
+
 // System writes a system-level log entry and publishes it to the hub.
+//
+// With more than one segment, the first segment becomes the log prefix
+// (e.g. "config: database › connect"); a single segment keeps the generic
+// SystemPrefix ("system: something happened"). The leading segment is treated
+// as a plain category label and must not contain format verbs, since args are
+// applied to the remaining segments.
 func System(level logrus.Level, ev []string, args ...any) {
 	if len(ev) == 0 {
 		return
 	}
 
+	// The console copy renders the leading category outside Format, so the segments are folded
+	// here and both copies of the event carry the same field boundaries.
+	ev = formatSegments(ev)
+
+	// The hub copy keeps the leading category so an operator-facing consumer renders the same
+	// text as the console. No browser consumer receives this channel.
 	message := Format(ev, args...)
 
 	if SystemLog != nil {
-		SystemLog.Log(level, SystemPrefix+message)
+		if len(ev) > 1 {
+			SystemLog.Log(level, ev[0]+systemPrefixSep+Format(ev[1:], args...))
+		} else {
+			SystemLog.Log(level, SystemPrefix+message)
+		}
 	}
 
 	Publish(

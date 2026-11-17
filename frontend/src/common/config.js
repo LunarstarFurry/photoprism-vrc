@@ -1,6 +1,6 @@
 /*
 
-Copyright (c) 2018 - 2025 PhotoPrism UG. All rights reserved.
+Copyright (c) 2018 - 2026 PhotoPrism UG. All rights reserved.
 
     This program is free software: you can redistribute it and/or modify
     it under Version 3 of the GNU Affero General Public License (the "AGPL"):
@@ -13,7 +13,7 @@ Copyright (c) 2018 - 2025 PhotoPrism UG. All rights reserved.
 
     The AGPL is supplemented by our Trademark and Brand Guidelines,
     which describe how our Brand Assets may be used:
-    <https://www.photoprism.app/trademark>
+    <https://www.photoprism.app/trademark/>
 
 Feel free to send an email to hello@photoprism.app if you have questions,
 want to support our work, or just want to say hello.
@@ -30,6 +30,8 @@ import * as options from "options/options";
 import { Photo } from "model/photo";
 import { onInit, onSetTheme } from "common/hooks";
 import { ref, reactive } from "vue";
+import memoizeOne from "memoize-one";
+import { Info } from "luxon";
 
 onInit();
 
@@ -46,6 +48,9 @@ const normalizeFrontendUri = (baseUri, frontendUri) => {
 const frontendLoginUri = (frontendUri) => {
   return `${frontendUri.replace(/\/+$/, "")}/login`;
 };
+
+// schemeUriRegExp matches a leading URI scheme ("https:", "data:") so absolute references are left untouched.
+const schemeUriRegExp = /^[a-z][a-z0-9+.-]*:/i;
 
 export default class Config {
   /**
@@ -139,13 +144,14 @@ export default class Config {
     $event.subscribe("config.updated", (ev, data) => this.setValues(data.config));
     $event.subscribe("config.tokens", (ev, data) => this.setTokens(data));
     $event.subscribe("count", (ev, data) => this.onCount(ev, data));
-    $event.subscribe("people", (ev, data) => this.onPeople(ev, data));
 
     if (this.has("settings")) {
       this.setTheme(this.get("settings").ui.theme);
     } else {
       this.setTheme("default");
     }
+
+    this.setReduceMotion(this.getSettings()?.ui.reduceMotion);
   }
 
   loading() {
@@ -190,8 +196,8 @@ export default class Config {
       $event.publish("dialog.update", { values });
     }
 
-    if (values.DefaultLocale && options.DefaultLocale !== values.DefaultLocale) {
-      options.SetDefaultLocale(values.DefaultLocale);
+    if (values.defaultLocale && options.DefaultLocale !== values.defaultLocale) {
+      options.SetDefaultLocale(values.defaultLocale);
     }
 
     for (let key in values) {
@@ -206,6 +212,7 @@ export default class Config {
       this.setBatchSize(values.settings);
       await this.setLanguage(this.getLanguageLocale(), true);
       this.setTheme(values.settings.ui.theme);
+      this.setReduceMotion(values.settings.ui.reduceMotion);
     }
 
     // Adjust album counts by access level.
@@ -227,72 +234,6 @@ export default class Config {
 
     if (settings?.search?.batchSize > 0) {
       Photo.setBatchSize(settings.search.batchSize);
-    }
-  }
-
-  onPeople(ev, data) {
-    const type = ev.split(".")[1];
-
-    if (this.debug) {
-      console.log(ev, data);
-    }
-
-    if (!this.values.people) {
-      this.values.people = [];
-    }
-
-    if (!data || !data.entities || !Array.isArray(data.entities)) {
-      return;
-    }
-
-    switch (type) {
-      case "created":
-        this.values.people.unshift(...data.entities);
-        break;
-      case "updated":
-        for (let i = 0; i < data.entities.length; i++) {
-          const values = data.entities[i];
-
-          this.values.people
-            .filter((m) => m.UID === values.UID)
-            .forEach((m) => {
-              for (let key in values) {
-                if (key !== "UID" && values.hasOwnProperty(key) && values[key] != null && typeof values[key] !== "object") {
-                  m[key] = values[key];
-                }
-              }
-            });
-        }
-        break;
-      case "deleted":
-        for (let i = 0; i < data.entities.length; i++) {
-          const index = this.values.people.findIndex((m) => m.UID === data.entities[i]);
-
-          if (index >= 0) {
-            this.values.people.splice(index, 1);
-          }
-        }
-        break;
-    }
-  }
-
-  // getPerson returns the details of a person by name
-  // (case-insensitive), or null if it does not exist.
-  getPerson(name) {
-    name = name.toLowerCase();
-
-    const result = this.values.people.filter((m) => m.Name.toLowerCase() === name);
-    const l = result ? result.length : 0;
-
-    if (l === 0) {
-      return null;
-    } else if (l === 1) {
-      return result[0];
-    } else {
-      if (this.debug) {
-        console.warn("more than one person having the same name", result);
-      }
-      return result[0];
     }
   }
 
@@ -402,7 +343,9 @@ export default class Config {
     const perms = ["update", "search", "manage", "share", "delete"];
 
     perms.forEach((perm) => {
-      if (this.deny(resource, perm)) result.push(`disable-${perm}`);
+      if (this.deny(resource, perm)) {
+        result.push(`disable-${perm}`);
+      }
     });
 
     return result;
@@ -454,12 +397,8 @@ export default class Config {
     }
 
     try {
-      // Dynamically import the translation JSON file.
-      await import(
-        /* webpackChunkName: "[request]" */
-        /* webpackMode: "lazy" */
-        `../locales/json/${locale}.json`
-      ).then((module) => {
+      // Dynamically import the translation JSON file, which the build emits as its own chunk.
+      await import(`../locales/json/${locale}.json`).then((module) => {
         Object.assign(this.translations, module.default);
       });
     } catch (error) {
@@ -517,42 +456,38 @@ export default class Config {
     return this;
   }
 
-  // getLanguageLocale returns the ISO/IEC 15897 locale,
-  // e.g. "en" or "zh_TW" (minimum 2 letters).
+  // getLanguageLocale returns the ISO/IEC 15897 locale, e.g. "en" or "zh_TW" (minimum 2 letters).
+  // While loading or with a ?locale= override, it is copied to settings.ui.language, which the language picker binds to.
   getLanguageLocale() {
-    // Get default locale from web browser.
+    const loading = this.loading();
     let locale = navigator?.language;
+    let mirror = loading;
 
     // Override language locale with query parameter?
     if (window.location?.search) {
-      const query = new URLSearchParams(window.location.search);
-      const queryLocale = query.get("locale");
+      const queryLocale = new URLSearchParams(window.location.search).get("locale");
       if (queryLocale && queryLocale.length > 1 && queryLocale.length < 6) {
-        // Change the locale settings.
         locale = options.FindLocale(queryLocale);
+        mirror = true;
         this.storage.setItem(this.storageKey + ".locale", locale);
-        if (this.values?.settings?.ui) {
-          this.values.settings.ui.language = locale;
-        }
       }
     }
 
     // Get user locale from storage if settings have not yet been loaded from backend.
-    if (this.loading()) {
-      const stored = this.storage.getItem(this.storageKey + ".locale");
-      if (stored) {
-        locale = stored;
-
-        if (this.values?.settings?.ui) {
-          this.values.settings.ui.language = locale;
-        }
-      }
-    } else if (this.values?.settings?.ui?.language) {
+    if (loading) {
+      locale = this.storage.getItem(this.storageKey + ".locale") || locale;
+    } else if (!mirror && this.values?.settings?.ui?.language) {
       locale = this.values.settings.ui.language;
     }
 
-    // Find and return the best matching language locale that exists.
-    return options.FindLocale(locale);
+    // Find the best matching language locale that exists.
+    locale = options.FindLocale(locale);
+
+    if (mirror && this.values?.settings?.ui) {
+      this.values.settings.ui.language = locale;
+    }
+
+    return locale;
   }
 
   // getLanguageCode returns the ISO 639-1 language code (2 letters),
@@ -561,10 +496,12 @@ export default class Config {
     return this.getLanguageLocale().substring(0, 2);
   }
 
-  // getTimeZone returns user time zone.
+  // getTimeZone returns the user time zone, or "Local" if none is set or the browser cannot resolve it.
   getTimeZone() {
-    if (this.values?.settings?.ui?.timeZone) {
-      return this.values?.settings?.ui?.timeZone;
+    const zone = this.values?.settings?.ui?.timeZone;
+
+    if (typeof zone === "string" && zone !== "" && Info.normalizeZone(zone)?.isValid) {
+      return zone;
     }
 
     return "Local";
@@ -652,6 +589,16 @@ export default class Config {
     }
   }
 
+  // setReduceMotion toggles the "reduce-motion" class on the <html> element so CSS can
+  // suppress interface animations and transitions when the accessibility setting is enabled.
+  setReduceMotion(enabled) {
+    if (document && document.documentElement) {
+      document.documentElement.classList.toggle("reduce-motion", !!enabled);
+    }
+
+    return this;
+  }
+
   // getSettings returns the current user's configuration settings.
   getSettings() {
     return this.values.settings;
@@ -673,6 +620,7 @@ export default class Config {
     this.setBatchSize(settings);
     this.setLanguage(settings.ui.language, false);
     this.setTheme(settings.ui.theme);
+    this.setReduceMotion(settings.ui.reduceMotion);
 
     return this;
   }
@@ -794,9 +742,29 @@ export default class Config {
     return this.values.settings.features[name] === true;
   }
 
+  // featOAuthApps checks if users can connect apps with OAuth sign-in and consent.
+  featOAuthApps() {
+    return this.values?.oauthApps === true;
+  }
+
+  // featAppPasswords checks if app passwords (app-specific passwords) are enabled.
+  featAppPasswords() {
+    return this.feature("appPasswords");
+  }
+
   // filesQuotaReached returns true if the filesystem quota is reached or exceeded.
   filesQuotaReached() {
-    return this.values?.usage?.filesUsedPct >= 100;
+    return Boolean(this.values?.usage?.filesUsedPct >= 100);
+  }
+
+  // storageLow returns true if the storage folder is almost full.
+  storageLow() {
+    return Boolean(this.values?.usage?.storageLow);
+  }
+
+  // insufficientStorage returns true if the filesystem quota is reached or the storage folder is almost full.
+  insufficientStorage() {
+    return this.storageLow() || this.filesQuotaReached();
   }
 
   // setTokens sets the security tokens required to load thumbnails and download files from the server.
@@ -839,17 +807,47 @@ export default class Config {
 
   // isPublic returns true if the instance is running in public mode, i.e. without authentication.
   isPublic() {
-    return this.values && this.values.public;
+    return !!this.values?.public;
   }
 
   // isDemo returns true if the instance is running in demo mode for public or private testing.
   isDemo() {
-    return this.values && this.values.demo;
+    return !!this.values?.demo;
   }
 
   // isPortal returns true if this is a cluster portal server.
   isPortal() {
-    return this.values && this.values.portal;
+    return !!this.values?.portal;
+  }
+
+  // isClusterOidc returns true when the OIDC provider is the cluster Portal (not an external IdP).
+  isClusterOidc() {
+    return !!this.values?.ext?.oidc?.cluster;
+  }
+
+  // oidcEnabled returns true when OIDC single sign-on is configured.
+  oidcEnabled() {
+    return !!this.values?.ext?.oidc?.enabled;
+  }
+
+  // ldapEnabled returns true when LDAP/AD directory authentication is configured.
+  ldapEnabled() {
+    return !!this.values?.ext?.ldap?.enabled;
+  }
+
+  // oidcLoginUri returns the OIDC login endpoint that starts the provider roundtrip, or "" when off.
+  oidcLoginUri() {
+    return this.values?.ext?.oidc?.loginUri || "";
+  }
+
+  // oidcLogout returns true when sign-out should perform RP-initiated logout against the provider.
+  oidcLogout() {
+    return !!this.values?.ext?.oidc?.logout;
+  }
+
+  // portalLoginUri returns the cluster Portal's browser-facing login page, or "" when unknown.
+  portalLoginUri() {
+    return this.values?.ext?.oidc?.portalLoginUri || "";
   }
 
   // isPro returns true if this is team version.
@@ -931,25 +929,44 @@ export default class Config {
     return s;
   }
 
-  getIcon() {
-    if (this.theme?.variables?.icon) {
-      return this.theme.variables.icon;
+  // themeAssetUri resolves a theme asset reference against the base URI (e.g.
+  // "logo.svg" → "{baseUri}/_theme/logo.svg"); memoized since the base URI is
+  // fixed once the config is loaded.
+  themeAssetUri = memoizeOne((uri) => {
+    if (typeof uri !== "string" || uri === "") {
+      return uri;
+    } else if (schemeUriRegExp.test(uri) || uri.startsWith("//")) {
+      return uri; // absolute, data:/blob:, or protocol-relative
+    } else if (!uri.startsWith("/")) {
+      return `${this.baseUri || ""}/_theme/${uri}`; // bare name → theme dir
+    } else if (this.baseUri && uri.startsWith(`${this.baseUri}/`)) {
+      return uri; // already prefixed
     }
 
-    switch (this.get("appIcon")) {
-      case "crisp":
-      case "mint":
-      case "bold":
-        return `${this.staticUri}/icons/${this.get("appIcon")}.svg`;
-      default:
-        return `${this.staticUri}/icons/logo.svg`;
+    return `${this.baseUri || ""}${uri}`; // other root path → add prefix
+  });
+
+  getIcon() {
+    if (this.theme?.variables?.icon) {
+      return this.themeAssetUri(this.theme.variables.icon);
     }
+
+    // The backend validates built-in icon names against the files in
+    // assets/static/icons before sending them, so any bare name is safe to
+    // use directly; the regex guards against path traversal from custom values.
+    const appIcon = this.get("appIcon");
+
+    if (appIcon && appIcon !== "logo" && /^[a-z0-9-]+$/.test(appIcon)) {
+      return `${this.staticUri}/icons/${appIcon}.svg`;
+    }
+
+    return `${this.staticUri}/icons/logo.svg`;
   }
 
   getLoginIcon() {
     const loginTheme = themes.Get("login", false);
     if (loginTheme?.variables?.icon) {
-      return loginTheme?.variables?.icon;
+      return this.themeAssetUri(loginTheme?.variables?.icon);
     }
 
     return this.getIcon();

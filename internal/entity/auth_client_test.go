@@ -1,14 +1,20 @@
 package entity
 
 import (
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/photoprism/photoprism/internal/auth/acl"
 	"github.com/photoprism/photoprism/internal/form"
 	"github.com/photoprism/photoprism/pkg/authn"
+	"github.com/photoprism/photoprism/pkg/rnd"
+	"github.com/photoprism/photoprism/pkg/time/unix"
 	"github.com/photoprism/photoprism/pkg/txt/report"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 )
 
 func TestNewClient(t *testing.T) {
@@ -35,7 +41,43 @@ func TestClient_GetData(t *testing.T) {
 	assert.Equal(t, "portal", second.Theme)
 }
 
-func TestFindClient(t *testing.T) {
+func TestClient_GetData_OIDCFields(t *testing.T) {
+	t.Run("RoundTripThroughDataJSON", func(t *testing.T) {
+		src := NewClient()
+		src.SetData(&ClientData{
+			AllowGroups:     []string{"media-acme-admin", "media-acme-viewer"},
+			AllowGroupRoles: map[string]string{"media-acme-admin": "admin", "media-acme-viewer": "viewer"},
+			RedirectURIs:    []string{"https://photos.example.com/api/v1/oidc/redirect"},
+		})
+
+		// Read back from a fresh Client populated only via the marshaled JSON,
+		// so the test exercises the json.Unmarshal path, not the m.data cache.
+		dst := &Client{DataJSON: src.DataJSON}
+		got := dst.GetData()
+
+		assert.Equal(t, []string{"media-acme-admin", "media-acme-viewer"}, got.AllowGroups)
+		assert.Equal(t, "admin", got.AllowGroupRoles["media-acme-admin"])
+		assert.Equal(t, "viewer", got.AllowGroupRoles["media-acme-viewer"])
+		assert.Equal(t, []string{"https://photos.example.com/api/v1/oidc/redirect"}, got.RedirectURIs)
+	})
+
+	t.Run("OmitEmpty", func(t *testing.T) {
+		c := NewClient()
+		c.SetData(&ClientData{Theme: "portal"})
+
+		// Older rows without the OIDC fields must round-trip cleanly and report zero values.
+		assert.NotContains(t, string(c.DataJSON), "allowGroups")
+		assert.NotContains(t, string(c.DataJSON), "allowGroupRoles")
+		assert.NotContains(t, string(c.DataJSON), "redirectUris")
+
+		got := (&Client{DataJSON: c.DataJSON}).GetData()
+		assert.Nil(t, got.AllowGroups)
+		assert.Nil(t, got.AllowGroupRoles)
+		assert.Nil(t, got.RedirectURIs)
+	})
+}
+
+func TestFindClientByUID(t *testing.T) {
 	t.Run("Alice", func(t *testing.T) {
 		expected := ClientFixtures.Get("alice")
 
@@ -111,6 +153,43 @@ func TestClient_SetRole(t *testing.T) {
 	assert.False(t, c.HasRole("admin"))
 	c.SetRole("admin")
 	assert.True(t, c.HasRole("admin"))
+}
+
+func TestClient_SetDisplayName(t *testing.T) {
+	t.Run("InstanceReportSets", func(t *testing.T) {
+		c := Client{}
+		c.SetDisplayName("Reported", SrcAuto)
+		assert.Equal(t, "Reported", c.DisplayName)
+		assert.Equal(t, SrcAuto, c.NameSrc)
+	})
+	t.Run("InstanceUpdatesOwnValue", func(t *testing.T) {
+		c := Client{DisplayName: "Old", NameSrc: SrcAuto}
+		c.SetDisplayName("New", SrcAuto)
+		assert.Equal(t, "New", c.DisplayName)
+	})
+	t.Run("ManualPinsOverAuto", func(t *testing.T) {
+		c := Client{DisplayName: "Reported", NameSrc: SrcAuto}
+		c.SetDisplayName("Pinned", SrcManual)
+		assert.Equal(t, "Pinned", c.DisplayName)
+		assert.Equal(t, SrcManual, c.NameSrc)
+	})
+	t.Run("AutoCannotOverrideManual", func(t *testing.T) {
+		c := Client{DisplayName: "Pinned", NameSrc: SrcManual}
+		c.SetDisplayName("Reported", SrcAuto)
+		assert.Equal(t, "Pinned", c.DisplayName)
+		assert.Equal(t, SrcManual, c.NameSrc)
+	})
+	t.Run("ManualClearUnpins", func(t *testing.T) {
+		c := Client{DisplayName: "Pinned", NameSrc: SrcManual}
+		c.SetDisplayName("", SrcManual)
+		assert.Equal(t, "", c.DisplayName)
+		assert.Equal(t, SrcAuto, c.NameSrc)
+	})
+	t.Run("AutoEmptyIgnored", func(t *testing.T) {
+		c := Client{DisplayName: "Reported", NameSrc: SrcAuto}
+		c.SetDisplayName("", SrcAuto)
+		assert.Equal(t, "Reported", c.DisplayName)
+	})
 }
 
 func TestClient_User(t *testing.T) {
@@ -233,6 +312,21 @@ func TestClient_Delete(t *testing.T) {
 		err := m.Delete()
 
 		assert.NoError(t, err)
+		assert.True(t, m.Deleted(), "in-memory record is marked as deleted")
+	})
+	t.Run("RemovesSecret", func(t *testing.T) {
+		m := NewClient().SetName("pp-delete-secret")
+
+		require.NoError(t, m.Create())
+
+		secret, err := m.NewSecret()
+
+		require.NoError(t, err)
+		require.True(t, m.VerifySecret(secret))
+		require.NoError(t, m.Delete())
+
+		assert.Nil(t, FindPassword(m.ClientUID))
+		assert.False(t, m.VerifySecret(secret))
 	})
 	t.Run("EmptyUID", func(t *testing.T) {
 		var m = Client{ClientName: "No UUID"}
@@ -243,17 +337,117 @@ func TestClient_Delete(t *testing.T) {
 	})
 }
 
+// clientStateOnSessionDelete records whether the first session of the client was deleted, and whether the
+// client row and its secret existed and the row was marked as deleted at that time.
+func clientStateOnSessionDelete(t *testing.T, clientUID string) (fired, exists, deleted, secret *bool) {
+	t.Helper()
+
+	fired, exists, deleted, secret = new(bool), new(bool), new(bool), new(bool)
+	name := "test:client_state_" + rnd.Base36(8)
+	var once sync.Once
+
+	err := Db().Callback().Delete().Before("gorm:delete").Register(name, func(tx *gorm.DB) {
+		if s, ok := tx.Statement.Model.(*Session); !ok || s.ClientUID != clientUID {
+			return
+		}
+
+		once.Do(func() {
+			*fired = true
+			db := tx.Session(&gorm.Session{NewDB: true})
+			found := Client{}
+
+			if db.Unscoped().Where("client_uid = ?", clientUID).Limit(1).Find(&found).RowsAffected == 1 {
+				*exists = true
+				*deleted = found.Deleted()
+			}
+
+			*secret = db.Where("uid = ?", clientUID).Limit(1).Find(&Password{}).RowsAffected == 1
+		})
+	})
+
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = Db().Callback().Delete().Remove(name) })
+
+	return fired, exists, deleted, secret
+}
+
+// secretOnClientDelete records whether the secret of the client existed when its row was deleted.
+func secretOnClientDelete(t *testing.T, clientUID string) (fired, secret *bool) {
+	t.Helper()
+
+	fired, secret = new(bool), new(bool)
+	name := "test:client_secret_" + rnd.Base36(8)
+
+	err := Db().Callback().Delete().Before("gorm:delete").Register(name, func(tx *gorm.DB) {
+		if c, ok := tx.Statement.Model.(*Client); !ok || c.ClientUID != clientUID {
+			return
+		}
+
+		*fired = true
+		*secret = tx.Session(&gorm.Session{NewDB: true}).Where("uid = ?", clientUID).Limit(1).Find(&Password{}).RowsAffected == 1
+	})
+
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = Db().Callback().Delete().Remove(name) })
+
+	return fired, secret
+}
+
+func TestClient_DeleteOrder(t *testing.T) {
+	t.Run("Delete", func(t *testing.T) {
+		m, err := AddClient(form.Client{ClientName: "Delete Order", AuthScope: "metrics"})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = m.Purge() })
+		_, err = m.NewSecret()
+		require.NoError(t, err)
+		newClientSessions(t, m, 1, time.Now().UTC())
+
+		fired, exists, deleted, secret := clientStateOnSessionDelete(t, m.ClientUID)
+		rowFired, rowSecret := secretOnClientDelete(t, m.ClientUID)
+		require.NoError(t, m.Delete())
+
+		require.True(t, *fired)
+		assert.True(t, *exists)
+		assert.False(t, *deleted)
+		assert.False(t, *secret)
+		require.True(t, *rowFired)
+		assert.False(t, *rowSecret)
+	})
+	t.Run("Purge", func(t *testing.T) {
+		m, err := AddClient(form.Client{ClientName: "Purge Order", AuthScope: "metrics"})
+		require.NoError(t, err)
+		_, err = m.NewSecret()
+		require.NoError(t, err)
+		newClientSessions(t, m, 1, time.Now().UTC())
+
+		fired, exists, _, secret := clientStateOnSessionDelete(t, m.ClientUID)
+		rowFired, rowSecret := secretOnClientDelete(t, m.ClientUID)
+		require.NoError(t, m.Purge())
+
+		require.True(t, *fired)
+		assert.True(t, *exists)
+		assert.False(t, *secret)
+		require.True(t, *rowFired)
+		assert.False(t, *rowSecret)
+	})
+}
+
 func TestClient_Deleted(t *testing.T) {
 	var ptr *Client
+	deletedAt := time.Now().UTC()
+	zero := time.Time{}
 	assert.False(t, ClientFixtures.Pointer("alice").Deleted())
-	assert.False(t, ClientFixtures.Pointer("deleted").Deleted())
+	assert.False(t, (&Client{DeletedAt: DeletedAtTime(zero)}).Deleted())
+	assert.True(t, (&Client{DeletedAt: DeletedAtTime(deletedAt)}).Deleted())
 	assert.True(t, ptr.Deleted())
 }
 
 func TestClient_Disabled(t *testing.T) {
 	var ptr *Client
+	deletedAt := time.Now().UTC()
 	assert.False(t, ClientFixtures.Pointer("alice").Disabled())
-	assert.True(t, ClientFixtures.Pointer("deleted").Disabled())
+	assert.True(t, (&Client{AuthEnabled: false}).Disabled())
+	assert.True(t, (&Client{AuthEnabled: true, DeletedAt: DeletedAtTime(deletedAt)}).Disabled())
 	assert.True(t, ptr.Disabled())
 }
 
@@ -397,23 +591,47 @@ func TestClient_EnforceAuthTokenLimit(t *testing.T) {
 	t.Run("EmptyUID", func(t *testing.T) {
 		var m = Client{ClientName: "No UUID"}
 
-		r := m.EnforceAuthTokenLimit()
+		r := m.EnforceAuthTokenLimit("")
 
 		assert.Equal(t, r, 0)
 	})
 	t.Run("NoToken", func(t *testing.T) {
 		var m = Client{ClientName: "David", ClientUID: "cs5cpu17n6gj2bbb"}
 
-		r := m.EnforceAuthTokenLimit()
+		r := m.EnforceAuthTokenLimit("")
 
 		assert.Equal(t, r, 0)
 	})
 	t.Run("NegativeTokenLimit", func(t *testing.T) {
 		var m = Client{ClientName: "David", ClientUID: "cs5cpu17n6gj2bbb", AuthTokens: -1}
 
-		r := m.EnforceAuthTokenLimit()
+		r := m.EnforceAuthTokenLimit("")
 
 		assert.Equal(t, r, 0)
+	})
+	t.Run("KeepsReservedSession", func(t *testing.T) {
+		client := NewClient()
+		client.ClientUID = "cs5gfen1bgx00010"
+		client.AuthTokens = 2
+
+		// The lowest ID is the one the tiebreak alone would delete first.
+		ids := newClientSessions(t, client, 5, time.Date(2026, 9, 11, 10, 0, 0, 0, time.UTC))
+
+		assert.Equal(t, 3, client.EnforceAuthTokenLimit(ids[0]))
+		assertSessions(t, []string{ids[0], ids[4]}, ids[1:4])
+
+		assert.Equal(t, 0, client.EnforceAuthTokenLimit(ids[0]))
+		assertSessions(t, []string{ids[0], ids[4]}, nil)
+	})
+	t.Run("UnsetTokenLimitKeepsOne", func(t *testing.T) {
+		client := NewClient()
+		client.ClientUID = "cs5gfen1bgx00011"
+		client.AuthTokens = 0
+
+		ids := newClientSessions(t, client, 3, time.Date(2026, 9, 11, 10, 0, 0, 0, time.UTC))
+
+		assert.Equal(t, 2, client.EnforceAuthTokenLimit(ids[0]))
+		assertSessions(t, ids[:1], ids[1:])
 	})
 }
 
@@ -663,6 +881,15 @@ func TestClient_SetFormValues_Role(t *testing.T) {
 		assert.Equal(t, "client", c.ClientRole)
 		assert.True(t, c.HasRole(acl.RoleClient))
 	})
+	t.Run("EmptyRoleKeepsCurrent", func(t *testing.T) {
+		m := Client{ClientName: "KeepRole", ClientUID: "cs5cpu17n6gj9r09", ClientRole: "instance"}
+
+		c := m.SetFormValues(form.Client{ClientName: "KeepRoleRenamed"})
+
+		assert.Equal(t, "KeepRoleRenamed", c.ClientName)
+		assert.Equal(t, "instance", c.ClientRole)
+		assert.True(t, c.HasRole(acl.RoleInstance))
+	})
 	t.Run("ChangeRoleFromClientToAdmin", func(t *testing.T) {
 		m := NewClient()
 		m.ClientName = "ChangeRole"
@@ -755,6 +982,12 @@ func TestClient_AclRole_Resolution(t *testing.T) {
 	t.Run("ClientIsClient", func(t *testing.T) {
 		m := &Client{ClientRole: "client"}
 		assert.Equal(t, acl.RoleClient, m.AclRole())
+	})
+	t.Run("DeletedIsNone", func(t *testing.T) {
+		deletedAt := time.Now().UTC()
+		m := &Client{ClientRole: "client", DeletedAt: DeletedAtTime(deletedAt)}
+		assert.Equal(t, acl.RoleNone, m.AclRole())
+		assert.False(t, m.HasRole(acl.RoleClient))
 	})
 }
 
@@ -856,5 +1089,810 @@ func TestClient_Validate(t *testing.T) {
 		if err == nil {
 			t.Fatal("error expected")
 		}
+	})
+	t.Run("Deleted", func(t *testing.T) {
+		deletedAt := time.Now().UTC()
+		m := Client{
+			ClientName:   "test",
+			ClientType:   "test",
+			AuthProvider: authn.ProviderClient.String(),
+			AuthMethod:   "basic",
+			AuthScope:    "all",
+			DeletedAt:    DeletedAtTime(deletedAt),
+		}
+
+		err := m.Validate()
+
+		if err == nil {
+			t.Fatal("error expected")
+		}
+	})
+}
+func TestFindClientByNodeUUID(t *testing.T) {
+	t.Run("node", func(t *testing.T) {
+		expected := ClientFixtures.Get("node")
+
+		m := FindClientByNodeUUID(expected.NodeUUID)
+
+		if m == nil {
+			t.Fatal("result should not be nil")
+		}
+
+		assert.Equal(t, ClientFixtures.Get("node").ClientName, m.ClientName)
+		assert.Equal(t, expected.ClientUID, m.GetUID())
+		assert.NotEmpty(t, m.CreatedAt)
+		assert.NotEmpty(t, m.UpdatedAt)
+	})
+	t.Run("Invalid", func(t *testing.T) {
+		m := FindClientByNodeUUID("123")
+		assert.Nil(t, m)
+	})
+	t.Run("Empty", func(t *testing.T) {
+		m := FindClientByNodeUUID("")
+		assert.Nil(t, m)
+	})
+	t.Run("Deleted", func(t *testing.T) {
+		uuid := rnd.UUIDv7()
+
+		m := NewClient().SetName("pp-retired-lookup")
+		m.NodeUUID = uuid
+
+		if err := m.Create(); err != nil {
+			t.Fatal(err)
+		}
+
+		// Both lookups see the record while it is current.
+		assert.NotNil(t, FindClientByNodeUUID(uuid))
+		assert.Len(t, FindClientsByNodeUUID(uuid), 1)
+
+		if err := m.Delete(); err != nil {
+			t.Fatal(err)
+		}
+
+		// Nothing resolves the retired node anymore, so no caller acts on it.
+		assert.Nil(t, FindClientByNodeUUID(uuid))
+
+		// The record is still reported by identifier, so the UUID counts as taken.
+		retired := FindClientsByNodeUUID(uuid)
+
+		if assert.Len(t, retired, 1) {
+			assert.True(t, retired[0].Deleted())
+			assert.Equal(t, m.ClientUID, retired[0].ClientUID)
+		}
+
+		// The client UID stays resolvable as well, so an ownership check can see it.
+		byUID := FindClientByUID(m.ClientUID)
+
+		if assert.NotNil(t, byUID) {
+			assert.True(t, byUID.Deleted())
+		}
+	})
+}
+
+func TestFindClient(t *testing.T) {
+	t.Run("ClientUID", func(t *testing.T) {
+		expected := ClientFixtures.Get("alice")
+		m := FindClient(expected.ClientUID)
+
+		if assert.NotNil(t, m) {
+			assert.Equal(t, expected.ClientUID, m.ClientUID)
+		}
+	})
+	t.Run("NodeUUID", func(t *testing.T) {
+		expected := ClientFixtures.Get("node")
+		m := FindClient(expected.NodeUUID)
+
+		if assert.NotNil(t, m) {
+			assert.Equal(t, expected.ClientUID, m.ClientUID)
+		}
+	})
+	t.Run("DeletedNodeUUID", func(t *testing.T) {
+		uuid := rnd.UUIDv7()
+
+		c := NewClient().SetName("pp-find-retired")
+		c.NodeUUID = uuid
+
+		if err := c.Create(); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := c.Delete(); err != nil {
+			t.Fatal(err)
+		}
+
+		// Operator tooling must still reach a retired record to restore or purge it.
+		m := FindClient(uuid)
+
+		if assert.NotNil(t, m) {
+			assert.Equal(t, c.ClientUID, m.ClientUID)
+			assert.True(t, m.Deleted())
+		}
+
+		assert.NotNil(t, FindClient(c.ClientUID))
+	})
+	t.Run("Unknown", func(t *testing.T) {
+		assert.Nil(t, FindClient(rnd.UUIDv7()))
+	})
+	t.Run("Empty", func(t *testing.T) {
+		assert.Nil(t, FindClient(""))
+	})
+}
+
+func TestClient_Restore(t *testing.T) {
+	t.Run("Success", func(t *testing.T) {
+		m := NewClient().SetName("pp-restore").SetScope("metrics")
+
+		if err := m.Create(); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := m.Delete(); err != nil {
+			t.Fatal(err)
+		}
+
+		if deleted := FindClientByUID(m.ClientUID); assert.NotNil(t, deleted) {
+			assert.True(t, deleted.Deleted())
+		}
+
+		if err := m.Restore(); err != nil {
+			t.Fatal(err)
+		}
+
+		assert.False(t, m.Deleted())
+
+		// A restored client authenticates and resolves again.
+		restored := FindClientByUID(m.ClientUID)
+
+		if assert.NotNil(t, restored) {
+			assert.False(t, restored.Deleted())
+			assert.False(t, restored.Disabled())
+			assert.NoError(t, restored.Validate())
+		}
+	})
+	t.Run("SecretNotRestored", func(t *testing.T) {
+		m := NewClient().SetName("pp-restore-secret")
+
+		require.NoError(t, m.Create())
+
+		secret, err := m.NewSecret()
+
+		require.NoError(t, err)
+
+		// Marks the record as deleted while its secret is still stored.
+		require.NoError(t, Db().Delete(m).Error)
+		require.NotNil(t, FindPassword(m.ClientUID))
+		require.NoError(t, m.Restore())
+
+		restored := FindClientByUID(m.ClientUID)
+
+		if assert.NotNil(t, restored) {
+			assert.False(t, restored.Deleted())
+			assert.False(t, restored.VerifySecret(secret))
+		}
+
+		assert.Nil(t, FindPassword(m.ClientUID))
+
+		// A new secret can be set after the restore.
+		secret, err = m.NewSecret()
+
+		require.NoError(t, err)
+		assert.True(t, m.VerifySecret(secret))
+	})
+	t.Run("NotDeleted", func(t *testing.T) {
+		m := NewClient().SetName("pp-restore-live")
+
+		if err := m.Create(); err != nil {
+			t.Fatal(err)
+		}
+
+		secret, err := m.NewSecret()
+		require.NoError(t, err)
+
+		assert.NoError(t, m.Restore())
+		assert.False(t, m.Deleted())
+		assert.True(t, m.VerifySecret(secret), "the secret of a client that is not deleted is kept")
+	})
+	t.Run("EmptyUID", func(t *testing.T) {
+		assert.Error(t, (&Client{}).Restore())
+	})
+	t.Run("Nil", func(t *testing.T) {
+		var m *Client
+		assert.Error(t, m.Restore())
+	})
+}
+
+func TestClient_DeleteSecret(t *testing.T) {
+	t.Run("Success", func(t *testing.T) {
+		m := NewClient().SetName("pp-delete-secret-only")
+
+		require.NoError(t, m.Create())
+
+		_, err := m.NewSecret()
+
+		require.NoError(t, err)
+		require.NoError(t, m.DeleteSecret())
+
+		assert.Nil(t, FindPassword(m.ClientUID))
+		assert.False(t, m.Deleted())
+	})
+	t.Run("NoSecret", func(t *testing.T) {
+		m := NewClient().SetName("pp-delete-no-secret")
+
+		require.NoError(t, m.Create())
+		assert.NoError(t, m.DeleteSecret())
+	})
+	t.Run("InvalidUID", func(t *testing.T) {
+		assert.Error(t, (&Client{}).DeleteSecret())
+	})
+}
+
+func TestClient_Purge(t *testing.T) {
+	t.Run("Success", func(t *testing.T) {
+		uuid := rnd.UUIDv7()
+
+		m := NewClient().SetName("pp-purge")
+		m.NodeUUID = uuid
+
+		if err := m.Create(); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := m.Delete(); err != nil {
+			t.Fatal(err)
+		}
+
+		// While retired, the UUID is still taken.
+		assert.Len(t, FindClientsByNodeUUID(uuid), 1)
+
+		if err := m.Purge(); err != nil {
+			t.Fatal(err)
+		}
+
+		// Purging releases both identifiers.
+		assert.Nil(t, FindClientByUID(m.ClientUID))
+		assert.Empty(t, FindClientsByNodeUUID(uuid))
+	})
+	t.Run("NotDeleted", func(t *testing.T) {
+		m := NewClient().SetName("pp-purge-live")
+
+		if err := m.Create(); err != nil {
+			t.Fatal(err)
+		}
+
+		// A purge does not require a prior delete.
+		assert.NoError(t, m.Purge())
+		assert.Nil(t, FindClientByUID(m.ClientUID))
+	})
+	t.Run("EmptyUID", func(t *testing.T) {
+		assert.Error(t, (&Client{}).Purge())
+	})
+	t.Run("Nil", func(t *testing.T) {
+		var m *Client
+		assert.Error(t, m.Purge())
+	})
+}
+
+func TestClient_RestoreConflict(t *testing.T) {
+	t.Run("NameTakenByReplacement", func(t *testing.T) {
+		// Deletion releases the client name, so a replacement may take it. Restoring the
+		// original would then leave two current holders and lookups resolve by recency,
+		// so the restored record could take the name over from the live one.
+		original := NewClient().SetName("pp-conflict").SetScope("metrics")
+
+		if err := original.Create(); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := original.Delete(); err != nil {
+			t.Fatal(err)
+		}
+
+		replacement := NewClient().SetName("pp-conflict").SetScope("metrics")
+
+		if err := replacement.Create(); err != nil {
+			t.Fatal(err)
+		}
+
+		assert.Equal(t, "client name", original.RestoreConflict())
+		assert.Error(t, original.Restore())
+		assert.True(t, original.Deleted())
+
+		// The live replacement keeps the name.
+		if err := replacement.Delete(); err != nil {
+			t.Fatal(err)
+		}
+
+		// Once the replacement is gone the original can come back.
+		assert.Empty(t, original.RestoreConflict())
+		assert.NoError(t, original.Restore())
+		assert.False(t, original.Deleted())
+	})
+	t.Run("NodeUUIDTakenByDuplicate", func(t *testing.T) {
+		uuid := rnd.UUIDv7()
+
+		retired := NewClient().SetName("pp-conflict-uuid-a")
+		retired.NodeUUID = uuid
+
+		if err := retired.Create(); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := retired.Delete(); err != nil {
+			t.Fatal(err)
+		}
+
+		live := NewClient().SetName("pp-conflict-uuid-b")
+		live.NodeUUID = uuid
+
+		if err := live.Create(); err != nil {
+			t.Fatal(err)
+		}
+
+		assert.Equal(t, "node uuid", retired.RestoreConflict())
+		assert.Error(t, retired.Restore())
+
+		// The live record still resolves for the UUID.
+		if got := FindClientByNodeUUID(uuid); assert.NotNil(t, got) {
+			assert.Equal(t, live.ClientUID, got.ClientUID)
+		}
+	})
+	t.Run("NoConflict", func(t *testing.T) {
+		m := NewClient().SetName("pp-conflict-none")
+
+		if err := m.Create(); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := m.Delete(); err != nil {
+			t.Fatal(err)
+		}
+
+		assert.Empty(t, m.RestoreConflict())
+		assert.NoError(t, m.Restore())
+	})
+	t.Run("NotDeleted", func(t *testing.T) {
+		m := NewClient().SetName("pp-conflict-live")
+		assert.Empty(t, m.RestoreConflict())
+	})
+	t.Run("Nil", func(t *testing.T) {
+		var m *Client
+		assert.Empty(t, m.RestoreConflict())
+	})
+	t.Run("StaleReceiver", func(t *testing.T) {
+		// A record read before the deletion carries no mark. The check reads the stored
+		// record, so it still sees the conflict a second holder created since.
+		original := NewClient().SetName("pp-conflict-stale").SetScope("metrics")
+
+		if err := original.Create(); err != nil {
+			t.Fatal(err)
+		}
+
+		stale := FindClientByUID(original.ClientUID)
+
+		if err := original.Delete(); err != nil {
+			t.Fatal(err)
+		}
+
+		replacement := NewClient().SetName("pp-conflict-stale").SetScope("metrics")
+
+		if err := replacement.Create(); err != nil {
+			t.Fatal(err)
+		}
+
+		if assert.NotNil(t, stale) {
+			assert.False(t, stale.Deleted(), "the copy in hand does not carry the mark")
+			assert.Equal(t, "client name", stale.RestoreConflict())
+			assert.Error(t, stale.Restore())
+		}
+
+		// The stored record stays retired, so the name keeps one holder.
+		if retired := FindClientByUID(original.ClientUID); assert.NotNil(t, retired) {
+			assert.True(t, retired.Deleted())
+		}
+	})
+}
+
+func TestClient_HasInactiveUser(t *testing.T) {
+	t.Run("Nil", func(t *testing.T) {
+		var m *Client
+		assert.False(t, m.HasInactiveUser())
+	})
+	t.Run("NoUser", func(t *testing.T) {
+		assert.False(t, ClientFixtures.Pointer("metrics").HasInactiveUser())
+	})
+	t.Run("ActiveUser", func(t *testing.T) {
+		assert.False(t, ClientFixtures.Pointer("alice").HasInactiveUser())
+	})
+	t.Run("MissingUser", func(t *testing.T) {
+		m := NewClient()
+		m.UserUID = rnd.GenerateUID(UserUID)
+		assert.True(t, m.HasInactiveUser())
+	})
+	t.Run("InvalidUserUID", func(t *testing.T) {
+		m := NewClient()
+		m.UserUID = "invalid"
+		assert.True(t, m.HasInactiveUser())
+	})
+	t.Run("DeletedUser", func(t *testing.T) {
+		deletedAt := time.Now().Add(-time.Minute)
+		u := *UserFixtures.Pointer("bob")
+		u.DeletedAt = DeletedAtTime(deletedAt)
+		m := NewClient().SetUser(&u)
+		assert.True(t, m.HasInactiveUser())
+	})
+	t.Run("ExpiredUser", func(t *testing.T) {
+		expiresAt := time.Now().Add(-time.Minute)
+		u := *UserFixtures.Pointer("bob")
+		u.ExpiresAt = &expiresAt
+		m := NewClient().SetUser(&u)
+		assert.True(t, m.HasInactiveUser())
+	})
+	t.Run("ProviderNone", func(t *testing.T) {
+		u := *UserFixtures.Pointer("bob")
+		u.AuthProvider = authn.ProviderNone.String()
+		m := NewClient().SetUser(&u)
+		assert.True(t, m.HasInactiveUser())
+	})
+	t.Run("WebLoginDisabled", func(t *testing.T) {
+		u := *UserFixtures.Pointer("bob")
+		u.CanLogin = false
+		m := NewClient().SetUser(&u)
+		assert.False(t, m.HasInactiveUser())
+	})
+	t.Run("ExpiredSuperAdmin", func(t *testing.T) {
+		expiresAt := time.Now().Add(-time.Minute)
+		u := *UserFixtures.Pointer("alice")
+		u.ExpiresAt = &expiresAt
+		u.SuperAdmin = true
+		m := NewClient().SetUser(&u)
+		assert.False(t, m.HasInactiveUser())
+	})
+}
+
+func TestClient_Save_Disabled(t *testing.T) {
+	t.Run("AppClient", func(t *testing.T) {
+		client, err := AddClient(form.Client{ClientName: "Disabled App", AuthMethod: authn.MethodPKCE.String(), AuthScope: "mcp", RedirectURIs: []string{"https://claude.ai/cb"}})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = client.Delete() })
+
+		g := newTestGrant(t, client.ClientUID)
+		sess := newTestGrantSession(t, g)
+
+		client.AuthEnabled = false
+		require.NoError(t, client.Save())
+
+		// The grant stays so that users need no new approval, while its access token ends.
+		assert.NotNil(t, FindGrant(g.GrantUID))
+		_, err = FindAnySession(sess.ID)
+		assert.Error(t, err)
+	})
+	t.Run("EnabledAppClient", func(t *testing.T) {
+		client, err := AddClient(form.Client{ClientName: "Enabled App", AuthMethod: authn.MethodPKCE.String(), AuthScope: "mcp", RedirectURIs: []string{"https://claude.ai/cb"}})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = client.Delete() })
+
+		g := newTestGrant(t, client.ClientUID)
+		sess := newTestGrantSession(t, g)
+
+		client.ClientName = "Renamed App"
+		require.NoError(t, client.Save())
+
+		_, err = FindAnySession(sess.ID)
+		assert.NoError(t, err)
+	})
+	t.Run("ApiClient", func(t *testing.T) {
+		client := NewClient()
+		client.ClientUID = "cs5gfen1bgx00020"
+		require.NoError(t, client.Save())
+		t.Cleanup(func() { _ = client.Delete() })
+
+		ids := newClientSessions(t, client, 2, time.Date(2026, 10, 20, 10, 0, 0, 0, time.UTC))
+
+		client.AuthEnabled = false
+		require.NoError(t, client.Save())
+		assertSessions(t, nil, ids)
+	})
+}
+
+func TestClient_RevokeChangedAccess(t *testing.T) {
+	t.Run("ScopeChanged", func(t *testing.T) {
+		client := NewClient()
+		client.ClientUID = "cs5gfen1bgx00021"
+		client.AuthScope = "metrics"
+		ids := newClientSessions(t, client, 2, time.Date(2026, 10, 20, 10, 0, 0, 0, time.UTC))
+
+		assert.Equal(t, 0, client.RevokeChangedAccess(client.ClientRole, "metrics"))
+		assertSessions(t, ids, nil)
+
+		client.AuthScope = "metrics vision"
+		assert.Equal(t, 2, client.RevokeChangedAccess(client.ClientRole, "metrics"))
+		assertSessions(t, nil, ids)
+	})
+	t.Run("RoleChanged", func(t *testing.T) {
+		client := NewClient()
+		client.ClientUID = "cs5gfen1bgx00022"
+		client.AuthScope = "*"
+		ids := newClientSessions(t, client, 1, time.Date(2026, 10, 20, 10, 0, 0, 0, time.UTC))
+
+		client.ClientRole = "admin"
+		assert.Equal(t, 1, client.RevokeChangedAccess("client", "*"))
+		assertSessions(t, nil, ids)
+	})
+	t.Run("EmptyScope", func(t *testing.T) {
+		client := NewClient()
+		client.ClientUID = "cs5gfen1bgx00027"
+		client.AuthScope = "*"
+		ids := newClientSessions(t, client, 1, time.Date(2026, 10, 20, 10, 0, 0, 0, time.UTC))
+
+		// An empty scope is stored as "*", which is no change.
+		assert.Equal(t, 0, client.RevokeChangedAccess(client.ClientRole, ""))
+		assertSessions(t, ids, nil)
+	})
+	t.Run("AppClient", func(t *testing.T) {
+		client := NewClient()
+		client.ClientUID = "cs5gfen1bgx00023"
+		client.AuthMethod = authn.MethodPKCE.String()
+		client.AuthScope = "mcp"
+		ids := newClientSessions(t, client, 1, time.Date(2026, 10, 20, 10, 0, 0, 0, time.UTC))
+
+		assert.Equal(t, 0, client.RevokeChangedAccess(client.ClientRole, "*"))
+		assertSessions(t, ids, nil)
+	})
+	t.Run("Nil", func(t *testing.T) {
+		var client *Client
+		assert.Equal(t, 0, client.RevokeChangedAccess("client", "*"))
+	})
+}
+
+func TestCountClientSessions(t *testing.T) {
+	first := NewClient()
+	first.ClientUID = "cs5gfen1bgx00024"
+	second := NewClient()
+	second.ClientUID = "cs5gfen1bgx00025"
+
+	newClientSessions(t, first, 2, time.Date(2026, 10, 20, 10, 0, 0, 0, time.UTC))
+	ids := newClientSessions(t, second, 2, time.Date(2026, 10, 20, 10, 0, 0, 0, time.UTC))
+
+	// An expired session is not counted, while a session without an expiration time is.
+	require.NoError(t, UnscopedDb().Model(&Session{}).Where("id = ?", ids[0]).UpdateColumn("sess_expires", unix.Now()-60).Error)
+	require.NoError(t, UnscopedDb().Model(&Session{}).Where("id = ?", ids[1]).UpdateColumn("sess_expires", 0).Error)
+
+	t.Run("Success", func(t *testing.T) {
+		counts, err := CountClientSessions([]string{first.ClientUID, second.ClientUID, "cs5gfen1bgx00026"})
+		require.NoError(t, err)
+		assert.Equal(t, map[string]int{first.ClientUID: 2, second.ClientUID: 1}, counts)
+	})
+	t.Run("Empty", func(t *testing.T) {
+		counts, err := CountClientSessions(nil)
+		require.NoError(t, err)
+		assert.Empty(t, counts)
+	})
+}
+
+func TestClientScope(t *testing.T) {
+	t.Run("Success", func(t *testing.T) {
+		assert.Equal(t, "metrics vision", clientScope("vision  metrics"))
+		assert.Equal(t, "*", clientScope("*"))
+	})
+	t.Run("Empty", func(t *testing.T) {
+		assert.Equal(t, "*", clientScope(""))
+		assert.Equal(t, "*", clientScope("  "))
+	})
+}
+
+func TestClient_SaveChanges(t *testing.T) {
+	t.Run("Success", func(t *testing.T) {
+		client, err := AddClient(form.Client{ClientName: "Save Changes", AuthScope: "metrics"})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = client.Purge() })
+
+		client.ClientName = "Saved Changes"
+		client.AuthTokens = 0
+		require.NoError(t, client.SaveChanges())
+
+		found := FindClientByUID(client.ClientUID)
+		require.NotNil(t, found)
+		assert.Equal(t, "Saved Changes", found.ClientName)
+		assert.Equal(t, int64(0), found.AuthTokens)
+
+		// Saving unchanged values succeeds too.
+		require.NoError(t, client.SaveChanges())
+	})
+	t.Run("Deleted", func(t *testing.T) {
+		client, err := AddClient(form.Client{ClientName: "Deleted Changes", AuthScope: "metrics"})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = client.Purge() })
+
+		stale := *client
+		require.NoError(t, client.Delete())
+
+		stale.ClientName = "Restored By Update"
+		assert.ErrorIs(t, stale.SaveChanges(), ErrClientNotFound)
+
+		found := FindClientByUID(client.ClientUID)
+		require.NotNil(t, found)
+		assert.True(t, found.Deleted())
+		assert.Equal(t, "Deleted Changes", found.ClientName)
+	})
+	t.Run("Purged", func(t *testing.T) {
+		client, err := AddClient(form.Client{ClientName: "Purged Changes", AuthScope: "metrics"})
+		require.NoError(t, err)
+
+		stale := *client
+		require.NoError(t, client.Purge())
+		assert.ErrorIs(t, stale.SaveChanges(), ErrClientNotFound)
+		assert.Nil(t, FindClientByUID(client.ClientUID))
+	})
+	t.Run("Disabled", func(t *testing.T) {
+		client, err := AddClient(form.Client{ClientName: "Disabled Changes", AuthMethod: authn.MethodPKCE.String(), AuthScope: "mcp", RedirectURIs: []string{"https://claude.ai/cb"}})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = client.Purge() })
+
+		g := newTestGrant(t, client.ClientUID)
+		sess := newTestGrantSession(t, g)
+
+		client.AuthEnabled = false
+		require.NoError(t, client.SaveChanges())
+		assert.False(t, FindClientByUID(client.ClientUID).AuthEnabled)
+		assert.NotNil(t, FindGrant(g.GrantUID))
+		_, err = FindAnySession(sess.ID)
+		assert.Error(t, err)
+	})
+	t.Run("KeepsOtherFields", func(t *testing.T) {
+		client, err := AddClient(form.Client{ClientName: "Other Fields", AuthScope: "metrics"})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = client.Purge() })
+
+		stale := *client
+		require.NoError(t, client.Updates(Values{"node_uuid": "0199e6b5-41b2-7e0c-9b8f-1e9c6f3b4a21", "last_active": 1760950000}))
+
+		stale.ClientName = "Other Fields Changed"
+		require.NoError(t, stale.SaveChanges())
+
+		found := FindClientByUID(client.ClientUID)
+		require.NotNil(t, found)
+		assert.Equal(t, "Other Fields Changed", found.ClientName)
+		assert.Equal(t, "0199e6b5-41b2-7e0c-9b8f-1e9c6f3b4a21", found.NodeUUID)
+		assert.Equal(t, int64(1760950000), found.LastActive)
+	})
+	t.Run("Fields", func(t *testing.T) {
+		client, err := AddClient(form.Client{ClientName: "Field Changes", AuthScope: "metrics", AuthExpires: 600})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = client.Purge() })
+
+		stale := *client
+		require.NoError(t, UnscopedDb().Model(&Client{}).Where("client_uid = ?", client.ClientUID).
+			UpdateColumns(Values{"auth_enabled": false, "auth_scope": "vision"}).Error)
+
+		stale.ClientName = "Field Changes Renamed"
+		stale.AuthExpires = 900
+		require.NoError(t, stale.SaveChanges("ClientName", "ClientName", "UpdatedAt"))
+
+		found := FindClientByUID(client.ClientUID)
+		require.NotNil(t, found)
+		assert.Equal(t, "Field Changes Renamed", found.ClientName)
+		assert.False(t, found.AuthEnabled)
+		assert.Equal(t, "vision", found.AuthScope)
+		assert.Equal(t, int64(600), found.AuthExpires)
+	})
+	t.Run("FieldsKeepSessions", func(t *testing.T) {
+		client, err := AddClient(form.Client{ClientName: "Field Sessions", AuthScope: "metrics"})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = client.Purge() })
+		ids := newClientSessions(t, client, 1, time.Now().UTC())
+
+		// A copy that reads as disabled ends sessions only if it writes the enabled state.
+		stale := *client
+		stale.AuthEnabled = false
+		stale.ClientName = "Field Sessions Renamed"
+		require.NoError(t, stale.SaveChanges("ClientName"))
+		assertSessions(t, ids, nil)
+		assert.True(t, FindClientByUID(client.ClientUID).AuthEnabled)
+
+		require.NoError(t, stale.SaveChanges("AuthEnabled"))
+		assertSessions(t, nil, ids)
+	})
+	t.Run("UnsupportedField", func(t *testing.T) {
+		client, err := AddClient(form.Client{ClientName: "Unsupported Field", AuthScope: "metrics"})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = client.Purge() })
+
+		client.NodeUUID = rnd.UUIDv7()
+		assert.Error(t, client.SaveChanges("NodeUUID"))
+		assert.Equal(t, "", FindClientByUID(client.ClientUID).NodeUUID)
+	})
+	t.Run("NoUID", func(t *testing.T) {
+		assert.ErrorIs(t, (&Client{}).SaveChanges(), ErrClientNotFound)
+		var m *Client
+		assert.ErrorIs(t, m.SaveChanges(), ErrClientNotFound)
+	})
+}
+
+func TestClient_AuthChanged(t *testing.T) {
+	// newAuthClient creates a client with a secret and returns a copy authenticated with it.
+	newAuthClient := func(t *testing.T, scope string) *Client {
+		t.Helper()
+
+		client, err := AddClient(form.Client{ClientName: "Auth Changed " + rnd.Base36(6), AuthScope: scope})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = client.Purge() })
+
+		secret, err := client.NewSecret()
+		require.NoError(t, err)
+
+		authenticated := FindClientByUID(client.ClientUID)
+		require.NotNil(t, authenticated)
+		require.False(t, authenticated.InvalidSecret(secret))
+
+		return authenticated
+	}
+
+	t.Run("Unchanged", func(t *testing.T) {
+		client := newAuthClient(t, "metrics")
+		assert.False(t, client.AuthChanged())
+	})
+	t.Run("EmptyScope", func(t *testing.T) {
+		client := newAuthClient(t, "metrics")
+		require.NoError(t, UnscopedDb().Model(&Client{}).Where("client_uid = ?", client.ClientUID).UpdateColumn("auth_scope", "").Error)
+		client.AuthScope = ""
+		assert.False(t, client.AuthChanged())
+
+		// An empty scope reads as "*".
+		client.AuthScope = "*"
+		assert.False(t, client.AuthChanged())
+	})
+	t.Run("Disabled", func(t *testing.T) {
+		client := newAuthClient(t, "metrics")
+		require.NoError(t, UnscopedDb().Model(&Client{}).Where("client_uid = ?", client.ClientUID).UpdateColumn("auth_enabled", false).Error)
+		assert.True(t, client.AuthChanged())
+	})
+	t.Run("Deleted", func(t *testing.T) {
+		client := newAuthClient(t, "metrics")
+		require.NoError(t, UnscopedDb().Model(&Client{}).Where("client_uid = ?", client.ClientUID).UpdateColumn("deleted_at", time.Now().UTC()).Error)
+		assert.True(t, client.AuthChanged())
+	})
+	t.Run("Missing", func(t *testing.T) {
+		client := newAuthClient(t, "metrics")
+		require.NoError(t, UnscopedDb().Delete(&Client{}, "client_uid = ?", client.ClientUID).Error)
+		assert.True(t, client.AuthChanged())
+	})
+	t.Run("RoleChanged", func(t *testing.T) {
+		client := newAuthClient(t, "metrics")
+		require.NoError(t, UnscopedDb().Model(&Client{}).Where("client_uid = ?", client.ClientUID).UpdateColumn("client_role", acl.RoleNone.String()).Error)
+		assert.True(t, client.AuthChanged())
+	})
+	t.Run("ScopeChanged", func(t *testing.T) {
+		client := newAuthClient(t, "metrics")
+		require.NoError(t, UnscopedDb().Model(&Client{}).Where("client_uid = ?", client.ClientUID).UpdateColumn("auth_scope", "metrics vision").Error)
+		assert.True(t, client.AuthChanged())
+	})
+	t.Run("SecretChanged", func(t *testing.T) {
+		client := newAuthClient(t, "metrics")
+		stored := FindClientByUID(client.ClientUID)
+		_, err := stored.NewSecret()
+		require.NoError(t, err)
+		assert.True(t, client.AuthChanged())
+	})
+	t.Run("SecretDeleted", func(t *testing.T) {
+		client := newAuthClient(t, "metrics")
+		require.NoError(t, client.DeleteSecret())
+		assert.True(t, client.AuthChanged())
+	})
+	t.Run("NotAuthenticated", func(t *testing.T) {
+		client := newAuthClient(t, "metrics")
+		unverified := FindClientByUID(client.ClientUID)
+		require.NotNil(t, unverified)
+		assert.True(t, unverified.AuthChanged())
+	})
+	t.Run("NotAuthenticatedEmptyHash", func(t *testing.T) {
+		client := newAuthClient(t, "metrics")
+		require.NoError(t, UnscopedDb().Model(&Password{}).Where("uid = ?", client.ClientUID).UpdateColumn("hash", "").Error)
+		unverified := FindClientByUID(client.ClientUID)
+		require.NotNil(t, unverified)
+		assert.True(t, unverified.AuthChanged())
+	})
+	t.Run("Nil", func(t *testing.T) {
+		var client *Client
+		assert.True(t, client.AuthChanged())
 	})
 }

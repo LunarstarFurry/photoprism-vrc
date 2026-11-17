@@ -1,12 +1,22 @@
 ## PhotoPrism — Config Package
 
-**Last Updated:** March 8, 2026
+**Last Updated:** October 6, 2026
 
 ### Overview
 
 PhotoPrism’s [runtime configuration](https://docs.photoprism.app/developer-guide/configuration/) is managed by this package. Fields are defined in [`options.go`](options.go) and then initialized with values from command-line flags, [environment variables](https://docs.photoprism.app/getting-started/config-options/), and [optional YAML files](https://docs.photoprism.app/getting-started/config-files/) (`storage/config/*.yml`).
 
 Client config values are derived from the runtime configuration and exposed to the frontend via `GET /api/v1/config`. This includes a `storageNamespace` value (SHA-256 hash of `SiteUrl`) used by the browser to scope namespaced browser-storage keys on shared domains.
+
+### Standard Files & Directories
+
+Shared storage/configuration names are defined in `pkg/fs/const.go`, including the storage
+serial, signing-key file, key directory, cluster credential files, storage markers, and
+the `options`, `defaults`, `settings`, and `hub` configuration basenames. `fs.ConfigFilePath`
+retains `.yml`/`.yaml` selection for these basenames.
+Configuration helpers retain ownership of path resolution, generation, permissions, and
+persistence. Transfer reservations are a separate policy in `pkg/fs/reserved.go`; they do
+not prevent trusted internal configuration helpers from managing their own files.
 
 ### Storage Namespace & Legacy Session Compatibility
 
@@ -33,6 +43,15 @@ The `PHOTOPRISM_CONFIG_PATH` variable controls where PhotoPrism looks for YAML f
 
 > Any change to configuration (flags, env vars, YAML files) requires a restart. The Go process reads options during startup and does not watch for changes.
 
+### Startup Memory Limits
+
+At package initialization, detected system memory below `MinMem` (1 GB) enables
+low-memory limits that disable face detection and recognition, TensorFlow models, and RAW
+indexing and conversion. `PHOTOPRISM_UNSAFE=true` or `--unsafe` bypasses these low-memory limits;
+`--unsafe=false` takes precedence over the environment variable. This early check
+runs before YAML configuration is loaded. The separate startup requirement of at
+least 128 MB remains in effect even in unsafe mode.
+
 ### HTTP Hardening Defaults
 
 - `PHOTOPRISM_HTTP_HEADER_TIMEOUT` / `--http-header-timeout` configures `http.Server.ReadHeaderTimeout` and defaults to `15s`.
@@ -57,6 +76,15 @@ Example output:
 | site-domain | app.localssl.dev          |
 | site-author | @photoprism_app           |
 | site-title  | PhotoPrism                |
+
+### Test Database Setup
+
+Tests that install connection-local GORM callbacks can create a `NewIsolatedTestConfig` and call
+`OpenTestDb` before `Init` or `RegisterDb`. This opens the connection without replacing the global
+entity database provider or loading fixtures, so callbacks can be configured before background
+writers use it. Normal initialization reuses the prepared connection. If setup is abandoned before
+registration, close the returned handle directly and discard the config rather than clearing
+another config's provider or reusing the closed connection.
 
 ### CLI Reference
 

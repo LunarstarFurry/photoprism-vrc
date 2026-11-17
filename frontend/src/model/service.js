@@ -32,9 +32,20 @@ export class Service extends RestModel {
       SyncUpload: false,
       SyncDownload: !$config.get("readonly"),
       SyncRaw: true,
+      SyncYaml: 0,
       CreatedAt: "",
       UpdatedAt: "",
       DeletedAt: null,
+    };
+  }
+
+  // AccPass and AccKey are tagged `json:"-"` on the backend, so they never
+  // arrive in GET responses. Seeded here so the change-diff in update()
+  // picks up user edits in the service edit dialog.
+  getWriteOnly() {
+    return {
+      AccPass: "",
+      AccKey: "",
     };
   }
 
@@ -44,6 +55,11 @@ export class Service extends RestModel {
 
   getId() {
     return this.ID ? this.ID : false;
+  }
+
+  // hasError reports whether the account has an error message or failed sync attempts to show.
+  hasError() {
+    return !!this.AccErrors || !!this.AccError;
   }
 
   Folders() {

@@ -1,19 +1,26 @@
 package entity
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"gopkg.in/yaml.v2"
 
 	"github.com/photoprism/photoprism/pkg/clean"
 	"github.com/photoprism/photoprism/pkg/fs"
+	"github.com/photoprism/photoprism/pkg/txt"
+	"github.com/photoprism/photoprism/pkg/txt/clip"
 )
 
 var photoYamlMutex = sync.Mutex{}
+
+// photoSrcSize is the size of the VARBINARY(8) photo source and type columns in bytes.
+const photoSrcSize = 8
 
 // Yaml returns photo data as YAML string.
 func (m *Photo) Yaml() ([]byte, error) {
@@ -61,8 +68,17 @@ func (m *Photo) SaveAsYaml(fileName string) error {
 	return fs.WriteFile(fileName, data, fs.ModeFile)
 }
 
+// ErrPhotoYamlName is returned for a photo whose name cannot name a YAML sidecar file.
+var ErrPhotoYamlName = errors.New("photo name is empty or not a file name")
+
 // YamlFileName returns both the absolute file path and the relative name for the YAML sidecar file, e.g. for logging.
+// A photo whose name is empty or not a plain file name has none, as it would name the file of another photo.
 func (m *Photo) YamlFileName(originalsPath, sidecarPath string) (absolute, relative string, err error) {
+	if m == nil || m.PhotoName == "" || m.PhotoName == "." || m.PhotoName == ".." ||
+		filepath.Base(filepath.Join(m.PhotoPath, m.PhotoName)) != m.PhotoName {
+		return "", "", ErrPhotoYamlName
+	}
+
 	absolute, err = fs.FileName(filepath.Join(originalsPath, m.PhotoPath, m.PhotoName), sidecarPath, originalsPath, fs.ExtYml)
 	relative = filepath.Join(m.PhotoPath, m.PhotoName) + fs.ExtYml
 
@@ -132,6 +148,42 @@ func (m *Photo) LoadFromYaml(fileName string) error {
 	}
 
 	m.NormalizeValues()
+	m.clipYamlValues()
 
 	return nil
+}
+
+// clipYamlValues limits restored values to the size of their columns, so a backup file cannot
+// make the photo unsavable. Types and sources longer than their column are not known ones.
+func (m *Photo) clipYamlValues() {
+	if len(m.PhotoType) > photoSrcSize {
+		m.PhotoType = MediaImage
+	}
+
+	for _, src := range []*string{&m.TakenSrc, &m.TypeSrc, &m.TitleSrc, &m.CaptionSrc, &m.PlaceSrc} {
+		if len(*src) > photoSrcSize {
+			*src = ""
+		}
+	}
+
+	for _, col := range []struct {
+		value *string
+		size  int
+		bytes bool
+	}{
+		{&m.PhotoTitle, txt.ClipLongName, false},
+		{&m.PhotoCaption, txt.ClipLongText, false},
+		{&m.UUID, 255, true},
+		{&m.OriginalName, 755, true},
+		{&m.TimeZone, 64, true},
+		{&m.PhotoExposure, 64, true},
+		{&m.CameraSerial, 160, true},
+		{&m.CreatedBy, 42, true},
+	} {
+		if col.bytes && len(*col.value) > col.size {
+			*col.value = clip.Bytes(*col.value, col.size)
+		} else if !col.bytes && utf8.RuneCountInString(*col.value) > col.size {
+			*col.value = clip.Runes(*col.value, col.size)
+		}
+	}
 }

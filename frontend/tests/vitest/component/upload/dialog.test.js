@@ -3,9 +3,11 @@ import { mount } from "@vue/test-utils";
 import { nextTick } from "vue";
 import { createVuetify } from "vuetify";
 import * as components from "vuetify/components";
-import * as labsComponents from "vuetify/labs/components";
 import * as directives from "vuetify/directives";
 import PUploadDialog from "component/upload/dialog.vue";
+import $api from "common/api";
+import $notify from "common/notify";
+import Util from "common/util";
 
 // VFileUploadItem calls URL.createObjectURL to build preview src URLs; jsdom does not implement it.
 if (typeof URL.createObjectURL === "undefined") {
@@ -13,28 +15,9 @@ if (typeof URL.createObjectURL === "undefined") {
   URL.revokeObjectURL = () => {};
 }
 
-// VDialog relies on window.visualViewport which jsdom does not provide.
-if (typeof window.visualViewport === "undefined") {
-  Object.defineProperty(window, "visualViewport", {
-    value: {
-      width: 1024,
-      height: 768,
-      offsetLeft: 0,
-      offsetTop: 0,
-      pageLeft: 0,
-      pageTop: 0,
-      scale: 1,
-      addEventListener: () => {},
-      removeEventListener: () => {},
-    },
-    writable: true,
-    configurable: true,
-  });
-}
-
-// Vuetify instance that includes both standard and labs components (for VFileUpload).
+// Vuetify instance with all components, including VFileUpload.
 const vuetify = createVuetify({
-  components: { ...components, ...labsComponents },
+  components,
   directives,
   theme: { defaultTheme: "light" },
 });
@@ -65,13 +48,21 @@ vi.mock("common/notify", () => ({
 function buildConfigMock(overrides = {}) {
   return {
     get: vi.fn((key) => {
-      if (key === "demo") return false;
-      if (key === "uploadAllow") return "image/*";
-      if (key === "uploadNSFW") return false;
+      if (key === "demo") {
+        return false;
+      }
+      if (key === "uploadAllow") {
+        return "image/*";
+      }
+      if (key === "uploadNSFW") {
+        return false;
+      }
       return null;
     }),
     feature: vi.fn(() => false),
     filesQuotaReached: vi.fn(() => false),
+    storageLow: vi.fn(() => false),
+    insufficientStorage: vi.fn(() => false),
     ...overrides,
   };
 }
@@ -85,7 +76,7 @@ function mountDialog({ visible = true, data = {}, configOverrides = {} } = {}) {
       mocks: {
         $config: buildConfigMock(configOverrides),
         $session: { getUserUID: vi.fn(() => "uid123") },
-        $util: { generateToken: vi.fn(() => "tok-abc") },
+        $util: { generateToken: vi.fn(() => "tok-abc"), balanceBidi: (s) => Util.balanceBidi(s) },
         $view: { enter: vi.fn(), leave: vi.fn() },
         $notify: { info: vi.fn(), success: vi.fn(), error: vi.fn() },
         $gettext: (msg, params = {}) => msg.replace(/%\{(\w+)\}/g, (_, k) => (params[k] !== undefined ? String(params[k]) : "")),
@@ -103,7 +94,9 @@ describe("component/upload/dialog", () => {
   });
 
   afterEach(() => {
-    if (wrapper) wrapper.unmount();
+    if (wrapper) {
+      wrapper.unmount();
+    }
     vi.clearAllMocks();
   });
 
@@ -137,6 +130,16 @@ describe("component/upload/dialog", () => {
 
   // ─── v-file-upload props ──────────────────────────────────────────────────
 
+  describe("Album chips", () => {
+    it("shows the title of a selected album and of a newly typed name", async () => {
+      wrapper.vm.selectedAlbums = [{ UID: "as6sg6bxpogaaba7", Title: "Holidays", Notes: "internal note" }, "New Album"];
+      await nextTick();
+      const chips = document.querySelectorAll(".input-albums .v-chip");
+      expect([...chips].map((c) => c.textContent.trim())).toEqual(["Holidays", "New Album"]);
+      expect(document.querySelector(".input-albums").textContent).not.toContain("internal note");
+    });
+  });
+
   describe("v-file-upload binding", () => {
     it("passes filterByType from config (the accept value)", () => {
       const fu = wrapper.findComponent({ name: "VFileUpload" });
@@ -156,10 +159,17 @@ describe("component/upload/dialog", () => {
       expect(fu.props("disabled")).toBe(true);
     });
 
-    it("is disabled when filesQuotaReached is true", async () => {
-      wrapper.vm.filesQuotaReached = true;
+    it("is disabled when insufficientStorage is true", async () => {
+      wrapper.vm.insufficientStorage = true;
       await nextTick();
       const fu = wrapper.findComponent({ name: "VFileUpload" });
+      expect(fu.props("disabled")).toBe(true);
+    });
+
+    it("is initialized as disabled when config reports insufficient storage", () => {
+      const w = mountDialog({ configOverrides: { insufficientStorage: vi.fn(() => true) } });
+      expect(w.vm.insufficientStorage).toBe(true);
+      const fu = w.findComponent({ name: "VFileUpload" });
       expect(fu.props("disabled")).toBe(true);
     });
 
@@ -388,7 +398,7 @@ describe("component/upload/dialog", () => {
           mocks: {
             $config: buildConfigMock(),
             $session: { getUserUID: vi.fn(() => "uid123") },
-            $util: { generateToken: vi.fn(() => "tok-abc") },
+            $util: { generateToken: vi.fn(() => "tok-abc"), balanceBidi: (s) => Util.balanceBidi(s) },
             $view: { enter: vi.fn(), leave: vi.fn() },
             $notify: { info: vi.fn(), success: vi.fn(), error: vi.fn() },
             $gettext: (msg, params = {}) => msg.replace(/%\{(\w+)\}/g, (_, k) => (params[k] !== undefined ? String(params[k]) : "")),
@@ -413,7 +423,7 @@ describe("component/upload/dialog", () => {
           mocks: {
             $config: buildConfigMock(),
             $session: { getUserUID: vi.fn(() => "uid123") },
-            $util: { generateToken: vi.fn(() => "tok-abc") },
+            $util: { generateToken: vi.fn(() => "tok-abc"), balanceBidi: (s) => Util.balanceBidi(s) },
             $view: { enter: vi.fn(), leave: vi.fn() },
             $notify: { info: vi.fn(), success: vi.fn(), error: vi.fn() },
             $gettext: (msg, params = {}) => msg.replace(/%\{(\w+)\}/g, (_, k) => (params[k] !== undefined ? String(params[k]) : "")),
@@ -504,6 +514,129 @@ describe("component/upload/dialog", () => {
   describe("title computed", () => {
     it("returns Upload", () => {
       expect(wrapper.vm.title).toBe("Upload");
+    });
+  });
+  describe("Processing retry", () => {
+    const flushPromises = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+    // upload selects a file, uploads it with a new token, and waits until processing has settled.
+    async function upload(token = "tok-1") {
+      wrapper.vm.$util.generateToken.mockReturnValueOnce(token);
+      wrapper.vm.selected = [makeFile()];
+      wrapper.vm.selectedAlbums = ["Holiday"];
+      wrapper.vm.onUpload();
+      await vi.waitFor(() => expect($api.put).toHaveBeenCalled());
+      await flushPromises();
+      await nextTick();
+    }
+
+    // retryButton returns the Retry button of the open dialog, if shown.
+    const retryButton = () => document.body.querySelector(".action-retry");
+
+    it("keeps the token and offers a retry when processing fails with 503", async () => {
+      $api.put.mockRejectedValueOnce({ response: { status: 503 } });
+      await upload("tok-1");
+      expect(wrapper.vm.retryable).toBe(true);
+      expect(wrapper.vm.failed).toBe(true);
+      expect(wrapper.vm.busy).toBe(false);
+      expect(wrapper.vm.indexing).toBe(false);
+      expect(wrapper.vm.token).toBe("tok-1");
+      expect($notify.error).toHaveBeenCalledWith("Upload failed");
+      expect(retryButton()).not.toBeNull();
+      expect(retryButton().closest(".action-buttons").querySelector(".action-upload")).toBeNull();
+
+      $api.put.mockResolvedValueOnce({});
+      retryButton().click();
+      await flushPromises();
+      expect($api.post).toHaveBeenCalledTimes(1);
+      expect($api.put).toHaveBeenCalledTimes(2);
+      expect($api.put.mock.calls[1][0]).toBe("users/uid123/upload/tok-1");
+      expect($api.put.mock.calls[1][1]).toEqual({ albums: ["Holiday"] });
+      expect(wrapper.vm.retryable).toBe(false);
+      expect(wrapper.vm.token).toBe("");
+      expect(wrapper.emitted("confirm")).toBeTruthy();
+      expect($notify.success).toHaveBeenCalledWith("Upload complete");
+    });
+
+    it("offers a retry for 500 and 507", async () => {
+      for (const status of [500, 507]) {
+        $api.put.mockRejectedValueOnce({ response: { status } });
+        await upload();
+        expect(wrapper.vm.retryable).toBe(true);
+        wrapper.vm.reset();
+      }
+    });
+
+    it("starts over for other errors", async () => {
+      for (const err of [{ response: { status: 400 } }, { response: { status: 401 } }, { response: { status: 403 } }, { response: { status: 404 } }, new Error("network")]) {
+        $api.put.mockRejectedValueOnce(err);
+        await upload();
+        expect(wrapper.vm.retryable).toBe(false);
+        expect(wrapper.vm.token).toBe("");
+        expect(wrapper.vm.failed).toBe(false);
+      }
+    });
+
+    it("starts over when new files are selected after a failure", async () => {
+      $api.put.mockRejectedValueOnce({ response: { status: 503 } });
+      await upload("tok-1");
+      expect(wrapper.vm.retryable).toBe(true);
+      wrapper.vm.onFilesSelected([makeFile("other.jpg")]);
+      expect(wrapper.vm.retryable).toBe(false);
+      expect(wrapper.vm.failed).toBe(false);
+      expect(wrapper.vm.total).toBe(0);
+      expect(wrapper.vm.completedTotal).toBe(0);
+      expect(wrapper.vm.token).toBe("");
+      expect(wrapper.vm.processAlbums).toEqual([]);
+      expect(wrapper.vm.selectedAlbums).toEqual(["Holiday"]);
+
+      $api.put.mockResolvedValueOnce({});
+      await upload("tok-2");
+      expect($api.put.mock.calls[1][0]).toBe("users/uid123/upload/tok-2");
+    });
+
+    it("starts over when the dialog is closed and opened again", async () => {
+      $api.put.mockRejectedValueOnce({ response: { status: 503 } });
+      await upload();
+      await wrapper.setProps({ visible: false });
+      await wrapper.setProps({ visible: true });
+      await nextTick();
+      expect(wrapper.vm.retryable).toBe(false);
+      expect(wrapper.vm.token).toBe("");
+      expect(retryButton()).toBeNull();
+    });
+
+    it("ignores a retry that is not offered, while busy, or without a token", () => {
+      wrapper.vm.token = "tok-1";
+      wrapper.vm.retryable = false;
+      wrapper.vm.onRetry();
+      wrapper.vm.retryable = true;
+      wrapper.vm.busy = true;
+      wrapper.vm.onRetry();
+      wrapper.vm.busy = false;
+      wrapper.vm.token = "";
+      wrapper.vm.onRetry();
+      expect($api.put).not.toHaveBeenCalled();
+    });
+
+    it("ignores the response to a request for an earlier upload", async () => {
+      let reject;
+      $api.put.mockReturnValueOnce(
+        new Promise((resolve, fail) => {
+          reject = fail;
+        })
+      );
+      wrapper.vm.$util.generateToken.mockReturnValueOnce("tok-1");
+      wrapper.vm.selected = [makeFile()];
+      wrapper.vm.onUpload();
+      await vi.waitFor(() => expect($api.put).toHaveBeenCalled());
+      wrapper.vm.reset();
+      wrapper.vm.token = "tok-2";
+      reject({ response: { status: 503 } });
+      await flushPromises();
+      expect(wrapper.vm.retryable).toBe(false);
+      expect(wrapper.vm.token).toBe("tok-2");
+      expect($notify.error).not.toHaveBeenCalled();
     });
   });
 });

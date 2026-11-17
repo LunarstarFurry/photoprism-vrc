@@ -7,10 +7,13 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/photoprism/photoprism/internal/api/download"
+	"github.com/photoprism/photoprism/internal/auth/acl"
 	"github.com/photoprism/photoprism/internal/config/customize"
 	"github.com/photoprism/photoprism/internal/entity/query"
+	"github.com/photoprism/photoprism/internal/entity/search"
 	"github.com/photoprism/photoprism/internal/photoprism"
 	"github.com/photoprism/photoprism/internal/photoprism/get"
+	"github.com/photoprism/photoprism/internal/server/limiter"
 	"github.com/photoprism/photoprism/pkg/clean"
 	"github.com/photoprism/photoprism/pkg/fs"
 	"github.com/photoprism/photoprism/pkg/rnd"
@@ -39,10 +42,14 @@ func DownloadName(c *gin.Context) customize.DownloadName {
 //	@Summary	returns the raw file data
 //	@Id			GetDownload
 //	@Tags		Images, Files
-//	@Produce	application/octet-stream
-//	@Failure	403,404	{file}	image/svg+xml
-//	@Success	200		{file}	application/octet-stream
-//	@Param		file	path	string	true	"file hash or unique download id"
+//	@Produce	application/octet-stream,video/mp4
+//	@Failure	403,404	{file}		image/svg+xml
+//	@Failure	429,507	{object}	i18n.Response
+//	@Success	200		{file}		application/octet-stream
+//	@Param		file	path		string	true	"file hash or unique download id"
+//	@Param		t		query		string	false	"download token"
+//	@Param		name	query		string	false	"attachment name type (file, share, original)"
+//	@Param		format	query		string	false	"avc returns an MPEG-4 AVC rendition of a video, live photo, or animated image"
 //	@Router		/api/v1/dl/{file} [get]
 func GetDownload(router *gin.RouterGroup) {
 	router.GET("/dl/:file", func(c *gin.Context) {
@@ -64,16 +71,33 @@ func GetDownload(router *gin.RouterGroup) {
 			return
 		}
 
-		// If the file is identified by its hash, a valid download token is required.
-		if InvalidDownloadToken(c) {
+		// If the file is identified by its hash, the request must be authorized: a valid "?t=" download
+		// token, or a Portal JWT in the request header.
+		// The hash addresses a picture's original file and this is the URL the web client uses, so a scope
+		// naming either resource authorizes the download.
+		sess, valid := AuthDownload(c, acl.Resources{acl.ResourceFiles, acl.ResourcePhotos})
+		if !valid && DownloadRateLimited(c) {
+			limiter.AbortJSON(c)
+			return
+		} else if !valid {
 			c.Data(http.StatusForbidden, "image/svg+xml", brokenIconSvg)
+			return
+		}
+
+		// Withhold files the session may not see, checked before the file is resolved so a not-visible
+		// hash and an unknown hash return the identical 404 — a token holder cannot probe which files
+		// exist by hash. FileDownloadable scopes an identified session and limits a coarse token to public.
+		if visible, vErr := search.FileDownloadable(id, sess); vErr != nil || !visible {
+			c.Data(http.StatusNotFound, "image/svg+xml", brokenIconSvg)
 			return
 		}
 
 		f, err := query.FileByHash(id)
 
-		if err != nil {
-			c.AbortWithStatusJSON(404, gin.H{"error": err.Error()})
+		// Every negative path returns the identical SVG 404 so an unknown hash is indistinguishable
+		// from one hidden or missing (no existence disclosure to a valid token holder).
+		if err != nil || !f.Exportable(sess) {
+			c.Data(http.StatusNotFound, "image/svg+xml", brokenIconSvg)
 			return
 		}
 
@@ -89,6 +113,13 @@ func GetDownload(router *gin.RouterGroup) {
 			return
 		}
 
-		c.FileAttachment(fileName, f.DownloadName(DownloadName(c), 0))
+		switch c.Query("format") {
+		case "":
+			c.FileAttachment(fileName, f.DownloadName(DownloadName(c), 0))
+		case DownloadFormatAvc:
+			sendAvcDownload(c, f, sess)
+		default:
+			c.Data(http.StatusNotFound, "image/svg+xml", brokenIconSvg)
+		}
 	})
 }

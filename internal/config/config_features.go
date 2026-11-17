@@ -36,6 +36,18 @@ func (c *Config) DisableWebDAV() bool {
 	return c.options.DisableWebDAV
 }
 
+// DisableAppPasswords checks if app passwords should be disabled, so they cannot be
+// created and existing ones are no longer accepted as a credential. Backed by the
+// AppPasswords feature flag (Settings UI / PHOTOPRISM_DISABLE_FEATURES).
+func (c *Config) DisableAppPasswords() bool {
+	return !c.Settings().Features.AppPasswords
+}
+
+// DisableMCP checks if the Model Context Protocol (MCP) API endpoint should be disabled.
+func (c *Config) DisableMCP() bool {
+	return c.options.DisableMCP
+}
+
 // DisablePlaces checks if geocoding and maps should be disabled.
 func (c *Config) DisablePlaces() bool {
 	return c.options.DisablePlaces || len(places.LocationServiceUrls) == 0
@@ -57,7 +69,8 @@ func (c *Config) ExifToolEnabled() bool {
 	return !c.DisableExifTool()
 }
 
-// DisableTensorFlow checks if all features depending on TensorFlow should be disabled.
+// DisableTensorFlow checks if models that run on TensorFlow, such as the FaceNet face embedding
+// model, should be disabled. Models that run on ONNX Runtime are not affected.
 func (c *Config) DisableTensorFlow() bool {
 	if LowMem && !c.options.DisableTensorFlow {
 		c.options.DisableTensorFlow = true
@@ -66,18 +79,23 @@ func (c *Config) DisableTensorFlow() bool {
 	return c.options.DisableTensorFlow
 }
 
-// DisableFaces checks if face recognition is disabled.
+// DisableFaces checks if face detection and recognition are disabled.
 func (c *Config) DisableFaces() bool {
-	if c.DisableTensorFlow() || c.options.DisableFaces {
-		return true
+	if LowMem && !c.options.DisableFaces {
+		c.options.DisableFaces = true
 	}
 
-	return false
+	return c.options.DisableFaces
+}
+
+// XMPFaces checks if importing face regions and names from XMP metadata is enabled.
+func (c *Config) XMPFaces() bool {
+	return c.options.XMPFaces
 }
 
 // DisableClassification checks if image classification is disabled.
 func (c *Config) DisableClassification() bool {
-	return c.options.DisableClassification
+	return c.LabelModelSetting() == "none"
 }
 
 // DisableFFmpeg checks if FFmpeg is disabled for video transcoding.

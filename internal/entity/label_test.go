@@ -6,7 +6,10 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+
 	"github.com/stretchr/testify/require"
+
+	"github.com/photoprism/photoprism/internal/event"
 
 	"github.com/photoprism/photoprism/internal/ai/classify"
 	"github.com/photoprism/photoprism/internal/form"
@@ -140,7 +143,7 @@ func TestLabel_Skip(t *testing.T) {
 	t.Run("Deleted", func(t *testing.T) {
 		label := createTestLabel(t, "skip-deleted")
 		now := time.Now()
-		label.DeletedAt = &now
+		label.DeletedAt = DeletedAtTime(now)
 		assert.True(t, label.Skip())
 	})
 	t.Run("Active", func(t *testing.T) {
@@ -219,6 +222,54 @@ func TestFirstOrCreateLabel(t *testing.T) {
 		assert.NotEqual(t, first.LabelSlug, second.LabelSlug)
 		assert.Equal(t, first.LabelSlug, first.CustomSlug)
 		assert.Equal(t, second.LabelSlug, second.CustomSlug)
+	})
+	t.Run("PublishesUidOnlyCreatedEvent", func(t *testing.T) {
+		sub := event.Subscribe("labels.created")
+		t.Cleanup(func() { event.Unsubscribe(sub) })
+
+		result := FirstOrCreateLabel(NewLabel("UidOnlyEventLabel", 0))
+		require.NotNil(t, result)
+
+		t.Cleanup(func() {
+			_ = Db().Unscoped().Delete(result).Error
+			FlushLabelCache()
+		})
+
+		select {
+		case msg := <-sub.Receiver:
+			uids, ok := msg.Fields["entities"].([]string)
+			assert.True(t, ok, "entities payload should be []string, got %T", msg.Fields["entities"])
+			assert.Equal(t, []string{result.LabelUID}, uids)
+		case <-time.After(2 * time.Second):
+			t.Fatal("expected one labels.created event")
+		}
+	})
+	t.Run("ReusesRenamedLabelByPreviousName", func(t *testing.T) {
+		original := FirstOrCreateLabel(NewLabel("RenameCat", 0))
+		require.NotNil(t, original)
+
+		t.Cleanup(func() {
+			_ = Db().Unscoped().Delete(original).Error
+			FlushLabelCache()
+		})
+
+		require.True(t, original.SetName("RenameKatze"))
+		require.NoError(t, Db().Save(original).Error)
+		FlushLabelCache()
+
+		assert.Equal(t, "renamecat", original.LabelSlug)
+		assert.Equal(t, "renamekatze", original.CustomSlug)
+
+		again := FirstOrCreateLabel(NewLabel("RenameCat", 0))
+		require.NotNil(t, again)
+		assert.Equal(t, original.ID, again.ID)
+		assert.Equal(t, "RenameKatze", again.LabelName)
+
+		var rows []Label
+		require.NoError(t, UnscopedDb().
+			Where("label_slug LIKE ? OR custom_slug LIKE ?", "renamecat%", "renamecat%").
+			Find(&rows).Error)
+		assert.Len(t, rows, 1, "rename + re-add must not create a duplicate")
 	})
 }
 
@@ -397,12 +448,31 @@ func TestLabel_Delete(t *testing.T) {
 
 		assert.Len(t, labels, 0)
 	})
+	t.Run("MarksRecord", func(t *testing.T) {
+		label := createTestLabel(t, "DeleteMarks")
+		cached, err := FindLabel(label.LabelName, true)
+		require.NoError(t, err)
+		assert.Equal(t, label.ID, cached.ID)
+		require.NoError(t, label.Delete())
+		assert.True(t, label.Deleted())
+		assert.True(t, label.Skip())
+
+		// The cache no longer returns the label, and restoring the same record brings it back.
+		_, err = FindLabel(label.LabelName, true)
+		assert.Error(t, err)
+		require.NoError(t, label.Restore())
+		assert.False(t, label.Deleted())
+		restored, err := FindLabel(label.LabelName, true)
+		require.NoError(t, err)
+		assert.Equal(t, label.ID, restored.ID)
+		assert.False(t, restored.Deleted())
+	})
 }
 
 func TestLabel_Restore(t *testing.T) {
 	t.Run("Success", func(t *testing.T) {
 		var deletedAt = time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
-		label := &Label{DeletedAt: &deletedAt, LabelName: "ToBeRestored"}
+		label := &Label{DeletedAt: DeletedAtTime(deletedAt), LabelName: "ToBeRestored"}
 
 		if err := label.Save(); err != nil {
 			t.Fatal(err)
@@ -417,7 +487,7 @@ func TestLabel_Restore(t *testing.T) {
 		assert.False(t, label.Deleted())
 	})
 	t.Run("LabelNotDeleted", func(t *testing.T) {
-		label := &Label{DeletedAt: nil, LabelName: "NotDeleted1234"}
+		label := &Label{LabelName: "NotDeleted1234"}
 
 		if err := label.Restore(); err != nil {
 			t.Fatal(err)

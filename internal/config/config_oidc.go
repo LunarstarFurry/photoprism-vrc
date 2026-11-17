@@ -8,9 +8,9 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"unicode/utf8"
 
 	"github.com/photoprism/photoprism/internal/auth/acl"
+	"github.com/photoprism/photoprism/internal/event"
 	"github.com/photoprism/photoprism/pkg/authn"
 	"github.com/photoprism/photoprism/pkg/clean"
 	"github.com/photoprism/photoprism/pkg/fs"
@@ -26,6 +26,13 @@ const (
 	// OidcRedirectUri is the callback endpoint path for OIDC.
 	OidcRedirectUri = ApiUri + "/oidc/redirect"
 )
+
+// ClusterOIDC reports whether a cluster instance should use the Portal as its OIDC
+// login provider, deriving the OIDC RP credentials from the node client
+// (PHOTOPRISM_CLUSTER_OIDC). Explicit PHOTOPRISM_OIDC_CLIENT / _SECRET win.
+func (c *Config) ClusterOIDC() bool {
+	return c.options.ClusterOIDC
+}
 
 // OIDCEnabled checks if sign-on via OpenID Connect (OIDC) is fully configured and enabled.
 func (c *Config) OIDCEnabled() bool {
@@ -48,12 +55,12 @@ func (c *Config) OIDCUri() *url.URL {
 	if uri := c.options.OIDCUri; uri == "" {
 		return &url.URL{}
 	} else if result, err := url.Parse(uri); err != nil {
-		log.Warnf("oidc: failed to parse provider URI (%s)", err)
+		event.SystemWarn([]string{"oidc", "provider uri", "parse", "%s"}, clean.ErrorFull(err))
 		return &url.URL{}
 	} else if result.Scheme == "https" {
 		return result
 	} else {
-		log.Warnf("oidc: insecure or unsupported provider URI (%s)", uri)
+		event.SystemWarn([]string{"oidc", "provider uri", "%s", "insecure or unsupported"}, clean.Log(uri))
 		return &url.URL{}
 	}
 }
@@ -72,11 +79,51 @@ func (c *Config) OIDCSecret() string {
 		// No secret set, this is not an error.
 		return ""
 	} else if b, err := os.ReadFile(fileName); err != nil || len(b) == 0 { //nolint:gosec // path derived from config directory
-		log.Warnf("config: failed to read OIDC client secret from %s (%s)", fileName, err)
+		event.SystemWarn([]string{"oidc", "client secret", "read %s", "%s"}, clean.Log(fileName), clean.ErrorFull(err))
 		return ""
 	} else {
 		return clean.Password(string(b))
 	}
+}
+
+// SetOIDCUri sets the OIDC provider URI in memory, e.g. when a cluster instance
+// defaults it to the Portal issuer during bootstrap.
+func (c *Config) SetOIDCUri(value string) {
+	if c == nil || c.options == nil {
+		return
+	}
+	c.options.OIDCUri = strings.TrimSpace(value)
+}
+
+// SetOIDCClient sets the OIDC RP Client ID in memory, e.g. when a cluster
+// instance derives it from the node client credentials during bootstrap.
+func (c *Config) SetOIDCClient(value string) {
+	if c == nil || c.options == nil {
+		return
+	}
+	c.options.OIDCClient = strings.TrimSpace(value)
+}
+
+// SetOIDCSecret sets the OIDC RP Client Secret in memory, e.g. when a cluster
+// instance derives it from the node client credentials during bootstrap.
+func (c *Config) SetOIDCSecret(value string) {
+	if c == nil || c.options == nil {
+		return
+	}
+	c.options.OIDCSecret = value
+}
+
+// OIDCIssuerOnSiteDomain reports whether the configured OIDC issuer is served from
+// this node's own site host (a shared-domain Portal OP). The OP session cookie is
+// host-only to that domain, so this gates whether an instance can clear it on
+// logout. It compares the site host, not PortalUrl (which may be a loopback).
+func (c *Config) OIDCIssuerOnSiteDomain() bool {
+	issuer := c.OIDCUri()
+	if issuer == nil || issuer.Hostname() == "" {
+		return false
+	}
+
+	return strings.EqualFold(issuer.Hostname(), c.SiteDomain())
 }
 
 // OIDCScopes returns the user information scopes for single sign-on via OIDC.
@@ -86,6 +133,13 @@ func (c *Config) OIDCScopes() string {
 	}
 
 	return c.options.OIDCScopes
+}
+
+// OIDCPrompt returns the OpenID Connect "prompt" parameter sent on the authorization
+// request (e.g. login or select_account); empty preserves the provider's default
+// single sign-on behavior. Unsupported values are dropped when the client is built.
+func (c *Config) OIDCPrompt() string {
+	return strings.TrimSpace(c.options.OIDCPrompt)
 }
 
 // OIDCProvider returns the OIDC provider name.
@@ -118,6 +172,12 @@ func (c *Config) OIDCRedirect() bool {
 // OIDCRegister checks if new accounts may be created via OIDC.
 func (c *Config) OIDCRegister() bool {
 	return c.options.OIDCRegister
+}
+
+// OIDCLogout checks if signing out should also end the provider session via OpenID
+// Connect RP-initiated logout (redirect to the discovered end_session_endpoint).
+func (c *Config) OIDCLogout() bool {
+	return c.options.OIDCLogout
 }
 
 // OIDCUsername returns the preferred username claim for new users signing up via OIDC.
@@ -165,26 +225,26 @@ func (c *Config) OIDCGroupRoles() map[string]acl.Role {
 	result := make(map[string]acl.Role, len(c.options.OIDCGroupRole))
 
 	for _, entry := range c.options.OIDCGroupRole {
-		entry = strings.TrimSpace(entry)
+		// splitGroupList tolerates comma- and whitespace-separated pairs, so a
+		// single env value with several pairs resolves the same either way.
+		for _, pair := range splitGroupList(entry) {
+			group, roleName, ok := parseGroupRolePair(pair)
 
-		if entry == "" {
-			continue
+			if !ok {
+				continue
+			}
+
+			role := acl.ParseRole(roleName)
+
+			// Skip a mapping to a non-federatable role: the Portal operator role
+			// cluster_admin and the anonymous visitor role must not be assignable
+			// through the IdP group mechanism, even if the directory is compromised.
+			if !acl.IsFederatedRole(role) {
+				continue
+			}
+
+			result[group] = role
 		}
-
-		sep := strings.IndexAny(entry, "=:")
-
-		if sep < 1 || sep >= len(entry)-1 {
-			continue
-		}
-
-		group := normalizeGroupID(entry[:sep])
-		role := acl.ParseRole(entry[sep+1:])
-
-		if group == "" || role == acl.RoleNone {
-			continue
-		}
-
-		result[group] = role
 	}
 
 	return result
@@ -201,9 +261,10 @@ func (c *Config) OIDCRole() acl.Role {
 		return acl.RoleGuest
 	}
 
-	role := acl.UserRoles[clean.Role(c.options.OIDCRole)]
-
-	if role != acl.RoleNone {
+	// Ignore a configured default role that cannot be federated (cluster_admin /
+	// visitor): new OIDC accounts must never be provisioned as a Portal operator
+	// or an anonymous visitor.
+	if role := acl.UserRoles[clean.Role(c.options.OIDCRole)]; acl.IsFederatedRole(role) {
 		return role
 	}
 
@@ -237,12 +298,14 @@ func (c *Config) OIDCReport() (rows [][]string, cols []string) {
 	rows = [][]string{
 		{"oidc-uri", c.OIDCUri().String()},
 		{"oidc-client", c.OIDCClient()},
-		{"oidc-secret", strings.Repeat("*", utf8.RuneCountInString(c.OIDCSecret()))},
+		{"oidc-secret", maskedSecret(c.OIDCSecret())},
 		{"oidc-scopes", c.OIDCScopes()},
+		{"oidc-prompt", c.OIDCPrompt()},
 		{"oidc-provider", c.OIDCProvider()},
 		{"oidc-icon", c.OIDCIcon()},
 		{"oidc-redirect", fmt.Sprintf("%t", c.OIDCRedirect())},
 		{"oidc-register", fmt.Sprintf("%t", c.OIDCRegister())},
+		{"oidc-logout", fmt.Sprintf("%t", c.OIDCLogout())},
 		{"oidc-username", c.OIDCUsername()},
 	}
 
@@ -254,8 +317,8 @@ func (c *Config) OIDCReport() (rows [][]string, cols []string) {
 		rows = append(rows, []string{"oidc-group-claim", claim})
 	}
 
-	if groups := c.OIDCGroup(); len(groups) > 0 {
-		rows = append(rows, []string{"oidc-group", strings.Join(groups, ",")})
+	if c.OIDCGroupSet() {
+		rows = append(rows, []string{"oidc-group", strings.Join(c.OIDCGroup(), ",")})
 	}
 
 	if roles := c.OIDCGroupRoles(); len(roles) > 0 {
@@ -278,7 +341,20 @@ func (c *Config) OIDCReport() (rows [][]string, cols []string) {
 	return rows, cols
 }
 
-// normalizeGroupID lowercases and sanitizes a group identifier (GUID or name) for comparisons.
+// normalizeGroupID lowercases and sanitizes a group identifier (GUID or name) for comparisons,
+// like oidc.NormalizeGroupID.
 func normalizeGroupID(id string) string {
-	return strings.ToLower(clean.Auth(id))
+	return clean.GroupID(id)
+}
+
+// OIDCGroupSet reports whether required groups are configured, including entries that are not
+// valid group IDs, so a list that normalizes to nothing still restricts login.
+func (c *Config) OIDCGroupSet() bool {
+	for _, g := range c.options.OIDCGroup {
+		if strings.TrimSpace(g) != "" {
+			return true
+		}
+	}
+
+	return false
 }

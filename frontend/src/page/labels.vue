@@ -99,10 +99,10 @@
 
             <div class="meta" @click.stop.prevent="">
               <div v-if="canManage" class="meta-title inline-edit clickable" @click.stop.prevent="edit(label)">
-                {{ label.Name }}
+                <bdi>{{ $util.balanceBidi(label.Name) }}</bdi>
               </div>
               <div v-else class="meta-title">
-                {{ label.Name }}
+                <bdi>{{ $util.balanceBidi(label.Name) }}</bdi>
               </div>
 
               <div v-if="label.PhotoCount === 1" class="meta-count" @click.stop.prevent="">
@@ -133,11 +133,16 @@ import { MaxItems } from "common/clipboard";
 import $notify from "common/notify";
 import { Input, InputInvalid, ClickShort, ClickLong } from "common/input";
 import { getAppStorage } from "common/storage";
+import { ACTION_CREATED, ACTION_UPDATED, ACTION_DELETED } from "common/event";
 
 import PLoading from "component/loading.vue";
 import PActionMenu from "component/action/menu.vue";
 
 const appStorage = getAppStorage();
+
+// Maximum number of affected entities reloaded in place per event;
+// larger batches set the dirty flag and are refetched lazily instead.
+const maxLiveRefetch = 50;
 
 export default {
   name: "PPageLabels",
@@ -189,7 +194,6 @@ export default {
       filter: { q, order, all },
       lastFilter: {},
       routeName: routeName,
-      titleRule: (v) => v.length <= this.$config.get("clip") || this.$gettext("Name too long"),
       input: new Input(),
       lastId: "",
       labelToRename: "",
@@ -738,7 +742,7 @@ export default {
 
           if (this.scrollDisabled) {
             if (this.results.length > 1) {
-              this.$notify.info(this.$gettextInterpolate(this.$gettext("All %{n} labels loaded"), { n: this.results.length }));
+              this.$notify.info(this.$gettext("All %{n} labels loaded", { n: this.results.length }));
             }
           } else {
             this.page++;
@@ -934,10 +938,9 @@ export default {
             } else if (this.results.length === 1) {
               this.$notify.info(this.$gettext("One label found"));
             } else {
-              this.$notify.info(this.$gettextInterpolate(this.$gettext("%{n} labels found"), { n: this.results.length }));
+              this.$notify.info(this.$gettext("%{n} labels found", { n: this.results.length }));
             }
           } else {
-            // this.$notify.info(this.$gettext('More than 20 labels found'));
             this.$nextTick(() => {
               if (this.$root.$el.clientHeight <= window.document.documentElement.clientHeight + 300) {
                 this.loadMore();
@@ -972,6 +975,59 @@ export default {
           }
         });
     },
+    // refetchResults reloads the affected entries through the scoped
+    // search API and patches the loaded results in place, so a single
+    // edit costs one uid-filtered query instead of re-running the full
+    // result query. Larger batches fall back to the dirty flag and are
+    // refetched lazily on the next return-to-view.
+    refetchResults(uids) {
+      const affected = uids.filter((uid) => this.results.some((m) => m.UID === uid));
+
+      if (affected.length === 0) {
+        return;
+      }
+
+      if (affected.length > maxLiveRefetch) {
+        this.dirty = true;
+        return;
+      }
+
+      Label.search({ uid: affected.join("|"), count: affected.length })
+        .then((resp) => {
+          const found = new Set();
+
+          resp.models.forEach((values) => {
+            found.add(values.UID);
+
+            const model = this.results.find((m) => m.UID === values.UID);
+
+            if (model) {
+              for (let key in values) {
+                if (key !== "UID" && values.hasOwnProperty(key) && values[key] != null && typeof values[key] !== "object") {
+                  model[key] = values[key];
+                }
+              }
+            }
+          });
+
+          // Rows the scoped search no longer returns are not visible to
+          // this session anymore — drop them like a full refresh would.
+          affected
+            .filter((uid) => !found.has(uid))
+            .forEach((uid) => {
+              const index = this.results.findIndex((m) => m.UID === uid);
+
+              if (index >= 0) {
+                this.results.splice(index, 1);
+              }
+
+              this.removeSelection(uid);
+            });
+        })
+        .catch(() => {
+          this.dirty = true;
+        });
+    },
     onUpdate(ev, data) {
       if (!this.listen) {
         return;
@@ -984,21 +1040,14 @@ export default {
       const type = ev.split(".")[1];
 
       switch (type) {
-        case "updated":
-          for (let i = 0; i < data.entities.length; i++) {
-            const values = data.entities[i];
-            const model = this.results.find((m) => m.UID === values.UID);
+        case ACTION_UPDATED:
+          // labels.updated is a lightweight UID-only signal that carries
+          // no entity fields; affected entries are reloaded through the
+          // scoped search API and patched in place.
+          this.refetchResults(data.entities);
 
-            if (model) {
-              for (let key in values) {
-                if (values.hasOwnProperty(key) && values[key] != null && typeof values[key] !== "object") {
-                  model[key] = values[key];
-                }
-              }
-            }
-          }
           break;
-        case "deleted":
+        case ACTION_DELETED:
           this.dirty = true;
 
           for (let i = 0; i < data.entities.length; i++) {
@@ -1013,7 +1062,7 @@ export default {
           }
 
           break;
-        case "created":
+        case ACTION_CREATED:
           this.dirty = true;
           break;
         default:

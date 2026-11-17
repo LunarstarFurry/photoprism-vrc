@@ -8,10 +8,13 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
+	"github.com/photoprism/photoprism/internal/ai/nsfw"
 	"github.com/photoprism/photoprism/internal/ai/vision"
 	"github.com/photoprism/photoprism/pkg/fs"
 	"github.com/photoprism/photoprism/pkg/http/scheme"
+	"github.com/photoprism/photoprism/pkg/media"
 )
 
 func TestPostVisionNsfw(t *testing.T) {
@@ -20,10 +23,10 @@ func TestPostVisionNsfw(t *testing.T) {
 		PostVisionNsfw(router)
 
 		files := vision.Files{
-			fs.Abs("./testdata/nsfw_224x224.jpg"),
+			fs.Abs("../ai/nsfw/testdata/hentai_2.jpg"),
 		}
 
-		req, err := vision.NewApiRequestImages(files, scheme.Data)
+		req, err := vision.NewApiRequestImages(files, scheme.Data, media.SrcLocal)
 
 		if err != nil {
 			t.Fatal(err)
@@ -53,16 +56,20 @@ func TestPostVisionNsfw(t *testing.T) {
 
 		if len(apiResponse.Result.Nsfw) != 1 {
 			t.Fatal("one nsfw result expected")
-		} else if nsfw := apiResponse.Result.Nsfw[0]; !nsfw.IsNsfw(0.6) {
-			t.Fatalf("image should not be safe for work: %#v", nsfw)
+		} else if result := apiResponse.Result.Nsfw[0]; !result.IsUnsafe() {
+			t.Fatalf("image should not be safe for work: %#v", result)
 		} else {
-			// Drawing:7.547473e-05, Hentai:0.19912475, Neutral:0.00097554235, Porn:0.67095983, Sexy:0.12886441
-			assert.InDelta(t, nsfw.Drawing, 0.01, 0.2)
-			assert.InDelta(t, nsfw.Hentai, 0.2, 0.2)
-			assert.InDelta(t, nsfw.Porn, 0.7, 0.2)
-			assert.InDelta(t, nsfw.Sexy, 0.1, 0.2)
+			assert.NoError(t, nsfw.ValidateScore(result.Score))
+			assert.Greater(t, result.Score, float32(0.9))
+			assert.InDelta(t, nsfw.FindModel(nsfw.DefaultModelName()).DefaultThreshold, result.Threshold, 1e-6)
+			assert.Zero(t, result.Drawing)
+			assert.Zero(t, result.Hentai)
+			assert.Zero(t, result.Neutral)
+			assert.Zero(t, result.Porn)
+			assert.Zero(t, result.Sexy)
 		}
 
+		require.NotNil(t, apiResponse.Model)
 		assert.Equal(t, vision.ModelTypeNsfw, apiResponse.Model.Type)
 		assert.Equal(t, http.StatusOK, r.Code)
 	})
@@ -75,7 +82,7 @@ func TestPostVisionNsfw(t *testing.T) {
 			fs.Abs("./testdata/green_224x224.jpg"),
 		}
 
-		req, err := vision.NewApiRequestImages(files, scheme.Data)
+		req, err := vision.NewApiRequestImages(files, scheme.Data, media.SrcLocal)
 
 		if err != nil {
 			t.Fatal(err)
@@ -100,6 +107,7 @@ func TestPostVisionNsfw(t *testing.T) {
 		}
 
 		assert.Len(t, apiResponse.Result.Nsfw, 2)
+		require.NotNil(t, apiResponse.Model)
 		assert.Equal(t, vision.ModelTypeNsfw, apiResponse.Model.Type)
 		assert.Equal(t, http.StatusOK, r.Code)
 	})
@@ -109,7 +117,7 @@ func TestPostVisionNsfw(t *testing.T) {
 
 		files := vision.Files{}
 
-		req, err := vision.NewApiRequestImages(files, scheme.Data)
+		req, err := vision.NewApiRequestImages(files, scheme.Data, media.SrcLocal)
 
 		if err != nil {
 			t.Fatal(err)
@@ -137,6 +145,17 @@ func TestPostVisionNsfw(t *testing.T) {
 
 		assert.Error(t, apiResponse.Err())
 		assert.False(t, apiResponse.HasResult())
+		assert.Equal(t, http.StatusBadRequest, r.Code)
+	})
+	t.Run("InvalidReference", func(t *testing.T) {
+		app, router, _ := NewApiTest()
+		PostVisionNsfw(router)
+
+		// A raw local path is not an https/data URL and must be rejected with 400,
+		// consistent with the labels endpoint, rather than a 200 with an empty result.
+		body := `{"images":["/photoprism/originals/pp-july/peach_pi-1280x720.jpg"]}`
+		r := PerformRequestWithBody(app, http.MethodPost, "/api/v1/vision/nsfw", body)
+
 		assert.Equal(t, http.StatusBadRequest, r.Code)
 	})
 	t.Run("NoBody", func(t *testing.T) {

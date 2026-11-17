@@ -10,8 +10,10 @@ import (
 	"github.com/photoprism/photoprism/pkg/rnd"
 )
 
+// PermDefault leaves a share on the permissions its resource grants.
 const PermDefault uint = 0
 
+// Permissions a share may grant, combined as a bit mask.
 const (
 	PermNone uint = 1 << iota
 	PermView
@@ -44,7 +46,7 @@ func (m UserShares) UIDs() UIDs {
 
 // Empty checks if there are no shares.
 func (m UserShares) Empty() bool {
-	return m == nil || len(m) == 0
+	return len(m) == 0
 }
 
 // Contains checks the uid is shared.
@@ -64,13 +66,13 @@ func (m UserShares) Contains(uid string) bool {
 
 // UserShare represents a share relationship granting a user access to another entity.
 type UserShare struct {
-	UserUID   string     `gorm:"type:VARBINARY(42);primary_key;auto_increment:false;" json:"-" yaml:"UserUID"`
-	ShareUID  string     `gorm:"type:VARBINARY(42);primary_key;index;" json:"ShareUID" yaml:"ShareUID"`
-	LinkUID   string     `gorm:"type:VARBINARY(42);" json:"LinkUID,omitempty" yaml:"LinkUID,omitempty"`
-	ExpiresAt *time.Time `sql:"index" json:"ExpiresAt,omitempty" yaml:"ExpiresAt,omitempty"`
+	UserUID   string     `gorm:"type:bytes;size:42;primaryKey;autoIncrement:false;" json:"-" yaml:"UserUID"`
+	ShareUID  string     `gorm:"type:bytes;size:42;primaryKey;index;" json:"ShareUID" yaml:"ShareUID"`
+	LinkUID   string     `gorm:"type:bytes;size:42;" json:"LinkUID,omitempty" yaml:"LinkUID,omitempty"`
+	ExpiresAt *time.Time `gorm:"index" json:"ExpiresAt,omitempty" yaml:"ExpiresAt,omitempty"`
 	Comment   string     `gorm:"size:512;" json:"Comment,omitempty" yaml:"Comment,omitempty"`
-	Perm      uint       `json:"Perm,omitempty" yaml:"Perm,omitempty"`
-	RefID     string     `gorm:"type:VARBINARY(16);" json:"-" yaml:"-"`
+	Perm      uint       `gorm:"size:32" json:"Perm,omitempty" yaml:"Perm,omitempty"`
+	RefID     string     `gorm:"type:bytes;size:16;" json:"-" yaml:"-"`
 	CreatedAt time.Time  `json:"CreatedAt" yaml:"-"`
 	UpdatedAt time.Time  `json:"UpdatedAt" yaml:"-"`
 }
@@ -126,6 +128,21 @@ func FindUserShares(userUid string) UserShares {
 	}
 
 	return found
+}
+
+// Expired checks if the share has passed its expiration time.
+func (m *UserShare) Expired() bool {
+	if m == nil || m.ExpiresAt == nil {
+		return false
+	}
+
+	return Now().After(*m.ExpiresAt)
+}
+
+// IssuedBy checks if the share was created by the specified link and is still within its expiration
+// time, which is what lets a caller re-present its token without a new redemption.
+func (m *UserShare) IssuedBy(link Link) bool {
+	return m != nil && m.LinkUID != "" && m.LinkUID == link.LinkUID && !m.Expired()
 }
 
 // HasID tests if the entity has a valid uid.

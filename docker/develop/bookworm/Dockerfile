@@ -1,7 +1,7 @@
 #### Base Image: Debian 12 (Bookworm)
 FROM debian:bookworm-slim
 
-# Copyright © 2018 - 2025 PhotoPrism UG. All rights reserved.
+# Copyright © 2018 - 2026 PhotoPrism UG. All rights reserved.
 #
 # Questions? Email us at hello@photoprism.app or visit our website to learn
 # more about our team, products and services: https://www.photoprism.app/
@@ -21,9 +21,22 @@ ARG TARGETARCH
 ARG BUILD_TAG
 
 # Set environment variables, see https://docs.photoprism.app/getting-started/config-options/.
-ENV PHOTOPRISM_ARCH=$TARGETARCH \
+ENV DO_NOT_TRACK=true \
+    GH_TELEMETRY=false \
+    DISABLE_TELEMETRY=1 \
+    ORT_DISABLE_TELEMETRY=1 \
+    DISABLE_ERROR_REPORTING=1 \
+    DISABLE_FEEDBACK_COMMAND=1 \
+    CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1 \
+    CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
+    DISABLE_AUTOUPDATER=1 \
+    NO_UPDATE_NOTIFIER=true \
+    NPM_CONFIG_AUDIT=false \
+    NPM_CONFIG_FUND=false \
+    NPM_CONFIG_UPDATE_NOTIFIER=false \
+    PHOTOPRISM_ARCH=$TARGETARCH \
+    PHOTOPRISM_CONTAINER="true" \
     DOCKER_TAG=$BUILD_TAG \
-    DOCKER_ENV="develop" \
     NODE_ENV="production" \
     PS1="\u@$BUILD_TAG:\w\$ " \
     PATH="/usr/local/sbin:/usr/sbin:/sbin:/usr/local/bin:/usr/bin:/bin:/scripts:/usr/local/go/bin:/go/bin:/opt/photoprism/bin" \
@@ -63,28 +76,29 @@ RUN echo 'APT::Acquire::Retries "3";' > /etc/apt/apt.conf.d/80retries && \
     && \
     apt-get -qq install \
         apt-utils pkg-config software-properties-common \
-        build-essential gcc g++ git gettext davfs2 chrpath apache2-utils \
+        build-essential gcc g++ git gettext davfs2 chrpath shellcheck apache2-utils \
         chromium chromium-driver chromium-sandbox firefox-esr \
         libx264-dev libx265-dev libvpx-dev libwebm-dev libpng-dev libxft-dev libyuv-dev libavcodec-dev \
         libc6-dev libhdf5-serial-dev libzmq3-dev libssl-dev libnss3 \
         libfreetype6 libfreetype6-dev libfontconfig1 libfontconfig1-dev fonts-roboto \
-        openssh-client bubblewrap \
+        openssh-client bubblewrap pandoc python3-bs4 python3-pygments python3-pil python3-lxml \
     && \
     /scripts/install-nodejs.sh && \
     /scripts/install-tensorflow.sh && \
     /scripts/install-onnx.sh && \
     /scripts/install-darktable.sh && \
-    echo "ALL ALL=(ALL) NOPASSWD:SETENV: ALL" >> /etc/sudoers.d/all && \
+    /scripts/install-sudoers.sh --develop && \
     mkdir -p /etc/skel/.config/go/telemetry && \
     echo 'off 2025-01-03' > '/etc/skel/.config/go/telemetry/mode' && \
     cp -r /etc/skel/.config /root/.config && \
     /scripts/install-go.sh && \
     /scripts/install-go-tools.sh && \
-    echo 'alias go=richgo ll="ls -alh"' >> /etc/skel/.bashrc && \
-    echo 'export PS1="\u@$DOCKER_TAG:\w\$ "' >> /etc/skel/.bashrc && \
-    echo 'export PATH="$PATH:$HOME/.local/bin"' >> /etc/skel/.bashrc && \
+    /scripts/install-hadolint.sh && \
+    /scripts/install-osv-scanner.sh && \
+    /scripts/install-gitleaks.sh && \
+    /scripts/install-bashrc.sh && \
+    echo 'export PATH="$PATH:$HOME/.local/bin"' >> /etc/bash.bashrc && \
     /scripts/install-dircolors.sh && \
-    cp /etc/skel/.bashrc /root/.bashrc && \
     cp /scripts/convert/policy.xml /etc/ImageMagick-6/policy.xml && \
     /scripts/create-users.sh && \
     install -d -m 0777 -o 1000 -g 1000 \
@@ -100,8 +114,6 @@ RUN echo 'APT::Acquire::Retries "3";' > /etc/apt/apt.conf.d/80retries && \
 
 # Download machine learning models and test data.
 RUN mkdir /tmp/photoprism && \
-    wget "https://dl.photoprism.app/tensorflow/nsfw.zip?${BUILD_TAG}" -O /tmp/photoprism/nsfw.zip && \
-    wget "https://dl.photoprism.app/tensorflow/nasnet.zip?${BUILD_TAG}" -O /tmp/photoprism/nasnet.zip && \
     wget "https://dl.photoprism.app/tensorflow/facenet.zip?${BUILD_TAG}" -O /tmp/photoprism/facenet.zip && \
     wget "https://dl.photoprism.app/qa/testdata.zip?${BUILD_TAG}" -O /tmp/photoprism/testdata.zip
 

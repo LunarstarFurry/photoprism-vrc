@@ -2,15 +2,14 @@ package photoprism
 
 import (
 	"bytes"
-	"errors"
 	"fmt"
 	"os/exec"
 	"path/filepath"
 	"time"
 
-	"github.com/photoprism/photoprism/internal/event"
 	"github.com/photoprism/photoprism/pkg/clean"
 	"github.com/photoprism/photoprism/pkg/fs"
+	"github.com/photoprism/photoprism/pkg/proc"
 )
 
 // FixJpeg tries to re-encode a broken JPEG and returns the cached image file.
@@ -51,9 +50,9 @@ func (w *Convert) FixJpeg(f *MediaFile, force bool) (*MediaFile, error) {
 	if err == nil && mediaFile.IsJpeg() {
 		if force && mediaFile.InSidecar() {
 			if err := mediaFile.Remove(); err != nil {
-				return mediaFile, fmt.Errorf("convert: failed removing %s (%s)", clean.Log(mediaFile.RootRelName()), err)
+				return mediaFile, fmt.Errorf("convert: failed removing re-encoded copy of %s (%w)", logName, err)
 			} else {
-				log.Infof("convert: replacing %s", clean.Log(mediaFile.RootRelName()))
+				log.Infof("convert: replacing re-encoded copy of %s", logName)
 			}
 		} else {
 			return mediaFile, nil
@@ -63,12 +62,7 @@ func (w *Convert) FixJpeg(f *MediaFile, force bool) (*MediaFile, error) {
 	fileName := f.RelName(w.conf.OriginalsPath())
 
 	// Publish file conversion event.
-	event.Publish("index.converting", event.Data{
-		"fileType": f.FileType(),
-		"fileName": fileName,
-		"baseName": filepath.Base(fileName),
-		"xmpName":  "",
-	})
+	publishConverting(f, fileName, "")
 
 	start := time.Now()
 
@@ -93,20 +87,21 @@ func (w *Convert) FixJpeg(f *MediaFile, force bool) (*MediaFile, error) {
 		fmt.Sprintf("LD_LIBRARY_PATH=%s", w.conf.CmdLibPath()),
 	}...)
 
-	log.Infof("convert: re-encoding %s to %s (%s)", logName, clean.Log(filepath.Base(cacheName)), filepath.Base(cmd.Path))
+	log.Infof("convert: re-encoding %s (%s)", logName, filepath.Base(cmd.Path))
 
 	// Log exact command for debugging in trace mode.
-	log.Trace(cmd.String())
+	log.Trace(clean.Cmd(cmd))
 
 	// Run convert command.
-	if err = cmd.Run(); err != nil {
-		if stderr.String() != "" {
-			err = errors.New(stderr.String())
+	if err = proc.Run(cmd, w.conf.ConvertTimeout()); err != nil {
+		if s := stderr.String(); s != "" {
+			err = fmt.Errorf("%w: %s", err, s)
 		}
 
-		log.Tracef("convert: %s (%s)", err, filepath.Base(cmd.Path))
+		LogConvertError(err, cmd, logName)
+		RemoveConvertOutput(cacheName, cmd)
 	} else if fs.FileExistsNotEmpty(cacheName) {
-		log.Infof("convert: %s created in %s (%s)", clean.Log(filepath.Base(cacheName)), time.Since(start), filepath.Base(cmd.Path))
+		log.Infof("convert: %s re-encoded in %s (%s)", logName, time.Since(start), filepath.Base(cmd.Path))
 	}
 
 	// Ok?

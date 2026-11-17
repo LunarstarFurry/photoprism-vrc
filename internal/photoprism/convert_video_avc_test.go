@@ -1,15 +1,23 @@
 package photoprism
 
 import (
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
+	"github.com/sirupsen/logrus"
+	logtest "github.com/sirupsen/logrus/hooks/test"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/photoprism/photoprism/internal/config"
 	"github.com/photoprism/photoprism/internal/ffmpeg/encode"
 	"github.com/photoprism/photoprism/pkg/fs"
+	"github.com/photoprism/photoprism/pkg/rnd"
 )
 
 func TestConvert_ToAvc(t *testing.T) {
@@ -41,6 +49,18 @@ func TestConvert_ToAvc(t *testing.T) {
 
 		t.Logf("video metadata: %+v", avcFile.MetaData())
 
+		oldTime := time.Unix(1, 0)
+		assert.NoError(t, os.Chtimes(outputName, oldTime, oldTime))
+
+		avcFile, err = convert.ToAvc(mf, encode.SoftwareAvc, false, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		info, err := os.Stat(avcFile.FileName())
+		assert.NoError(t, err)
+		assert.True(t, info.ModTime().After(oldTime), "forced conversion should replace the sidecar")
+
 		_ = os.Remove(outputName)
 	})
 	t.Run("Jpg", func(t *testing.T) {
@@ -64,6 +84,461 @@ func TestConvert_ToAvc(t *testing.T) {
 		assert.Error(t, err)
 		assert.Nil(t, avcFile)
 	})
+	t.Run("TypeMismatch", func(t *testing.T) {
+		conf := config.TestConfig()
+		convert := NewConvert(conf)
+
+		// The FFmpeg stub records each call, so the test can tell that no command ran.
+		marker := filepath.Join(t.TempDir(), "ffmpeg-called")
+		stub := filepath.Join(t.TempDir(), "ffmpeg")
+		require.NoError(t, os.WriteFile(stub, []byte("#!/bin/sh\ntouch "+transportShellQuote(marker)+"\nexit 1\n"), 0o700)) //nolint:gosec // G306: test executable
+		orig := conf.Options().FFmpegBin
+		conf.Options().FFmpegBin = stub
+		t.Cleanup(func() { conf.Options().FFmpegBin = orig })
+
+		for _, name := range []string{"clip.mp4", "clip.gif"} {
+			fileName := filepath.Join(t.TempDir(), name)
+			require.NoError(t, fs.Copy("testdata/flash.jpg", fileName, false))
+			mf, err := NewMediaFile(fileName)
+			require.NoError(t, err)
+			require.Error(t, mf.CheckType(), name)
+
+			avcFile, err := convert.ToAvc(mf, encode.SoftwareAvc, false, true)
+			assert.ErrorContains(t, err, "image/jpeg", name)
+			assert.Nil(t, avcFile, name)
+			assert.NoFileExists(t, marker, name)
+		}
+
+		// An existing transcode of a source that fails the check is not returned either.
+		folder := "avc-type-mismatch-" + rnd.Base36(8)
+		t.Cleanup(func() {
+			_ = os.RemoveAll(filepath.Join(conf.OriginalsPath(), folder))
+			_ = os.RemoveAll(filepath.Join(conf.SidecarPath(), folder))
+		})
+		fileName := filepath.Join(conf.OriginalsPath(), folder, "existing.mp4")
+		require.NoError(t, fs.MkdirAll(filepath.Dir(fileName)))
+		require.NoError(t, fs.Copy("testdata/flash.jpg", fileName, false))
+		mf, err := NewMediaFile(fileName)
+		require.NoError(t, err)
+		avcName, err := convert.AvcName(mf)
+		require.NoError(t, err)
+		require.NoError(t, fs.Copy(filepath.Join(conf.SamplesPath(), "blue-go-video.mp4"), avcName, true))
+		avcFile, err := convert.ToAvc(mf, encode.SoftwareAvc, false, false)
+		assert.ErrorContains(t, err, "image/jpeg")
+		assert.Nil(t, avcFile)
+	})
+}
+
+// fakeFFmpeg installs an FFmpeg script for the test that writes incomplete output and fails for commands
+// that match pattern, and runs the real binary for all others.
+func fakeFFmpeg(t *testing.T, conf *config.Config, pattern string) {
+	t.Helper()
+
+	realBin := conf.FFmpegBin()
+	fakeBin := filepath.Join(t.TempDir(), "ffmpeg")
+	script := fmt.Sprintf("#!/bin/sh\ncase \"$*\" in\n  *%s*) for last; do :; done; printf partial > \"$last\"; exit 1;;\nesac\nexec %s \"$@\"\n", pattern, transportShellQuote(realBin))
+
+	// #nosec G306 -- the script must be executable.
+	if err := os.WriteFile(fakeBin, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	orig := conf.Options().FFmpegBin
+	conf.Options().FFmpegBin = fakeBin
+	t.Cleanup(func() { conf.Options().FFmpegBin = orig })
+}
+
+func TestConvert_ToAvc_Failed(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping test in short mode.")
+	}
+
+	conf := config.TestConfig()
+
+	if !conf.FFmpegEnabled() {
+		t.Skip("FFmpeg must be available to transcode videos")
+	}
+
+	fileName := filepath.Join(conf.SamplesPath(), "gopher-video.mp4")
+	outputName := filepath.Join(conf.SidecarPath(), conf.SamplesPath(), "gopher-video.mp4.avc")
+
+	_ = os.Remove(outputName)
+	t.Cleanup(func() { _ = os.Remove(outputName) })
+
+	mf, err := NewMediaFile(fileName)
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("Software", func(t *testing.T) {
+		fakeFFmpeg(t, conf, "libx264")
+
+		avcFile, avcErr := NewConvert(conf).ToAvc(mf, encode.SoftwareAvc, false, false)
+
+		var exitErr *exec.ExitError
+		assert.ErrorAs(t, avcErr, &exitErr)
+		assert.Nil(t, avcFile)
+		assert.False(t, fs.FileExists(outputName))
+		assert.Empty(t, stagedAvcFiles(t, outputName))
+	})
+	t.Run("EmptyOutput", func(t *testing.T) {
+		stub := filepath.Join(t.TempDir(), "ffmpeg")
+		require.NoError(t, os.WriteFile(stub, []byte("#!/bin/sh\nexit 0\n"), 0o700)) //nolint:gosec // G306: test executable
+		orig := conf.Options().FFmpegBin
+		conf.Options().FFmpegBin = stub
+		t.Cleanup(func() { conf.Options().FFmpegBin = orig })
+
+		avcFile, avcErr := NewConvert(conf).ToAvc(mf, encode.SoftwareAvc, false, false)
+
+		assert.ErrorContains(t, avcErr, "empty output")
+		assert.Nil(t, avcFile)
+		assert.False(t, fs.FileExists(outputName))
+		assert.Empty(t, stagedAvcFiles(t, outputName))
+	})
+	t.Run("StagedOutput", func(t *testing.T) {
+		// The stub refuses to write the transcode name directly and runs FFmpeg for any other output.
+		realBin := conf.FFmpegBin()
+		stub := filepath.Join(t.TempDir(), "ffmpeg")
+		script := fmt.Sprintf("#!/bin/sh\nfor last; do :; done\n[ \"$last\" = %s ] && exit 9\nexec %s \"$@\"\n", transportShellQuote(outputName), transportShellQuote(realBin))
+		require.NoError(t, os.WriteFile(stub, []byte(script), 0o700)) //nolint:gosec // G306: test executable
+		orig := conf.Options().FFmpegBin
+		conf.Options().FFmpegBin = stub
+		t.Cleanup(func() {
+			conf.Options().FFmpegBin = orig
+			_ = os.Remove(outputName)
+		})
+
+		avcFile, avcErr := NewConvert(conf).ToAvc(mf, encode.SoftwareAvc, false, false)
+
+		require.NoError(t, avcErr)
+		require.NotNil(t, avcFile)
+		assert.Equal(t, outputName, avcFile.FileName())
+		assert.True(t, fs.FileExistsNotEmpty(outputName))
+		assert.Empty(t, stagedAvcFiles(t, outputName))
+	})
+	t.Run("Hardware", func(t *testing.T) {
+		fakeFFmpeg(t, conf, "h264_nvenc")
+
+		avcFile, avcErr := NewConvert(conf).ToAvc(mf, encode.NvidiaAvc, false, false)
+
+		require.NoError(t, avcErr)
+		require.NotNil(t, avcFile)
+		assert.Equal(t, outputName, avcFile.FileName())
+
+		// The software retry publishes a complete transcode; the hardware output stays staged and is removed.
+		assert.Greater(t, fs.FileSize(outputName), int64(len("partial")))
+		assert.Empty(t, stagedAvcFiles(t, outputName))
+	})
+	t.Run("ForcedHardwareRetry", func(t *testing.T) {
+		// The stub fails the hardware encoder after writing partial output, and fails the software
+		// retry if the staged output of the hardware attempt is still there.
+		realBin := conf.FFmpegBin()
+		stub := filepath.Join(t.TempDir(), "ffmpeg")
+		pattern := filepath.Join(filepath.Dir(outputName), "."+filepath.Base(outputName)+".*"+fs.ExtTmp+"*")
+		script := fmt.Sprintf("#!/bin/sh\nfor last; do :; done\ncase \"$*\" in\n  *h264_nvenc*) printf partial > \"$last\"; exit 1;;\n  *libx264*) [ \"$(ls -a %s 2>/dev/null | wc -l)\" -gt 1 ] && exit 7;;\nesac\nexec %s \"$@\"\n",
+			pattern, transportShellQuote(realBin))
+		require.NoError(t, os.WriteFile(stub, []byte(script), 0o700)) //nolint:gosec // G306: test executable
+		orig := conf.Options().FFmpegBin
+		conf.Options().FFmpegBin = stub
+		t.Cleanup(func() { conf.Options().FFmpegBin = orig })
+
+		require.NoError(t, fs.WriteString(outputName, "stale"))
+		oldTime := time.Now().Add(-time.Hour)
+		require.NoError(t, os.Chtimes(outputName, oldTime, oldTime))
+
+		avcFile, avcErr := NewConvert(conf).ToAvc(mf, encode.NvidiaAvc, false, true)
+
+		require.NoError(t, avcErr)
+		require.NotNil(t, avcFile)
+		assert.Greater(t, fs.FileSize(outputName), int64(len("stale")))
+		info, err := os.Stat(outputName)
+		require.NoError(t, err)
+		assert.True(t, info.ModTime().After(oldTime))
+		assert.Empty(t, stagedAvcFiles(t, outputName))
+	})
+	t.Run("PublishedMeanwhile", func(t *testing.T) {
+		// The stub publishes a transcode under the final name before it writes its own output.
+		_ = os.Remove(outputName)
+		realBin := conf.FFmpegBin()
+		other := filepath.Join(conf.SamplesPath(), "blue-go-video.mp4")
+		stub := filepath.Join(t.TempDir(), "ffmpeg")
+		script := fmt.Sprintf("#!/bin/sh\ncp %s %s\nexec %s \"$@\"\n", transportShellQuote(other), transportShellQuote(outputName), transportShellQuote(realBin))
+		require.NoError(t, os.WriteFile(stub, []byte(script), 0o700)) //nolint:gosec // G306: test executable
+		orig := conf.Options().FFmpegBin
+		conf.Options().FFmpegBin = stub
+		t.Cleanup(func() {
+			conf.Options().FFmpegBin = orig
+			_ = os.Remove(outputName)
+		})
+
+		avcFile, avcErr := NewConvert(conf).ToAvc(mf, encode.SoftwareAvc, false, false)
+
+		require.NoError(t, avcErr)
+		require.NotNil(t, avcFile)
+		assert.Equal(t, outputName, avcFile.FileName())
+		assert.Equal(t, fs.FileSize(other), fs.FileSize(outputName))
+		assert.Empty(t, stagedAvcFiles(t, outputName))
+	})
+	t.Run("DanglingLink", func(t *testing.T) {
+		_ = os.Remove(outputName)
+		marker := filepath.Join(t.TempDir(), "ffmpeg-called")
+		stub := filepath.Join(t.TempDir(), "ffmpeg")
+		require.NoError(t, os.WriteFile(stub, []byte("#!/bin/sh\ntouch "+transportShellQuote(marker)+"\nexit 1\n"), 0o700)) //nolint:gosec // G306: test executable
+		orig := conf.Options().FFmpegBin
+		conf.Options().FFmpegBin = stub
+		require.NoError(t, os.Symlink(filepath.Join(t.TempDir(), "missing.avc"), outputName))
+		t.Cleanup(func() {
+			conf.Options().FFmpegBin = orig
+			_ = os.Remove(outputName)
+		})
+
+		avcFile, avcErr := NewConvert(conf).ToAvc(mf, encode.SoftwareAvc, false, false)
+
+		assert.ErrorContains(t, avcErr, "cannot replace")
+		assert.Nil(t, avcFile)
+		assert.NoFileExists(t, marker)
+		assert.True(t, fs.IsSymlink(outputName))
+		assert.Empty(t, stagedAvcFiles(t, outputName))
+	})
+}
+
+// stagedAvcFiles returns the staged siblings of a transcode name that are left in its folder.
+func stagedAvcFiles(t *testing.T, avcName string) []string {
+	t.Helper()
+
+	matches, err := filepath.Glob(filepath.Join(filepath.Dir(avcName), "."+filepath.Base(avcName)+".*"+fs.ExtTmp+"*"))
+	require.NoError(t, err)
+
+	return matches
+}
+
+// transcodeFailures returns the levels of the logged transcoding failures of the encoder.
+func transcodeFailures(hook *logtest.Hook, encoder encode.Encoder) (levels []logrus.Level) {
+	for _, entry := range hook.AllEntries() {
+		if strings.HasPrefix(entry.Message, encoder.String()+": failed to transcode ") {
+			levels = append(levels, entry.Level)
+		}
+	}
+
+	return levels
+}
+
+func TestConvert_ToAvc_FallbackWarning(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping test in short mode.")
+	}
+
+	conf := config.TestConfig()
+
+	if !conf.FFmpegEnabled() {
+		t.Skip("FFmpeg must be available to transcode videos")
+	}
+
+	orig := log
+	logger, hook := logtest.NewNullLogger()
+	logger.SetLevel(logrus.TraceLevel)
+	log = logger
+	t.Cleanup(func() { log = orig })
+
+	resetTranscodeFallbacks()
+	t.Cleanup(resetTranscodeFallbacks)
+
+	outputName := filepath.Join(conf.SidecarPath(), conf.SamplesPath(), "gopher-video.mp4.avc")
+
+	_ = os.Remove(outputName)
+	t.Cleanup(func() { _ = os.Remove(outputName) })
+
+	mf, err := NewMediaFile(filepath.Join(conf.SamplesPath(), "gopher-video.mp4"))
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("Hardware", func(t *testing.T) {
+		fakeFFmpeg(t, conf, "h264_nvenc")
+		hook.Reset()
+
+		for range 2 {
+			avcFile, avcErr := NewConvert(conf).ToAvc(mf, encode.NvidiaAvc, false, true)
+			require.NoError(t, avcErr)
+			require.NotNil(t, avcFile)
+			assert.Greater(t, fs.FileSize(outputName), int64(len("partial")))
+		}
+
+		assert.Equal(t, []logrus.Level{logrus.WarnLevel, logrus.DebugLevel}, transcodeFailures(hook, encode.NvidiaAvc))
+		assert.Empty(t, transcodeFailures(hook, encode.SoftwareAvc))
+	})
+	t.Run("OtherEncoder", func(t *testing.T) {
+		fakeFFmpeg(t, conf, "h264_qsv")
+		firstTranscodeFallback(encode.NvidiaAvc)
+		hook.Reset()
+
+		for range 2 {
+			avcFile, avcErr := NewConvert(conf).ToAvc(mf, encode.IntelAvc, false, true)
+			require.NoError(t, avcErr)
+			require.NotNil(t, avcFile)
+		}
+
+		assert.Equal(t, []logrus.Level{logrus.WarnLevel, logrus.DebugLevel}, transcodeFailures(hook, encode.IntelAvc))
+	})
+	t.Run("Software", func(t *testing.T) {
+		fakeFFmpeg(t, conf, "libx264")
+		hook.Reset()
+
+		for range 2 {
+			avcFile, avcErr := NewConvert(conf).ToAvc(mf, encode.SoftwareAvc, false, true)
+			assert.Error(t, avcErr)
+			assert.Nil(t, avcFile)
+		}
+
+		assert.Equal(t, []logrus.Level{logrus.WarnLevel, logrus.WarnLevel}, transcodeFailures(hook, encode.SoftwareAvc))
+	})
+	t.Run("SoftwareRetry", func(t *testing.T) {
+		resetTranscodeFallbacks()
+		fakeFFmpeg(t, conf, "h264_nvenc*|*libx264")
+		hook.Reset()
+
+		for range 2 {
+			avcFile, avcErr := NewConvert(conf).ToAvc(mf, encode.NvidiaAvc, false, true)
+			assert.Error(t, avcErr)
+			assert.Nil(t, avcFile)
+		}
+
+		assert.Equal(t, []logrus.Level{logrus.WarnLevel, logrus.DebugLevel}, transcodeFailures(hook, encode.NvidiaAvc))
+		assert.Equal(t, []logrus.Level{logrus.WarnLevel, logrus.WarnLevel}, transcodeFailures(hook, encode.SoftwareAvc))
+	})
+	t.Run("Rearm", func(t *testing.T) {
+		resetTranscodeFallbacks()
+		hook.Reset()
+
+		// The script fails while the marker file exists and otherwise writes a result.
+		marker := filepath.Join(t.TempDir(), "fail")
+		fakeBin := filepath.Join(t.TempDir(), "ffmpeg")
+		script := fmt.Sprintf("#!/bin/sh\ncase \"$*\" in\n  *h264_nvenc*) for last; do :; done; if [ -e %s ]; then exit 1; fi; printf ok > \"$last\"; exit 0;;\nesac\nexec %s \"$@\"\n", transportShellQuote(marker), transportShellQuote(conf.FFmpegBin()))
+
+		// #nosec G306 -- the script must be executable.
+		require.NoError(t, os.WriteFile(fakeBin, []byte(script), 0o700))
+		require.NoError(t, os.WriteFile(marker, nil, fs.ModeFile))
+
+		orig := conf.Options().FFmpegBin
+		conf.Options().FFmpegBin = fakeBin
+		t.Cleanup(func() { conf.Options().FFmpegBin = orig })
+
+		transcode := func(fail bool) {
+			if fail {
+				require.NoError(t, os.WriteFile(marker, nil, fs.ModeFile))
+			} else {
+				require.NoError(t, os.Remove(marker))
+			}
+
+			avcFile, avcErr := NewConvert(conf).ToAvc(mf, encode.NvidiaAvc, false, true)
+			require.NoError(t, avcErr)
+			require.NotNil(t, avcFile)
+		}
+
+		transcode(true)
+		transcode(true)
+		transcode(false)
+		transcode(true)
+
+		assert.Equal(t, []logrus.Level{logrus.WarnLevel, logrus.DebugLevel, logrus.WarnLevel}, transcodeFailures(hook, encode.NvidiaAvc))
+	})
+	t.Run("Dewarp", func(t *testing.T) {
+		resetTranscodeFallbacks()
+		fakeFFmpeg(t, conf, "v360")
+		hook.Reset()
+
+		insv, insvErr := NewMediaFile("testdata/insta360.insv")
+		require.NoError(t, insvErr)
+
+		convert := NewConvert(conf)
+		insvName, nameErr := convert.avcName(insv)
+		require.NoError(t, nameErr)
+		t.Cleanup(func() { _ = os.Remove(insvName) })
+
+		avcFile, avcErr := convert.ToAvc(insv, encode.NvidiaAvc, false, true)
+		assert.Error(t, avcErr)
+		assert.Nil(t, avcFile)
+
+		// The dewarp runs in software, so it fails once and leaves the hardware warning unused.
+		assert.Empty(t, transcodeFailures(hook, encode.NvidiaAvc))
+		assert.Equal(t, []logrus.Level{logrus.WarnLevel}, transcodeFailures(hook, encode.SoftwareAvc))
+		assert.True(t, firstTranscodeFallback(encode.NvidiaAvc))
+	})
+}
+
+func TestConvert_ToAvc_FallbackPreset(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping test in short mode.")
+	}
+
+	conf := config.TestConfig()
+
+	if !conf.FFmpegEnabled() {
+		t.Skip("FFmpeg must be available to transcode videos")
+	}
+
+	resetTranscodeFallbacks()
+	t.Cleanup(resetTranscodeFallbacks)
+
+	// The wrapper records the arguments of every command and fails NVENC commands.
+	argsLog := filepath.Join(t.TempDir(), "args.log")
+	fakeBin := filepath.Join(t.TempDir(), "ffmpeg")
+	script := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$*\" >> %s\ncase \"$*\" in\n  *h264_nvenc*) exit 1;;\nesac\nexec %s \"$@\"\n", transportShellQuote(argsLog), transportShellQuote(conf.FFmpegBin()))
+
+	// #nosec G306 -- the script must be executable.
+	if err := os.WriteFile(fakeBin, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	origBin, origPreset := conf.Options().FFmpegBin, conf.Options().FFmpegPreset
+	conf.Options().FFmpegBin = fakeBin
+	t.Cleanup(func() {
+		conf.Options().FFmpegBin = origBin
+		conf.Options().FFmpegPreset = origPreset
+	})
+
+	outputName := filepath.Join(conf.SidecarPath(), conf.SamplesPath(), "gopher-video.mp4.avc")
+	t.Cleanup(func() { _ = os.Remove(outputName) })
+
+	mf, err := NewMediaFile(filepath.Join(conf.SamplesPath(), "gopher-video.mp4"))
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []struct{ preset, want string }{
+		{"p1", encode.PresetSuperFast},
+		{"p2", encode.PresetVeryFast},
+		{"p3", encode.PresetFaster},
+		{"p4", encode.PresetFast},
+		{"p5", encode.PresetMedium},
+		{"p6", encode.PresetSlow},
+		{"p7", encode.PresetSlower},
+		{" P6 ", encode.PresetSlow},
+		{"placebo", encode.PresetVerySlow},
+		{"9", encode.PresetVerySlow},
+		{"turbo", encode.PresetFast},
+	}
+
+	for _, c := range cases {
+		conf.Options().FFmpegPreset = c.preset
+		_ = os.Remove(argsLog)
+		_ = os.Remove(outputName)
+
+		avcFile, avcErr := NewConvert(conf).ToAvc(mf, encode.NvidiaAvc, false, true)
+		require.NoError(t, avcErr, c.preset)
+		require.NotNil(t, avcFile, c.preset)
+
+		args, readErr := os.ReadFile(argsLog) //nolint:gosec // test-owned temporary file
+		require.NoError(t, readErr, c.preset)
+		lines := strings.Split(strings.TrimSpace(string(args)), "\n")
+		require.Len(t, lines, 2, c.preset)
+		assert.Contains(t, lines[0], "-c:v h264_nvenc", c.preset)
+		assert.Contains(t, lines[1], "-c:v libx264", c.preset)
+		assert.Contains(t, lines[1], "-preset "+c.want+" ", c.preset)
+	}
 }
 
 func TestConvert_AvcBitrate(t *testing.T) {
@@ -81,7 +556,10 @@ func TestConvert_AvcBitrate(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		assert.Equal(t, "1M", convert.AvcBitrate(mf))
+		mf.width = 270
+		mf.height = 480
+
+		assert.Equal(t, "2M", convert.AvcBitrate(mf))
 	})
 	t.Run("Medium", func(t *testing.T) {
 		fileName := filepath.Join(conf.SamplesPath(), "gopher-video.mp4")
@@ -131,8 +609,68 @@ func TestConvert_AvcBitrate(t *testing.T) {
 
 		assert.Equal(t, "60M", convert.AvcBitrate(mf))
 	})
+	t.Run("UnknownSize", func(t *testing.T) {
+		assert.Equal(t, "60M", convert.AvcBitrate(nil))
+		assert.Equal(t, "60M", convert.AvcBitrate(&MediaFile{}))
+	})
+	t.Run("UnreadableSize", func(t *testing.T) {
+		fileName := filepath.Join(t.TempDir(), "unreadable.mp4")
+
+		if err := os.WriteFile(fileName, []byte("not a video"), fs.ModeFile); err != nil {
+			t.Fatal(err)
+		}
+
+		mf, err := NewMediaFile(fileName)
+
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		assert.Equal(t, -1, mf.Width())
+		assert.Equal(t, -1, mf.Height())
+		assert.Equal(t, "60M", convert.AvcBitrate(mf))
+	})
+	t.Run("OutputSize", func(t *testing.T) {
+		size := conf.Options().FFmpegSize
+		conf.Options().FFmpegSize = 1920
+		t.Cleanup(func() { conf.Options().FFmpegSize = size })
+
+		mf, err := NewMediaFile(filepath.Join(conf.SamplesPath(), "gopher-video.mp4"))
+
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		mf.width = 7680
+		mf.height = 4320
+
+		assert.Equal(t, "25M", convert.AvcBitrate(mf))
+
+		mf.width = 1 << 40
+		mf.height = 1 << 40
+
+		assert.Equal(t, "45M", convert.AvcBitrate(mf))
+	})
+	t.Run("NoBitrateLimit", func(t *testing.T) {
+		limit := conf.Options().FFmpegBitrate
+		conf.Options().FFmpegBitrate = encode.NoBitrateLimit
+		t.Cleanup(func() { conf.Options().FFmpegBitrate = limit })
+
+		mf, err := NewMediaFile(filepath.Join(conf.SamplesPath(), "gopher-video.mp4"))
+
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		mf.width = 4096
+		mf.height = 2160
+
+		assert.Equal(t, "107M", convert.AvcBitrate(mf))
+		assert.Equal(t, "8M", convert.AvcBitrate(nil))
+	})
 }
 
+// TestConvert_TranscodeToAvcCmd checks format and encoder routing.
 func TestConvert_TranscodeToAvcCmd(t *testing.T) {
 	conf := config.TestConfig()
 	convert := NewConvert(conf)
@@ -153,6 +691,27 @@ func TestConvert_TranscodeToAvcCmd(t *testing.T) {
 
 		assert.Contains(t, r.Path, "ffmpeg")
 		assert.Contains(t, r.Args, "mp4")
+		assert.NotContains(t, r.Args, "-coalesce")
+		assert.NotContains(t, r.Args, "-extent")
+	})
+	t.Run("Nvidia", func(t *testing.T) {
+		mf, err := NewMediaFile(filepath.Join(conf.SamplesPath(), "gopher-video.mp4"))
+
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		mf.width = 1920
+		mf.height = 1080
+
+		r, _, err := convert.TranscodeToAvcCmd(mf, "avc1", encode.NvidiaAvc)
+
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		assert.Contains(t, r.String(), " -c:v h264_nvenc ")
+		assert.Contains(t, r.String(), " -b:v 0 -maxrate 25M -tune hq ")
 	})
 	t.Run("Jpeg", func(t *testing.T) {
 		fileName := filepath.Join(conf.SamplesPath(), "cat_black.jpg")
@@ -185,7 +744,807 @@ func TestConvert_TranscodeToAvcCmd(t *testing.T) {
 
 		assert.False(t, useMutex)
 		assert.Contains(t, r.Path, "convert")
-		assert.Contains(t, r.Args, webpName)
-		assert.Contains(t, r.Args, avcName)
+		assert.Equal(t, []string{webpName, "-coalesce", "-background", "black", "-alpha", "remove", "-alpha", "off",
+			"-gravity", "northwest", "-extent", "500x314", "-define", "video:pixel-format=yuv420p", avcName}, r.Args[1:])
+	})
+	t.Run("Insv", func(t *testing.T) {
+		mf, err := NewMediaFile("testdata/insta360.insv")
+		if err != nil {
+			t.Fatal(err)
+		}
+		// A hardware encoder is requested, but .insv must be forced onto the software v360 path.
+		r, _, err := convert.TranscodeToAvcCmd(mf, "insta360.avc", encode.Encoder("intel"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		args := strings.Join(r.Args, " ")
+		assert.Contains(t, r.Path, "ffmpeg")
+		assert.Contains(t, args, "v360=input=dfisheye:output=e")
+		assert.NotContains(t, args, "roll=180")
+		assert.Contains(t, args, "libx264")
+	})
+	t.Run("OneRSInsv", func(t *testing.T) {
+		mf, err := NewMediaFile(oneRSInsvFixture(t, t.TempDir(), "camera.insv"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		r, _, err := convert.TranscodeToAvcCmd(mf, "camera.avc", encode.SoftwareAvc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		assert.Contains(t, strings.Join(r.Args, " "), "v360=input=dfisheye:output=e:ih_fov=190:iv_fov=190:roll=180")
+	})
+	t.Run("OneRSSquareInsv", func(t *testing.T) {
+		mf, err := NewMediaFile(oneRSInsvFixture(t, t.TempDir(), "camera.insv"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		mf.width = 3072
+		mf.height = 3072
+		r, _, err := convert.TranscodeToAvcCmd(mf, "camera.avc", encode.SoftwareAvc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Matched on the filter rather than the bare name: the arguments carry the input
+		// path, and a temp directory whose random suffix starts with 360 contains "v360".
+		assert.NotContains(t, strings.Join(r.Args, " "), "v360=")
+	})
+	t.Run("Insta360SeparateLensPair", func(t *testing.T) {
+		dir := t.TempDir()
+		leftName, rightName := filepath.Join(dir, insta360StackLeft), filepath.Join(dir, insta360StackRight)
+		writeInsta360StackMedia(t, conf, dir, insta360StackLeft)
+		writeInsta360StackMedia(t, conf, dir, insta360StackRight)
+		mf, err := NewMediaFile(leftName)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		r, useMutex, err := convert.TranscodeToAvcCmd(mf, "camera.avc", encode.Encoder("intel"))
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		args := strings.Join(r.Args, " ")
+		assert.True(t, useMutex)
+		assert.Contains(t, args, "-f mov -i "+leftName+" -f mov -i "+rightName)
+		assert.Contains(t, args, "hstack=inputs=2:shortest=1,v360=input=dfisheye:output=e")
+		assert.Contains(t, args, "-map [v] -map 0:a:0?")
+		assert.Contains(t, args, "libx264")
+	})
+	t.Run("Insta360RightLensTypeMismatch", func(t *testing.T) {
+		dir := t.TempDir()
+		leftName := filepath.Join(dir, insta360StackLeft)
+		writeInsta360StackMedia(t, conf, dir, insta360StackLeft)
+		rightName := filepath.Join(dir, insta360StackRight)
+		writeInsta360Photo(t, conf, rightName, "320x320")
+		mf, err := NewMediaFile(leftName)
+		require.NoError(t, err)
+		require.True(t, FindInsta360Capture(mf).ValidPair(), "the capture is still grouped")
+
+		r, _, err := convert.TranscodeToAvcCmd(mf, "camera.avc", encode.Encoder("intel"))
+		require.NoError(t, err)
+		args := strings.Join(r.Args, " ")
+		assert.Contains(t, args, "-i "+leftName)
+		assert.NotContains(t, args, rightName)
+		assert.NotContains(t, args, "v360")
+	})
+	t.Run("Mp4NoV360", func(t *testing.T) {
+		mf, err := NewMediaFile(filepath.Join(conf.SamplesPath(), "gopher-video.mp4"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		r, _, err := convert.TranscodeToAvcCmd(mf, "gopher.avc", encode.SoftwareAvc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		assert.NotContains(t, strings.Join(r.Args, " "), "v360=")
+	})
+}
+
+// writeFFmpegFixture muxes a short test clip into dir and returns its path, so format coverage
+// needs no binary media in the repository. A build that cannot mux the container cannot demux it
+// either, so this fails rather than skips and keeps that result visible.
+func writeFFmpegFixture(t *testing.T, bin, dir, name, format, codec string) string {
+	t.Helper()
+
+	fileName := filepath.Join(dir, name)
+
+	args := []string{
+		"-loglevel", "error", "-y",
+		"-f", "lavfi", "-i", "testsrc=size=128x96:rate=25:duration=1",
+		"-c:v", codec, "-b:v", "1M", "-f", format, fileName,
+	}
+
+	// #nosec G204 -- arguments are test constants.
+	if out, err := exec.Command(bin, args...).CombinedOutput(); err != nil {
+		t.Fatalf("FFmpeg cannot write %s: %s", name, strings.TrimSpace(string(out)))
+	}
+
+	return fileName
+}
+
+// TestConvert_TranscodeToAvcCmd_CamcorderFormats verifies that the camcorder and DVD container
+// extensions are classified as video and transcoded by FFmpeg without a format-specific branch.
+// Each fixture carries the payload its real extension does, down to the container.
+func TestConvert_TranscodeToAvcCmd_CamcorderFormats(t *testing.T) {
+	conf := config.TestConfig()
+
+	if !conf.FFmpegEnabled() {
+		t.Skip("FFmpeg must be available to transcode these formats")
+	}
+
+	convert := NewConvert(conf)
+	bin := conf.FFmpegBin()
+
+	cases := []struct {
+		name     string
+		fileName string
+		format   string
+		codec    string
+		fileType fs.Type
+	}{
+		{"Vob", "VTS_01_1.vob", "vob", "mpeg2video", fs.VideoMpeg},
+		{"Mod", "MOV001.mod", "vob", "mpeg2video", fs.VideoMpeg},
+		{"Tod", "MOV002.tod", "mpegts", "mpeg2video", fs.VideoM2TS},
+		{"DivX", "movie.divx", "avi", "mpeg4", fs.VideoAVI},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			srcName := writeFFmpegFixture(t, bin, dir, tc.fileName, tc.format, tc.codec)
+
+			mediaFile, err := NewMediaFile(srcName)
+			require.NoError(t, err)
+			require.Equal(t, tc.fileType, mediaFile.FileType())
+			require.True(t, mediaFile.IsVideo())
+			require.False(t, mediaFile.IsImage())
+
+			// Dimensions come from the ExifTool export the indexer writes before conversion.
+			if conf.ExifToolEnabled() {
+				require.NoError(t, mediaFile.CreateExifToolJson(convert))
+				require.NoError(t, mediaFile.ReadExifToolJson())
+				assert.Greater(t, mediaFile.Width(), 0)
+				assert.Greater(t, mediaFile.Height(), 0)
+			}
+
+			avcName := filepath.Join(dir, tc.fileName+".avc")
+			cmd, useMutex, err := convert.TranscodeToAvcCmd(mediaFile, avcName, encode.SoftwareAvc)
+			require.NoError(t, err)
+			require.NotNil(t, cmd)
+			assert.True(t, useMutex)
+			assert.Contains(t, cmd.Path, "ffmpeg")
+
+			out, err := cmd.CombinedOutput()
+			require.NoErrorf(t, err, "%s: %s", cmd.String(), strings.TrimSpace(string(out)))
+			require.True(t, fs.FileExistsNotEmpty(avcName))
+
+			avcFile, err := NewMediaFile(avcName)
+			require.NoError(t, err)
+			assert.True(t, avcFile.IsVideo())
+		})
+	}
+}
+
+// TestConvert_ToAvc_TransportStreamNotAvc verifies that the MP4 produced by the M2TS remux is
+// discarded when it holds no playable AVC, so only the transcoded sidecar remains.
+func TestConvert_ToAvc_TransportStreamNotAvc(t *testing.T) {
+	conf := config.TestConfig()
+
+	if !conf.FFmpegEnabled() {
+		t.Skip("FFmpeg must be available to transcode transport streams")
+	}
+
+	convert := NewConvert(conf)
+	dir := t.TempDir()
+	srcName := writeFFmpegFixture(t, conf.FFmpegBin(), dir, "MOV002.tod", "mpegts", "mpeg2video")
+
+	mediaFile, err := NewMediaFile(srcName)
+	require.NoError(t, err)
+	require.True(t, mediaFile.IsM2TS(), "a .tod must take the M2TS remux path")
+
+	avcFile, err := convert.ToAvc(mediaFile, encode.SoftwareAvc, false, false)
+	require.NoError(t, err)
+	require.NotNil(t, avcFile)
+	assert.Equal(t, fs.ExtAvc, fs.LowerExt(avcFile.FileName()))
+	assert.True(t, fs.FileExistsNotEmpty(avcFile.FileName()))
+
+	t.Cleanup(func() { _ = os.Remove(avcFile.FileName()) })
+
+	mp4Name, err := fs.FileName(srcName, conf.SidecarPath(), conf.OriginalsPath(), fs.ExtMp4)
+	require.NoError(t, err)
+	assert.NoFileExistsf(t, mp4Name, "the remuxed mp4 is never read again and must not be kept")
+}
+
+// TestConvert_ToAvc_TransportStreamAvc is the positive control for the removal above: a transport
+// stream that already carries AVC is remuxed into an MP4 the player can use, so that container is
+// returned and must survive rather than being transcoded again.
+func TestConvert_ToAvc_TransportStreamAvc(t *testing.T) {
+	conf := config.TestConfig()
+
+	if !conf.FFmpegEnabled() || !conf.ExifToolEnabled() {
+		t.Skip("FFmpeg and ExifTool must be available to remux transport streams")
+	}
+
+	convert := NewConvert(conf)
+	dir := t.TempDir()
+	srcName := writeFFmpegFixture(t, conf.FFmpegBin(), dir, "AVCHD001.m2ts", "mpegts", "libx264")
+
+	mediaFile, err := NewMediaFile(srcName)
+	require.NoError(t, err)
+	require.True(t, mediaFile.IsM2TS())
+
+	result, err := convert.ToAvc(mediaFile, encode.SoftwareAvc, false, false)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+
+	mp4Name, err := fs.FileName(srcName, conf.SidecarPath(), conf.OriginalsPath(), fs.ExtMp4)
+	require.NoError(t, err)
+
+	t.Cleanup(func() { _ = os.Remove(result.FileName()) })
+
+	assert.Equal(t, mp4Name, result.FileName(), "the remuxed mp4 is playable and must be returned")
+	assert.FileExistsf(t, mp4Name, "a usable remux must not be removed")
+}
+
+// TestConvert_ToAvc_TransportStreamReusesAvc verifies that a second request for an already
+// transcoded transport stream returns the cached result without converting the source again.
+// The source is replaced with content FFmpeg cannot read, so any conversion attempt would fail
+// and a returned file proves none was made.
+func TestConvert_ToAvc_TransportStreamReusesAvc(t *testing.T) {
+	c := config.TestConfig()
+
+	if !c.FFmpegEnabled() {
+		t.Skip("FFmpeg must be available to transcode transport streams")
+	}
+
+	convert := NewConvert(c)
+	dir := t.TempDir()
+	srcName := writeFFmpegFixture(t, c.FFmpegBin(), dir, "MOV004.tod", "mpegts", "mpeg2video")
+
+	first, err := NewMediaFile(srcName)
+	require.NoError(t, err)
+
+	avcFile, err := convert.ToAvc(first, encode.SoftwareAvc, false, false)
+	require.NoError(t, err)
+	require.NotNil(t, avcFile)
+
+	t.Cleanup(func() { _ = os.Remove(avcFile.FileName()) })
+
+	avcInfo, err := os.Stat(avcFile.FileName())
+	require.NoError(t, err)
+
+	mp4Name, err := fs.FileName(srcName, c.SidecarPath(), c.OriginalsPath(), fs.ExtMp4)
+	require.NoError(t, err)
+
+	// Any further conversion of the source would now fail, so reaching one is observable.
+	require.NoError(t, os.WriteFile(srcName, []byte("not a transport stream"), fs.ModeFile))
+
+	second, err := NewMediaFile(srcName)
+	require.NoError(t, err)
+
+	cached, err := convert.ToAvc(second, encode.SoftwareAvc, false, false)
+	require.NoError(t, err, "the cached result must be returned without converting again")
+	require.NotNil(t, cached)
+	assert.Equal(t, avcFile.FileName(), cached.FileName())
+	assert.NoFileExistsf(t, mp4Name, "no container conversion may run for a cached result")
+
+	cachedInfo, err := os.Stat(cached.FileName())
+	require.NoError(t, err)
+	assert.Equal(t, avcInfo.ModTime(), cachedInfo.ModTime(), "the cached file must not be rewritten")
+}
+
+// TestConvert_ToAvc_TransportStreamPrefersContainer verifies that a transport stream carrying AVC is
+// served from its own container, which the sidecar search must not take precedence over.
+func TestConvert_ToAvc_TransportStreamPrefersContainer(t *testing.T) {
+	c := config.TestConfig()
+
+	if !c.FFmpegEnabled() || !c.ExifToolEnabled() {
+		t.Skip("FFmpeg and ExifTool must be available to remux transport streams")
+	}
+
+	convert := NewConvert(c)
+	dir := t.TempDir()
+	srcName := writeFFmpegFixture(t, c.FFmpegBin(), dir, "AVCHD002.m2ts", "mpegts", "libx264")
+
+	// A linked AVC name, as a library that keeps its derivatives elsewhere would have.
+	linked := writeFFmpegFixture(t, c.FFmpegBin(), dir, "elsewhere.avc", "h264", "libx264")
+	avcName, err := fs.FileName(srcName, c.SidecarPath(), c.OriginalsPath(), fs.ExtAvc)
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(filepath.Dir(avcName), fs.ModeDir))
+	require.NoError(t, os.Symlink(linked, avcName))
+
+	t.Cleanup(func() { _ = os.Remove(avcName) })
+
+	mediaFile, err := NewMediaFile(srcName)
+	require.NoError(t, err)
+
+	result, err := convert.ToAvc(mediaFile, encode.SoftwareAvc, false, false)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+
+	mp4Name, err := fs.FileName(srcName, c.SidecarPath(), c.OriginalsPath(), fs.ExtMp4)
+	require.NoError(t, err)
+
+	t.Cleanup(func() { _ = os.Remove(mp4Name) })
+
+	assert.Equal(t, mp4Name, result.FileName(), "the container of the source must be preferred")
+}
+
+// TestConvert_ToAvc_TransportStreamReusesAvcBesideSource verifies that a transcoding result kept
+// next to the original suppresses a repeated conversion, since the sidecar search resolves it there
+// as well as under the sidecar path.
+func TestConvert_ToAvc_TransportStreamReusesAvcBesideSource(t *testing.T) {
+	c := config.TestConfig()
+
+	if !c.FFmpegEnabled() {
+		t.Skip("FFmpeg must be available to transcode transport streams")
+	}
+
+	convert := NewConvert(c)
+	dir := t.TempDir()
+	srcName := writeFFmpegFixture(t, c.FFmpegBin(), dir, "MOV007.tod", "mpegts", "mpeg2video")
+	besideName := writeFFmpegFixture(t, c.FFmpegBin(), dir, "MOV007.tod.avc", "h264", "libx264")
+
+	mp4Name, err := fs.FileName(srcName, c.SidecarPath(), c.OriginalsPath(), fs.ExtMp4)
+	require.NoError(t, err)
+
+	// Any conversion of the source would now fail, so reaching one is observable.
+	require.NoError(t, os.WriteFile(srcName, []byte("not a transport stream"), fs.ModeFile))
+
+	mediaFile, err := NewMediaFile(srcName)
+	require.NoError(t, err)
+
+	result, err := convert.ToAvc(mediaFile, encode.SoftwareAvc, false, false)
+	require.NoError(t, err, "the result beside the original must be reused without converting again")
+	require.NotNil(t, result)
+	assert.Equal(t, besideName, result.FileName())
+	assert.NoFileExistsf(t, mp4Name, "no container conversion may run for a cached result")
+}
+
+// TestConvert_ToAvc_TransportStreamKeepsLinkedMp4 verifies that a container name already taken by a
+// link is not published over. The name resolves to nothing, so a check that follows it reads as free.
+func TestConvert_ToAvc_TransportStreamKeepsLinkedMp4(t *testing.T) {
+	c := config.TestConfig()
+
+	if !c.FFmpegEnabled() || !c.ExifToolEnabled() {
+		t.Skip("FFmpeg and ExifTool must be available to remux transport streams")
+	}
+
+	convert := NewConvert(c)
+	dir := t.TempDir()
+	srcName := writeFFmpegFixture(t, c.FFmpegBin(), dir, "AVCHD004.m2ts", "mpegts", "libx264")
+
+	mp4Name, err := fs.FileName(srcName, c.SidecarPath(), c.OriginalsPath(), fs.ExtMp4)
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(filepath.Dir(mp4Name), fs.ModeDir))
+
+	target := filepath.Join(dir, "absent.mp4")
+	require.NoError(t, os.Symlink(target, mp4Name))
+
+	t.Cleanup(func() { _ = os.Remove(mp4Name) })
+
+	mediaFile, err := NewMediaFile(srcName)
+	require.NoError(t, err)
+
+	result, err := convert.ToAvc(mediaFile, encode.SoftwareAvc, false, false)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+
+	t.Cleanup(func() { _ = os.Remove(result.FileName()) })
+
+	info, err := os.Lstat(mp4Name)
+	require.NoError(t, err)
+	assert.NotZero(t, info.Mode()&os.ModeSymlink, "the name must still hold the link")
+	assert.NoFileExists(t, target, "the link target must not be created")
+	assert.NotEqual(t, mp4Name, result.FileName(), "the conversion must not publish under a taken name")
+}
+
+// TestConvert_ToAvc_TransportStreamKeepsForeignMp4 verifies that a container already present under
+// the remux name is left alone. Such a file belongs to whoever wrote it, and is not this call's to
+// delete.
+func TestConvert_ToAvc_TransportStreamKeepsForeignMp4(t *testing.T) {
+	conf := config.TestConfig()
+
+	if !conf.FFmpegEnabled() {
+		t.Skip("FFmpeg must be available to transcode transport streams")
+	}
+
+	convert := NewConvert(conf)
+	dir := t.TempDir()
+	srcName := writeFFmpegFixture(t, conf.FFmpegBin(), dir, "MOV003.tod", "mpegts", "mpeg2video")
+
+	mp4Name, err := fs.FileName(srcName, conf.SidecarPath(), conf.OriginalsPath(), fs.ExtMp4)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(mp4Name, []byte("not this call's file"), fs.ModeFile))
+
+	t.Cleanup(func() { _ = os.Remove(mp4Name) })
+
+	mediaFile, err := NewMediaFile(srcName)
+	require.NoError(t, err)
+
+	avcFile, err := convert.ToAvc(mediaFile, encode.SoftwareAvc, false, false)
+	require.NoError(t, err)
+	require.NotNil(t, avcFile)
+
+	t.Cleanup(func() { _ = os.Remove(avcFile.FileName()) })
+
+	assert.FileExistsf(t, mp4Name, "a file the call did not create must not be removed")
+
+	// #nosec G304 -- the path is built by the test from its own temp directory.
+	kept, err := os.ReadFile(mp4Name)
+	require.NoError(t, err)
+	assert.Equal(t, "not this call's file", string(kept))
+}
+
+func TestConvert_avcContainer(t *testing.T) {
+	c := config.TestConfig()
+
+	if !c.FFmpegEnabled() || !c.ExifToolEnabled() {
+		t.Skip("FFmpeg and ExifTool must be available to read container metadata")
+	}
+
+	convert := NewConvert(c)
+	dir := t.TempDir()
+
+	t.Run("Avc", func(t *testing.T) {
+		fileName := writeFFmpegFixture(t, c.FFmpegBin(), dir, "avc.mp4", "mp4", "libx264")
+
+		result := convert.avcContainer(fileName, "avc.mp4")
+
+		require.NotNil(t, result)
+		assert.Equal(t, fileName, result.FileName())
+	})
+	t.Run("NotAvc", func(t *testing.T) {
+		fileName := writeFFmpegFixture(t, c.FFmpegBin(), dir, "mpeg2.mp4", "mp4", "mpeg2video")
+
+		assert.Nil(t, convert.avcContainer(fileName, "mpeg2.mp4"))
+	})
+	t.Run("Missing", func(t *testing.T) {
+		assert.Nil(t, convert.avcContainer(filepath.Join(dir, "absent.mp4"), "absent.mp4"))
+	})
+}
+
+func TestConvert_avcFromM2TS(t *testing.T) {
+	c := config.TestConfig()
+
+	if !c.FFmpegEnabled() || !c.ExifToolEnabled() {
+		t.Skip("FFmpeg and ExifTool must be available to remux transport streams")
+	}
+
+	convert := NewConvert(c)
+
+	t.Run("PublishesAvcContainer", func(t *testing.T) {
+		dir := t.TempDir()
+		srcName := writeFFmpegFixture(t, c.FFmpegBin(), dir, "AVCHD003.m2ts", "mpegts", "libx264")
+
+		f, err := NewMediaFile(srcName)
+		require.NoError(t, err)
+
+		mp4Name, err := fs.FileName(srcName, c.SidecarPath(), c.OriginalsPath(), fs.ExtMp4)
+		require.NoError(t, err)
+
+		t.Cleanup(func() { _ = os.Remove(mp4Name) })
+
+		result, err := convert.avcFromM2TS(f, "AVCHD003.m2ts")
+		require.NoError(t, err)
+		require.NotNil(t, result)
+		assert.Equal(t, mp4Name, result.FileName())
+		assert.True(t, fs.FileExistsNotEmpty(mp4Name))
+
+		// Nothing may be left beside the published container.
+		assert.Empty(t, stagedSiblings(t, filepath.Dir(mp4Name)))
+	})
+	t.Run("PublishesNothingWithoutAvc", func(t *testing.T) {
+		dir := t.TempDir()
+		srcName := writeFFmpegFixture(t, c.FFmpegBin(), dir, "MOV005.tod", "mpegts", "mpeg2video")
+
+		f, err := NewMediaFile(srcName)
+		require.NoError(t, err)
+
+		mp4Name, err := fs.FileName(srcName, c.SidecarPath(), c.OriginalsPath(), fs.ExtMp4)
+		require.NoError(t, err)
+
+		result, err := convert.avcFromM2TS(f, "MOV005.tod")
+		require.NoError(t, err)
+		assert.Nil(t, result, "a container without AVC must send the caller on to the transcoder")
+		assert.NoFileExists(t, mp4Name, "a container that is not kept must never reach the shared name")
+		assert.Empty(t, stagedSiblings(t, filepath.Dir(mp4Name)))
+	})
+	t.Run("UnreadableSource", func(t *testing.T) {
+		dir := t.TempDir()
+		srcName := filepath.Join(dir, "MOV006.tod")
+		require.NoError(t, os.WriteFile(srcName, []byte("not a transport stream"), fs.ModeFile))
+
+		f, err := NewMediaFile(srcName)
+		require.NoError(t, err)
+
+		mp4Name, err := fs.FileName(srcName, c.SidecarPath(), c.OriginalsPath(), fs.ExtMp4)
+		require.NoError(t, err)
+
+		result, err := convert.avcFromM2TS(f, "MOV006.tod")
+		assert.Error(t, err)
+		assert.Nil(t, result)
+		assert.NoFileExists(t, mp4Name)
+		assert.Empty(t, stagedSiblings(t, filepath.Dir(mp4Name)))
+	})
+}
+
+// stagedSiblings returns the hidden working files left in a directory.
+func stagedSiblings(t *testing.T, dir string) []string {
+	t.Helper()
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+
+	var names []string
+
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".") {
+			names = append(names, entry.Name())
+		}
+	}
+
+	return names
+}
+
+// newAvcNameFolder creates a new folder below the originals path and returns its name relative to it.
+func newAvcNameFolder(t *testing.T, conf *config.Config) string {
+	t.Helper()
+
+	dir, err := os.MkdirTemp(conf.OriginalsPath(), "avc-name-")
+	require.NoError(t, err)
+	folder := filepath.Base(dir)
+	t.Cleanup(func() {
+		_ = os.RemoveAll(dir)
+		_ = os.RemoveAll(filepath.Join(conf.SidecarPath(), folder))
+	})
+
+	return folder
+}
+
+func TestConvert_AvcName(t *testing.T) {
+	conf := Config()
+	convert := NewConvert(conf)
+
+	t.Run("Video", func(t *testing.T) {
+		folder := newAvcNameFolder(t, conf)
+		src := filepath.Join(conf.OriginalsPath(), folder, "clip.avi")
+		require.NoError(t, fs.Copy(filepath.Join(conf.SamplesPath(), "gopher-video.mp4"), src, false))
+		mf, err := NewMediaFile(src)
+		require.NoError(t, err)
+
+		avcName, err := convert.AvcName(mf)
+		require.NoError(t, err)
+		assert.Equal(t, filepath.Join(conf.SidecarPath(), folder, "clip.avi.avc"), avcName)
+		assert.NoDirExists(t, filepath.Join(conf.SidecarPath(), folder))
+	})
+	t.Run("AnimatedImage", func(t *testing.T) {
+		folder := newAvcNameFolder(t, conf)
+		// The frame count is read from the JSON sidecar.
+		for _, ext := range []string{".gif", fs.ExtJson} {
+			require.NoError(t, fs.Copy("testdata/2018-04-12 19_24_49"+ext, filepath.Join(conf.OriginalsPath(), folder, "2018-04-12 19_24_49"+ext), false))
+		}
+
+		mf, err := NewMediaFile(filepath.Join(conf.OriginalsPath(), folder, "2018-04-12 19_24_49.gif"))
+		require.NoError(t, err)
+		require.True(t, mf.IsAnimatedImage())
+
+		avcName, err := convert.AvcName(mf)
+		require.NoError(t, err)
+		assert.Equal(t, filepath.Join(conf.SidecarPath(), folder, "2018-04-12 19_24_49.gif.mp4"), avcName)
+	})
+	t.Run("Nil", func(t *testing.T) {
+		_, err := convert.AvcName(nil)
+		assert.Error(t, err)
+	})
+}
+
+func TestConvert_FindAvc(t *testing.T) {
+	conf := Config()
+	convert := NewConvert(conf)
+
+	// newClip copies a sample video to a new folder as clip.avi and returns it with the folder name.
+	newClip := func(t *testing.T) (*MediaFile, string) {
+		folder := newAvcNameFolder(t, conf)
+		src := filepath.Join(conf.OriginalsPath(), folder, "clip.avi")
+		require.NoError(t, fs.Copy(filepath.Join(conf.SamplesPath(), "gopher-video.mp4"), src, false))
+		mf, err := NewMediaFile(src)
+		require.NoError(t, err)
+		return mf, folder
+	}
+
+	t.Run("None", func(t *testing.T) {
+		mf, _ := newClip(t)
+		assert.Equal(t, "", convert.FindAvc(mf))
+	})
+	t.Run("Sidecar", func(t *testing.T) {
+		mf, folder := newClip(t)
+		want := filepath.Join(conf.SidecarPath(), folder, "clip.avi.avc")
+		require.NoError(t, fs.WriteString(want, "avc"))
+		assert.Equal(t, want, convert.FindAvc(mf))
+
+		// The converter writes a new transcode to the name it finds.
+		avcName, err := convert.AvcName(mf)
+		require.NoError(t, err)
+		assert.Equal(t, want, avcName)
+	})
+	t.Run("Originals", func(t *testing.T) {
+		mf, folder := newClip(t)
+		want := filepath.Join(conf.OriginalsPath(), folder, "clip.avc")
+		require.NoError(t, fs.WriteString(want, "avc"))
+		assert.Equal(t, want, convert.FindAvc(mf))
+	})
+	t.Run("Nil", func(t *testing.T) {
+		assert.Equal(t, "", convert.FindAvc(nil))
+	})
+	t.Run("TransportStream", func(t *testing.T) {
+		if !conf.FFmpegEnabled() || !conf.ExifToolEnabled() {
+			t.Skip("FFmpeg and ExifTool must be available to remux transport streams")
+		}
+
+		srcName := writeFFmpegFixture(t, conf.FFmpegBin(), t.TempDir(), "AVCHD003.m2ts", "mpegts", "libx264")
+		mf, err := NewMediaFile(srcName)
+		require.NoError(t, err)
+		require.True(t, mf.IsM2TS())
+
+		// Looking for an output does not create its folder.
+		mp4Name, err := fs.FilePath(srcName, conf.SidecarPath(), conf.OriginalsPath(), fs.ExtMp4)
+		require.NoError(t, err)
+		assert.Equal(t, "", convert.FindAvc(mf))
+		assert.NoDirExists(t, filepath.Dir(mp4Name))
+
+		result, err := convert.ToAvc(mf, encode.SoftwareAvc, false, false)
+		require.NoError(t, err)
+		require.NotNil(t, result)
+		t.Cleanup(func() { _ = os.RemoveAll(filepath.Dir(mp4Name)) })
+
+		// The remuxed container is what ToAvc returns again, so it counts as the existing transcode.
+		assert.Equal(t, mp4Name, result.FileName())
+		assert.Equal(t, mp4Name, convert.FindAvc(mf))
+	})
+}
+
+func TestAvcSource(t *testing.T) {
+	t.Run("InvalidLeft", func(t *testing.T) {
+		// A left lens whose content does not match its extension is not used as source.
+		folder := "insta360avcinvalidleft"
+		cfg := newInsta360StackConfig(t, folder, false)
+		dir := filepath.Join(cfg.OriginalsPath(), folder)
+		writeInsta360CaptureFile(t, dir, insta360StackLeft, "testdata/flash.jpg")
+		writeInsta360StackMedia(t, cfg, dir, insta360StackRight)
+
+		right, err := NewMediaFile(filepath.Join(dir, insta360StackRight))
+		require.NoError(t, err)
+		assert.Same(t, right, avcSource(right))
+	})
+	t.Run("Video", func(t *testing.T) {
+		conf := Config()
+		mf, err := NewMediaFile(filepath.Join(conf.SamplesPath(), "gopher-video.mp4"))
+		require.NoError(t, err)
+		assert.Same(t, mf, avcSource(mf))
+	})
+	t.Run("Insta360Pair", func(t *testing.T) {
+		folder := "insta360avcsource"
+		cfg := newInsta360StackConfig(t, folder, false)
+		dir := filepath.Join(cfg.OriginalsPath(), folder)
+		writeInsta360StackMedia(t, cfg, dir, insta360StackLeft)
+		writeInsta360StackMedia(t, cfg, dir, insta360StackRight)
+
+		right, err := NewMediaFile(filepath.Join(dir, insta360StackRight))
+		require.NoError(t, err)
+
+		// The right lens is transcoded as part of the capture, under the name of the left lens.
+		assert.Equal(t, filepath.Join(dir, insta360StackLeft), avcSource(right).FileName())
+
+		convert := NewConvert(cfg)
+		avcName, err := convert.AvcName(right)
+		require.NoError(t, err)
+		assert.Equal(t, filepath.Join(cfg.SidecarPath(), folder, insta360StackLeft+fs.ExtAvc), avcName)
+
+		// The transcode of the left lens is found for the right lens as well.
+		assert.Equal(t, "", convert.FindAvc(right))
+		require.NoError(t, fs.WriteString(avcName, "avc"))
+		assert.Equal(t, avcName, convert.FindAvc(right))
+	})
+}
+
+func TestAvcType(t *testing.T) {
+	t.Run("Video", func(t *testing.T) {
+		mf, err := NewMediaFile(filepath.Join(Config().SamplesPath(), "gopher-video.mp4"))
+		require.NoError(t, err)
+		assert.Equal(t, fs.VideoAvc, avcType(mf))
+	})
+	t.Run("AnimatedImage", func(t *testing.T) {
+		mf, err := NewMediaFile("testdata/2018-04-12 19_24_49.gif")
+		require.NoError(t, err)
+		assert.Equal(t, fs.VideoMp4, avcType(mf))
+	})
+}
+
+func TestConvert_findAvc(t *testing.T) {
+	conf := Config()
+	convert := NewConvert(conf)
+
+	t.Run("Sidecar", func(t *testing.T) {
+		folder := newAvcNameFolder(t, conf)
+		src := filepath.Join(conf.OriginalsPath(), folder, "clip.avi")
+		require.NoError(t, fs.Copy(filepath.Join(conf.SamplesPath(), "gopher-video.mp4"), src, false))
+		mf, err := NewMediaFile(src)
+		require.NoError(t, err)
+
+		assert.Equal(t, "", convert.findAvc(mf))
+		want := filepath.Join(conf.SidecarPath(), folder, "clip.avi.avc")
+		require.NoError(t, fs.WriteString(want, "avc"))
+		assert.Equal(t, want, convert.findAvc(mf))
+	})
+}
+
+func TestConvert_avcName(t *testing.T) {
+	conf := Config()
+	convert := NewConvert(conf)
+
+	t.Run("Video", func(t *testing.T) {
+		mf, err := NewMediaFile(filepath.Join(conf.SamplesPath(), "gopher-video.mp4"))
+		require.NoError(t, err)
+
+		avcName, err := convert.avcName(mf)
+		require.NoError(t, err)
+		assert.Equal(t, filepath.Join(conf.SidecarPath(), conf.SamplesPath(), "gopher-video.mp4.avc"), avcName)
+	})
+	t.Run("EmptyName", func(t *testing.T) {
+		_, err := convert.avcName(&MediaFile{})
+		assert.Error(t, err)
+	})
+}
+
+func TestReplaceableAvc(t *testing.T) {
+	dir := t.TempDir()
+	t.Run("Missing", func(t *testing.T) {
+		assert.True(t, replaceableAvc(filepath.Join(dir, "missing.avc")))
+	})
+	t.Run("Empty", func(t *testing.T) {
+		fileName := filepath.Join(dir, "empty.avc")
+		require.NoError(t, os.WriteFile(fileName, nil, fs.ModeFile)) //nolint:gosec // test writes a temp file
+		assert.True(t, replaceableAvc(fileName))
+	})
+	t.Run("NotEmpty", func(t *testing.T) {
+		fileName := filepath.Join(dir, "full.avc")
+		require.NoError(t, os.WriteFile(fileName, []byte("x"), fs.ModeFile)) //nolint:gosec // test writes a temp file
+		assert.False(t, replaceableAvc(fileName))
+	})
+	t.Run("DanglingLink", func(t *testing.T) {
+		fileName := filepath.Join(dir, "dangling.avc")
+		require.NoError(t, os.Symlink(filepath.Join(dir, "nowhere"), fileName))
+		assert.False(t, replaceableAvc(fileName))
+	})
+	t.Run("Directory", func(t *testing.T) {
+		fileName := filepath.Join(dir, "folder.avc")
+		require.NoError(t, os.Mkdir(fileName, fs.ModeDir))
+		assert.False(t, replaceableAvc(fileName))
+	})
+}
+
+func TestRegularNotEmpty(t *testing.T) {
+	dir := t.TempDir()
+	full := filepath.Join(dir, "full.avc")
+	require.NoError(t, os.WriteFile(full, []byte("x"), fs.ModeFile)) //nolint:gosec // test writes a temp file
+	t.Run("Regular", func(t *testing.T) {
+		assert.True(t, regularNotEmpty(full))
+	})
+	t.Run("Empty", func(t *testing.T) {
+		fileName := filepath.Join(dir, "empty.avc")
+		require.NoError(t, os.WriteFile(fileName, nil, fs.ModeFile)) //nolint:gosec // test writes a temp file
+		assert.False(t, regularNotEmpty(fileName))
+	})
+	t.Run("Link", func(t *testing.T) {
+		fileName := filepath.Join(dir, "link.avc")
+		require.NoError(t, os.Symlink(full, fileName))
+		assert.False(t, regularNotEmpty(fileName))
+	})
+	t.Run("Missing", func(t *testing.T) {
+		assert.False(t, regularNotEmpty(filepath.Join(dir, "missing.avc")))
 	})
 }

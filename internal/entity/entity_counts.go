@@ -3,20 +3,77 @@ package entity
 import (
 	"fmt"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/dustin/go-humanize/english"
-	"github.com/jinzhu/gorm"
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 
 	"github.com/photoprism/photoprism/internal/mutex"
 	"github.com/photoprism/photoprism/pkg/clean"
+	"github.com/photoprism/photoprism/pkg/dsn"
 	"github.com/photoprism/photoprism/pkg/time/unix"
 )
 
 // countsBusy indicates whether count refresh jobs are currently running.
 var countsBusy = atomic.Bool{}
 
+// asyncWG tracks in-flight goroutines spawned by entity package async
+// helpers (UpdateCountsAsync and the cover-update goroutine in
+// internal/entity/query). Callers that intend to tear down the database
+// connection — most importantly config.CloseDb during test shutdown —
+// should invoke WaitForAsyncJobs first to avoid a nil-DB race in the
+// running goroutines.
+var asyncWG sync.WaitGroup
+
+// AsyncJobAdd registers a new in-flight async job spawned by the entity
+// package or its sub-packages. It must be paired with AsyncJobDone in a
+// deferred call so the WaitForAsyncJobs helper can drain reliably.
+func AsyncJobAdd() {
+	asyncWG.Add(1)
+}
+
+// AsyncJobDone marks an in-flight async job as finished. Always pair it
+// with a preceding AsyncJobAdd via defer so panics in the goroutine still
+// release the WaitGroup.
+func AsyncJobDone() {
+	asyncWG.Done()
+}
+
+// WaitForAsyncJobs blocks until every async job started via the package's
+// async helpers has finished. Callers that need to safely tear down the
+// database connection should invoke this before nilling the provider.
+func WaitForAsyncJobs() {
+	asyncWG.Wait()
+}
+
+// WaitForAsyncJobsTimeout waits up to timeout for async jobs to finish and reports
+// whether they all drained; a non-positive timeout waits indefinitely. It bounds
+// database teardown so a wedged background job cannot hang shutdown forever.
+func WaitForAsyncJobsTimeout(timeout time.Duration) bool {
+	if timeout <= 0 {
+		asyncWG.Wait()
+		return true
+	}
+
+	done := make(chan struct{})
+
+	go func() {
+		asyncWG.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		return true
+	case <-time.After(timeout):
+		return false
+	}
+}
+
+// LabelPhotoCount reports how many photos carry a label.
 type LabelPhotoCount struct {
 	LabelID    int
 	PhotoCount int
@@ -30,23 +87,16 @@ func LabelCounts() LabelPhotoCounts {
 	result := LabelPhotoCounts{}
 
 	if err := UnscopedDb().Raw(`
-		SELECT label_id, SUM(photo_count) AS photo_count FROM (
-			SELECT l.id AS label_id, COUNT(*) AS photo_count FROM labels l
-		JOIN photos_labels pl ON pl.label_id = l.id
-		JOIN photos ph ON pl.photo_id = ph.id
-		WHERE pl.uncertainty < 100
-		AND ph.photo_quality > -1
-		AND ph.photo_private = 0
-		AND ph.deleted_at IS NULL GROUP BY l.id
-		UNION ALL
-		SELECT l.id AS label_id, COUNT(*) AS photo_count FROM labels l
-		JOIN categories c ON c.category_id = l.id
-		JOIN photos_labels pl ON pl.label_id = c.label_id
-		JOIN photos ph ON pl.photo_id = ph.id
-		WHERE pl.uncertainty < 100
-		AND ph.photo_quality > -1
-		AND ph.photo_private = 0
-		AND ph.deleted_at IS NULL GROUP BY l.id) counts GROUP BY label_id
+		SELECT p2.label_id, COUNT(DISTINCT p2.photo_id) AS photo_count FROM (
+			SELECT pl.label_id AS label_id, ph.id AS photo_id FROM photos ph
+				JOIN photos_labels pl ON pl.photo_id = ph.id AND pl.uncertainty < 100
+			WHERE ph.photo_quality > -1 AND ph.photo_private = FALSE AND ph.deleted_at IS NULL
+			UNION
+			SELECT c.category_id AS label_id, ph.id AS photo_id FROM photos ph
+				JOIN photos_labels pl ON pl.photo_id = ph.id AND pl.uncertainty < 100
+				JOIN categories c ON c.label_id = pl.label_id
+			WHERE ph.photo_quality > -1 AND ph.photo_private = FALSE AND ph.deleted_at IS NULL
+		) p2 GROUP BY p2.label_id
 		`).Scan(&result).Error; err != nil {
 		log.Errorf("label-count: %s", err.Error())
 	}
@@ -62,11 +112,11 @@ func UpdatePlacesCounts() (err error) {
 	start := time.Now()
 
 	// Update places.
-	res := Db().Table("places").
+	res := Db().Table("places").Where("1 = 1").
 		UpdateColumn("photo_count", gorm.Expr("(SELECT COUNT(*) FROM photos p "+
 			"WHERE places.id = p.place_id "+
 			"AND p.photo_quality > -1 "+
-			"AND p.photo_private = 0 "+
+			"AND p.photo_private = FALSE "+
 			"AND p.deleted_at IS NULL)"))
 
 	if res.Error != nil {
@@ -89,13 +139,13 @@ func UpdateSubjectCounts(public bool) (err error) {
 
 	subjTable := Subject{}.TableName()
 
-	var photosJoin *gorm.SqlExpr
+	var photosJoin clause.Expr
 
 	// Count people tagged on private pictures?
 	// see https://github.com/photoprism/photoprism/issues/4238
 	// and https://github.com/photoprism/photoprism/issues/2570#issuecomment-1231690056
 	if public {
-		photosJoin = gorm.Expr("p.id = f.photo_id AND p.deleted_at IS NULL AND p.photo_private = 0")
+		photosJoin = gorm.Expr("p.id = f.photo_id AND p.deleted_at IS NULL AND p.photo_private = FALSE")
 	} else {
 		photosJoin = gorm.Expr("p.id = f.photo_id AND p.deleted_at IS NULL")
 	}
@@ -103,36 +153,50 @@ func UpdateSubjectCounts(public bool) (err error) {
 	condition := gorm.Expr("subj_type = ?", SubjPerson)
 
 	switch DbDialect() {
-	case MySQL:
+	case dsn.DialectMySQL:
 		res = Db().Exec(`UPDATE ? LEFT JOIN (
 		SELECT m.subj_uid, COUNT(DISTINCT f.id) AS subj_files, COUNT(DISTINCT f.photo_id) AS subj_photos
 			FROM files f
 			JOIN photos p ON ?			    
 			JOIN markers m ON f.file_uid = m.file_uid AND m.subj_uid IS NOT NULL AND m.subj_uid <> '' AND m.subj_uid IS NOT NULL
-			WHERE m.marker_invalid = 0 AND f.deleted_at IS NULL GROUP BY m.subj_uid
+			WHERE m.marker_invalid = FALSE AND f.deleted_at IS NULL GROUP BY m.subj_uid
 		) b ON b.subj_uid = subjects.subj_uid
 		SET subjects.file_count = CASE WHEN b.subj_files IS NULL THEN 0 ELSE b.subj_files END, 
 			subjects.photo_count = CASE WHEN b.subj_photos IS NULL THEN 0 ELSE b.subj_photos END
 		WHERE ?`, gorm.Expr(subjTable), photosJoin, condition)
-	case SQLite3:
+	case dsn.DialectSQLite:
 		// Update files count.
-		res = Db().Table(subjTable).
+		res = Db().Table(subjTable).Where(condition).
 			UpdateColumn("file_count", gorm.Expr("(SELECT COUNT(DISTINCT f.id)"+
 				" FROM files f JOIN photos p ON ?"+
 				" JOIN markers m ON f.file_uid = m.file_uid AND m.subj_uid = subjects.subj_uid"+
-				" WHERE m.marker_invalid = 0 AND f.deleted_at IS NULL) WHERE ?", photosJoin, condition))
+				" WHERE m.marker_invalid = FALSE AND f.deleted_at IS NULL)", photosJoin))
 
 		// Update photo count.
 		if res.Error != nil {
 			return res.Error
-		} else {
-			photosRes := Db().Table(subjTable).
-				UpdateColumn("photo_count", gorm.Expr("(SELECT COUNT(DISTINCT f.photo_id)"+
-					" FROM files f JOIN photos p ON ?"+
-					" JOIN markers m ON f.file_uid = m.file_uid AND m.subj_uid = subjects.subj_uid"+
-					" WHERE m.marker_invalid = 0 AND f.deleted_at IS NULL) WHERE ?", photosJoin, condition))
-			res.RowsAffected += photosRes.RowsAffected
 		}
+		photosRes := Db().Table(subjTable).Where(condition).
+			UpdateColumn("photo_count", gorm.Expr("(SELECT COUNT(DISTINCT f.photo_id)"+
+				" FROM files f JOIN photos p ON ?"+
+				" JOIN markers m ON f.file_uid = m.file_uid AND m.subj_uid = subjects.subj_uid"+
+				" WHERE m.marker_invalid = FALSE AND f.deleted_at IS NULL)", photosJoin))
+		if photosRes.Error != nil {
+			return photosRes.Error
+		}
+		res.RowsAffected += photosRes.RowsAffected
+	case dsn.DialectPostgreSQL:
+		res = Db().Exec(`UPDATE ? SET file_count = COALESCE(b.subj_files, 0), photo_count = COALESCE(b.subj_photos, 0)
+		FROM ? s LEFT JOIN (
+		SELECT m.subj_uid, COUNT(DISTINCT f.id) AS subj_files, COUNT(DISTINCT f.photo_id) AS subj_photos
+			FROM files f
+			JOIN photos p ON ?
+			JOIN markers m ON f.file_uid = m.file_uid AND m.subj_uid IS NOT NULL AND m.subj_uid <> ''
+			WHERE m.marker_invalid = FALSE AND f.deleted_at IS NULL GROUP BY m.subj_uid
+		) b ON b.subj_uid = s.subj_uid
+		WHERE s.subj_uid = subjects.subj_uid AND subjects.subj_type = ?
+		AND (subjects.file_count IS DISTINCT FROM COALESCE(b.subj_files, 0) OR subjects.photo_count IS DISTINCT FROM COALESCE(b.subj_photos, 0))`,
+			gorm.Expr(subjTable), gorm.Expr(subjTable), photosJoin, SubjPerson)
 	default:
 		return fmt.Errorf("sql: unsupported dialect %s", DbDialect())
 	}
@@ -187,41 +251,58 @@ func UpdateLabelCounts() (err error) {
 
 	start := time.Now()
 	var res *gorm.DB
-	if IsDialect(MySQL) {
-		res = Db().Exec(`UPDATE labels LEFT JOIN (
+	if IsDialect(dsn.DialectMySQL) {
+		if err = RetryDeadlock("update label counts", func() error {
+			res = Db().Exec(`UPDATE labels LEFT JOIN (
 		SELECT p2.label_id, COUNT(DISTINCT photo_id) AS label_photos FROM (
 			SELECT pl.label_id as label_id, p.id AS photo_id FROM photos p
 				JOIN photos_labels pl ON pl.photo_id = p.id AND pl.uncertainty < 100
-			WHERE p.photo_quality > -1 AND p.photo_private = 0 AND p.deleted_at IS NULL
+			WHERE p.photo_quality > -1 AND p.photo_private = FALSE AND p.deleted_at IS NULL
 			UNION
 			SELECT c.category_id as label_id, p.id AS photo_id FROM photos p
 				JOIN photos_labels pl ON pl.photo_id = p.id AND pl.uncertainty < 100
 				JOIN categories c ON c.label_id = pl.label_id
-			WHERE p.photo_quality > -1 AND p.photo_private = 0 AND p.deleted_at IS NULL
+			WHERE p.photo_quality > -1 AND p.photo_private = FALSE AND p.deleted_at IS NULL
 			) p2 GROUP BY p2.label_id
 		) b ON b.label_id = labels.id
 		SET photo_count = CASE WHEN b.label_photos IS NULL THEN 0 ELSE b.label_photos END`)
-	} else if IsDialect(SQLite3) {
-		res = Db().
-			Table("labels").
-			UpdateColumn("photo_count",
-				gorm.Expr(`(SELECT photo_count FROM (SELECT label_id, SUM(photo_count) AS photo_count FROM (
-				SELECT l.id AS label_id, COUNT(*) AS photo_count FROM labels l
-					JOIN photos_labels pl ON pl.label_id = l.id
-					JOIN photos ph ON pl.photo_id = ph.id
-					WHERE pl.uncertainty < 100
-					AND ph.photo_quality > -1
-					AND ph.photo_private = 0
-					AND ph.deleted_at IS NULL GROUP BY l.id
-					UNION ALL
-					SELECT l.id AS label_id, COUNT(*) AS photo_count FROM labels l
-					JOIN categories c ON c.category_id = l.id
-					JOIN photos_labels pl ON pl.label_id = c.label_id
-					JOIN photos ph ON pl.photo_id = ph.id
-					WHERE pl.uncertainty < 100
-					AND ph.photo_quality > -1
-					AND ph.photo_private = 0
-					AND ph.deleted_at IS NULL GROUP BY l.id) counts GROUP BY label_id) label_counts WHERE label_id = labels.id)`))
+			return res.Error
+		}); err != nil {
+			return err
+		}
+	} else if IsDialect(dsn.DialectSQLite) {
+		res = Db().Exec(`UPDATE labels SET photo_count = COALESCE((SELECT b.label_photos FROM (
+		SELECT p2.label_id, COUNT(DISTINCT p2.photo_id) AS label_photos FROM (
+			SELECT pl.label_id AS label_id, p.id AS photo_id FROM photos p
+				JOIN photos_labels pl ON pl.photo_id = p.id AND pl.uncertainty < 100
+			WHERE p.photo_quality > -1 AND p.photo_private = FALSE AND p.deleted_at IS NULL
+			UNION
+			SELECT c.category_id AS label_id, p.id AS photo_id FROM photos p
+				JOIN photos_labels pl ON pl.photo_id = p.id AND pl.uncertainty < 100
+				JOIN categories c ON c.label_id = pl.label_id
+			WHERE p.photo_quality > -1 AND p.photo_private = FALSE AND p.deleted_at IS NULL
+			) p2 GROUP BY p2.label_id
+		) b WHERE b.label_id = labels.id), 0)`)
+	} else if IsDialect(dsn.DialectPostgreSQL) {
+		if err = RetryDeadlock("update label counts", func() error {
+			res = Db().Exec(`UPDATE labels SET photo_count = COALESCE(b.label_photos, 0)
+		FROM labels l LEFT JOIN (
+		SELECT p2.label_id, COUNT(DISTINCT photo_id) AS label_photos FROM (
+			SELECT pl.label_id as label_id, p.id AS photo_id FROM photos p
+				JOIN photos_labels pl ON pl.photo_id = p.id AND pl.uncertainty < 100
+			WHERE p.photo_quality > -1 AND p.photo_private = FALSE AND p.deleted_at IS NULL
+			UNION
+			SELECT c.category_id as label_id, p.id AS photo_id FROM photos p
+				JOIN photos_labels pl ON pl.photo_id = p.id AND pl.uncertainty < 100
+				JOIN categories c ON c.label_id = pl.label_id
+			WHERE p.photo_quality > -1 AND p.photo_private = FALSE AND p.deleted_at IS NULL
+			) p2 GROUP BY p2.label_id
+		) b ON b.label_id = l.id
+		WHERE l.id = labels.id AND labels.photo_count IS DISTINCT FROM COALESCE(b.label_photos, 0)`)
+			return res.Error
+		}); err != nil {
+			return err
+		}
 	} else {
 		return fmt.Errorf("sql: unsupported dialect %s", DbDialect())
 	}
@@ -236,17 +317,32 @@ func UpdateLabelCounts() (err error) {
 	return nil
 }
 
-// UpdateCountsAsync runs UpdateCounts in a go routine
-// and logs the returned error, if any, as a warning.
+// UpdateCountsAsync runs UpdateCounts in a goroutine and logs the
+// returned error, if any, as a warning. The launched goroutine is
+// registered with the package WaitGroup (via AsyncJobAdd / AsyncJobDone)
+// so config.CloseDb can drain in-flight work via WaitForAsyncJobs before
+// tearing down the database connection. A deferred recover guards against
+// any future shutdown race producing a process-killing panic instead of
+// a clean log line.
 func UpdateCountsAsync() {
+	AsyncJobAdd()
 	go func() {
+		defer AsyncJobDone()
+		defer func() {
+			if r := recover(); r != nil {
+				log.Errorf("index: recovered from panic in UpdateCountsAsync (%v)", r)
+			}
+		}()
 		if err := UpdateCounts(); err != nil {
 			log.Warnf("index: %s (update counts)", clean.Error(err))
 		}
 	}()
 }
 
-// UpdateCounts updates precalculated photo and file counts.
+// UpdateCounts updates precalculated photo and file counts. It returns
+// nil without doing any work when the entity database provider has been
+// torn down (e.g. during test shutdown), so a stray async invocation
+// after CloseDb does not panic on a nil dialect lookup.
 func UpdateCounts() (err error) {
 	if !countsBusy.CompareAndSwap(false, true) {
 		log.Debugf("index: skipped updating counts because it is already in progress")
@@ -254,6 +350,11 @@ func UpdateCounts() (err error) {
 	}
 
 	defer countsBusy.Store(false)
+
+	if Db() == nil {
+		log.Debugf("index: skipped updating counts because database is not connected")
+		return nil
+	}
 
 	log.Debug("index: updating counts")
 
@@ -289,13 +390,13 @@ func UpdateCounts() (err error) {
 	default:
 		if err = UnscopedDb().Exec(`UPDATE albums SET deleted_at = ? WHERE album_type=? AND id NOT IN (
 		SELECT a.id FROM albums a JOIN photos p ON a.album_month = MONTH(p.taken_at) AND a.album_year = YEAR(p.taken_at)
-		AND p.deleted_at IS NULL AND p.photo_quality > -1 AND p.photo_private = 0 WHERE album_type=? GROUP BY a.id)`,
+		AND p.deleted_at IS NULL AND p.photo_quality > -1 AND p.photo_private = FALSE WHERE album_type=? GROUP BY a.id)`,
 			TimeStamp(), AlbumMonth, AlbumMonth).Error; err != nil {
 			return err
 		}
 		if err = UnscopedDb().Exec(`UPDATE albums SET deleted_at = NULL WHERE album_type=? AND id IN (
 		SELECT a.id FROM albums a JOIN photos p ON a.album_month = MONTH(p.taken_at) AND a.album_year = YEAR(p.taken_at)
-		AND p.deleted_at IS NULL AND p.photo_quality > -1 AND p.photo_private = 0 WHERE album_type=? GROUP BY a.id)`,
+		AND p.deleted_at IS NULL AND p.photo_quality > -1 AND p.photo_private = FALSE WHERE album_type=? GROUP BY a.id)`,
 			AlbumMonth, AlbumMonth).Error; err != nil {
 			return err
 		}

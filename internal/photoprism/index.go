@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
+	"sort"
 	"sync"
 	"time"
 
@@ -17,7 +18,9 @@ import (
 	"github.com/photoprism/photoprism/internal/mutex"
 	"github.com/photoprism/photoprism/pkg/clean"
 	"github.com/photoprism/photoprism/pkg/fs"
+	"github.com/photoprism/photoprism/pkg/fs/disk"
 	"github.com/photoprism/photoprism/pkg/i18n"
+	"github.com/photoprism/photoprism/pkg/log/status"
 	"github.com/photoprism/photoprism/pkg/media"
 )
 
@@ -57,9 +60,44 @@ func (ind *Index) thumbPath() string {
 	return ind.conf.ThumbCachePath()
 }
 
+// forgetReplacedPreview evicts a sidecar preview rewritten by a forced conversion from the file cache,
+// so the same run indexes it even if its whole-second time is unchanged.
+func (ind *Index) forgetReplacedPreview(img *MediaFile) {
+	if img != nil && img.InSidecar() {
+		ind.files.Remove(img.RootRelName(), img.Root())
+	}
+}
+
 // Cancel stops the current indexing operation.
 func (ind *Index) Cancel() {
 	mutex.IndexWorker.Cancel()
+}
+
+// storageLow reports whether the storage path is too full to start or continue an index run.
+func (ind *Index) storageLow() bool {
+	_, low, err := ind.conf.StorageLow()
+
+	if err != nil || !low {
+		return false
+	}
+
+	// Do not leak server internals like the size of the storage volume.
+	log.Errorf("index: available storage is below the minimum threshold")
+	event.ErrorMsg(i18n.ErrInsufficientStorage)
+	return true
+}
+
+// abortInsufficientStorage logs the insufficient-storage cause once and cancels the run so the
+// directory walk stops, instead of failing every remaining file with a generic preview error.
+// It is called from worker goroutines when a write leaf reports status.ErrInsufficientStorage.
+func (ind *Index) abortInsufficientStorage() {
+	if mutex.IndexWorker.Canceled() {
+		return
+	}
+
+	log.Errorf("index: available storage is below the minimum threshold")
+	event.ErrorMsg(i18n.ErrInsufficientStorage)
+	ind.Cancel()
 }
 
 // Start indexes media files in the originals folder according to the provided options.
@@ -79,14 +117,38 @@ func (ind *Index) Start(o IndexOptions) (found fs.Done, updated int) {
 		return found, updated
 	}
 
+	// Checked here rather than per caller, so the API, the CLI and the workers all inherit it.
+	// A marker this run adds is written in the model the migration is moving away from, and the
+	// finalize compares the identity set against a snapshot - a new named marker rolls it back.
+	if held := ind.conf.FacesLocked(); held != "" {
+		log.Infof("index: waiting for the %s to complete", held)
+		return found, updated
+	}
+
+	// Indexing continues after it completed, but its target is recorded in "options.yml" and not
+	// loaded here, so the markers this run adds wait for a restart to receive their vectors.
+	ind.conf.CheckFaceModelSuperseded()
+
 	originalsPath := ind.originalsPath()
-	optionsPath := filepath.Join(originalsPath, o.Path)
+	optionsPath, resolveErr := ResolveIndexPath(originalsPath, o.Path)
+
+	if resolveErr != nil {
+		event.Error(fmt.Sprintf("index: %s", clean.Error(resolveErr)))
+		return found, updated
+	}
 
 	if !fs.PathExists(optionsPath) {
-		event.Error(fmt.Sprintf("index: directory %s not found", clean.Log(optionsPath)))
+		event.Error(fmt.Sprintf("index: directory %s not found", clean.Log(displayFolder(optionsPath, originalsPath))))
 		return found, updated
 	} else if fs.DirIsEmpty(originalsPath) {
 		event.InfoMsg(i18n.ErrOriginalsEmpty)
+		return found, updated
+	}
+
+	// Reset the cached disk usage so a freshly freed disk is detected immediately.
+	disk.FlushFree()
+
+	if ind.storageLow() {
 		return found, updated
 	}
 
@@ -96,6 +158,7 @@ func (ind *Index) Start(o IndexOptions) (found fs.Done, updated int) {
 	}
 
 	defer mutex.IndexWorker.Stop()
+	defer flushUnportable("index")
 
 	jobs := make(chan IndexJob)
 
@@ -131,11 +194,87 @@ func (ind *Index) Start(o IndexOptions) (found fs.Done, updated int) {
 	}
 
 	ignore.Log = func(fileName string) {
-		log.Infof(`index: ignored "%s"`, fs.RelName(fileName, originalsPath))
+		log.Infof(`index: ignored "%s"`, clean.Log(fs.RelName(fileName, originalsPath)))
 	}
+
+	// enqueueRelated queues unprocessed related files as one indexing job.
+	enqueueRelated := func(mf *MediaFile) {
+		related, relErr := mf.RelatedFiles(ind.conf.Settings().StackSequences())
+
+		if relErr != nil {
+			log.Warnf("index: %s", relErr)
+			return
+		}
+
+		// Related files whose names are not portable are not indexed.
+		related = PortableRelated(related, mf, func(f *MediaFile) {
+			o.FaceRegeneration.addSkipped(f.FileName())
+			warnUnportable("index", entity.RootOriginals, f.RootRelName(), "index it")
+		})
+
+		// Main media file is required to proceed.
+		if related.Main == nil {
+			return
+		}
+
+		var files MediaFiles
+		skip := false
+
+		// Check related files.
+		for _, f := range related.Files {
+			if found[f.FileName()].Processed() {
+				// Ignore already processed files.
+				continue
+			} else {
+				fileSize, limitErr := f.ExceedsBytes(o.ByteLimit)
+
+				switch {
+				case fileSize == 0 || ind.files.Indexed(f.RootRelName(), f.Root(), f.ModTime(), o.Rescan):
+					// Flag file as found but not processed.
+					found[f.FileName()] = fs.Found
+					continue
+				case limitErr == nil:
+					// Add to file list.
+					files = append(files, f)
+				case related.Main.FileName() != f.FileName():
+					// Sidecar file is too large, ignore.
+					log.Infof("index: %s", limitErr)
+				default:
+					// Main file is too large, skip all.
+					log.Warnf("index: %s", limitErr)
+					skip = true
+				}
+			}
+
+			found[f.FileName()] = fs.Processed
+		}
+
+		found[mf.FileName()] = fs.Processed
+
+		// Skip if main file is too large or there are no files left to index.
+		if skip || len(files) == 0 {
+			return
+		}
+
+		updated += len(files)
+		related.Files = files
+
+		jobs <- IndexJob{
+			FileName: mf.FileName(),
+			Related:  related,
+			IndexOpt: o,
+			Ind:      ind,
+		}
+	}
+
+	changedXmpMainFiles := make(map[string]struct{})
 
 	err := godirwalk.Walk(optionsPath, &godirwalk.Options{
 		ErrorCallback: func(fileName string, err error) godirwalk.ErrorAction {
+			if errors.Is(err, status.ErrCanceled) || errors.Is(err, status.ErrInsufficientStorage) {
+				return godirwalk.Halt
+			}
+
 			return godirwalk.SkipNode
 		},
 		Callback: func(fileName string, info *godirwalk.Dirent) error {
@@ -146,24 +285,50 @@ func (ind *Index) Start(o IndexOptions) (found fs.Done, updated int) {
 			}()
 
 			if mutex.IndexWorker.Canceled() {
-				return errors.New("canceled")
+				return status.ErrCanceled
+			}
+
+			// Stop the walk if storage drops below the threshold mid-scan.
+			if ind.storageLow() {
+				ind.Cancel()
+				return status.ErrInsufficientStorage
 			}
 
 			isDir, _ := info.IsDirOrSymlinkToDir()
 			isSymlink := info.IsSymlink()
 			relName := fs.RelName(fileName, originalsPath)
 
+			wasFound := found[fileName].Exists()
+
 			// Skip directories and known files.
 			if skip, result := fs.SkipWalk(fileName, isDir, isSymlink, found, ignore); skip {
+				// A regeneration reports what the index was set to skip rather than failing on it.
+				if !wasFound && !isDir && media.MainFile(fileName) {
+					o.FaceRegeneration.addSkipped(fileName)
+				} else if !wasFound && errors.Is(result, filepath.SkipDir) {
+					o.FaceRegeneration.addSkippedDir(fileName)
+				}
+
 				if !isDir {
 					return result
 				}
 
 				if !errors.Is(result, filepath.SkipDir) {
+					// A folder whose name is not portable is skipped with its contents, and not recorded as walked,
+					// so a folder reached under another name is still indexed under that name.
+					if p := skipUnportableDir(found, fileName, relName, isSymlink); p != "" {
+						if !wasFound {
+							o.FaceRegeneration.addSkippedDir(fileName)
+						}
+
+						warnUnportable("index", entity.RootOriginals, p, "index it")
+						return filepath.SkipDir
+					}
+
 					folder := entity.NewFolder(entity.RootOriginals, relName, fs.ModTime(fileName))
 
-					if err := folder.Create(); err == nil {
-						log.Infof("index: added folder /%s", folder.Path)
+					if _, created, err := entity.FirstOrCreateFolder(&folder); err == nil && created && folder.Path != "" {
+						log.Infof("index: added folder /%s", clean.Log(folder.Path))
 					}
 				}
 
@@ -175,7 +340,45 @@ func (ind *Index) Start(o IndexOptions) (found fs.Done, updated int) {
 				return result
 			}
 
+			// A file whose name is not portable is skipped.
+			if !clean.PortableName(filepath.Base(fileName)) {
+				if !wasFound {
+					o.FaceRegeneration.addSkipped(fileName)
+				}
+
+				warnUnportable("index", entity.RootOriginals, relName, "index it")
+				return nil
+			}
+
 			found[fileName] = fs.Found
+
+			// Defer changed XMP sidecars until all main files have been visited. On a forced
+			// rescan every main file is reindexed and re-reads its sidecar, so the per-sidecar
+			// stat and main-file lookup are skipped here to avoid redundant work at scale.
+			if fs.FileType(fileName) == fs.SidecarXMP {
+				if !o.Rescan && !ind.files.Indexed(relName, entity.RootOriginals, fs.ModTime(fileName), o.Rescan) {
+					if mainRel := ind.mainForSidecar(relName); mainRel != "" {
+						changedXmpMainFiles[mainRel] = struct{}{}
+					}
+				}
+
+				return nil
+			}
+
+			// A new LRV proxy queues the video it belongs to, since it is only indexed with that video.
+			if fs.FileType(fileName) == fs.VideoLrv {
+				if !ind.files.Indexed(relName, entity.RootOriginals, fs.ModTime(fileName), o.Rescan) {
+					if proxy, proxyErr := NewMediaFile(fileName); proxyErr == nil {
+						if partnerName := insta360ProxyPartner(proxy); partnerName != "" && !ignore.Ignore(partnerName) {
+							if partner, partnerErr := NewMediaFile(partnerName); partnerErr == nil {
+								enqueueRelated(partner)
+							}
+						}
+					}
+				}
+
+				return nil
+			}
 
 			if !media.MainFile(fileName) {
 				return nil
@@ -207,6 +410,7 @@ func (ind *Index) Start(o IndexOptions) (found fs.Done, updated int) {
 			// Skip RAW image?
 			if mf.IsRaw() && skipRaw {
 				log.Infof("index: skipped raw %s", clean.Log(mf.RootRelName()))
+				o.FaceRegeneration.addSkipped(fileName)
 				return nil
 			}
 
@@ -222,68 +426,7 @@ func (ind *Index) Start(o IndexOptions) (found fs.Done, updated int) {
 				log.Warnf("index: %s", err)
 			}
 
-			// Find related files to index.
-			related, err := mf.RelatedFiles(ind.conf.Settings().StackSequences())
-
-			if err != nil {
-				log.Warnf("index: %s", err)
-				return nil
-			}
-
-			var files MediaFiles
-
-			// Main media file is required to proceed.
-			if related.Main == nil {
-				return nil
-			}
-
-			skip := false
-
-			// Check related files.
-			for _, f := range related.Files {
-				if found[f.FileName()].Processed() {
-					// Ignore already processed files.
-					continue
-				} else {
-					fileSize, limitErr := f.ExceedsBytes(o.ByteLimit)
-
-					switch {
-					case fileSize == 0 || ind.files.Indexed(f.RootRelName(), f.Root(), f.ModTime(), o.Rescan):
-						// Flag file as found but not processed.
-						found[f.FileName()] = fs.Found
-						continue
-					case limitErr == nil:
-						// Add to file list.
-						files = append(files, f)
-					case related.Main.FileName() != f.FileName():
-						// Sidecar file is too large, ignore.
-						log.Infof("index: %s", limitErr)
-					default:
-						// Main file is too large, skip all.
-						log.Warnf("index: %s", limitErr)
-						skip = true
-					}
-				}
-
-				found[f.FileName()] = fs.Processed
-			}
-
-			found[fileName] = fs.Processed
-
-			// Skip if main file is too large or there are no files left to index.
-			if skip || len(files) == 0 {
-				return nil
-			}
-
-			updated += len(files)
-			related.Files = files
-
-			jobs <- IndexJob{
-				FileName: mf.FileName(),
-				Related:  related,
-				IndexOpt: o,
-				Ind:      ind,
-			}
+			enqueueRelated(mf)
 
 			return nil
 		},
@@ -291,12 +434,37 @@ func (ind *Index) Start(o IndexOptions) (found fs.Done, updated int) {
 		FollowSymbolicLinks: true,
 	})
 
+	// Queue sidecar-triggered jobs only after a complete, successful walk.
+	if err == nil && !mutex.IndexWorker.Canceled() {
+		mainFiles := make([]string, 0, len(changedXmpMainFiles))
+
+		for mainRel := range changedXmpMainFiles {
+			mainFiles = append(mainFiles, mainRel)
+		}
+
+		sort.Strings(mainFiles)
+
+		for _, mainRel := range mainFiles {
+			if mutex.IndexWorker.Canceled() {
+				break
+			}
+
+			mainAbs := filepath.Join(originalsPath, mainRel)
+
+			if found[mainAbs].Processed() {
+				continue
+			}
+
+			if mf, mediaErr := NewMediaFile(mainAbs); mediaErr == nil {
+				enqueueRelated(mf)
+			}
+		}
+	}
+
 	close(jobs)
 	wg.Wait()
 
-	if err != nil {
-		log.Error(err.Error())
-	}
+	logWalkResult("index", err)
 
 	if o.Rescan && !o.FacesOnly {
 		if reconciled, reconcileErr := entity.ReconcileOriginalsFolderAlbums(o.Path); reconcileErr != nil {
@@ -366,6 +534,18 @@ func (ind *Index) FileName(fileName string, o IndexOptions) (result IndexResult)
 
 	if err != nil {
 		result.Err = err
+		result.Status = IndexFailed
+
+		return result
+	}
+
+	// Related files whose names are not portable are not indexed with the file.
+	if related = PortableSiblings(related, file, func(f *MediaFile) {
+		if p := clean.UnportablePath(filepath.ToSlash(f.RootRelName())); p != "" {
+			warnUnportable("index", entity.RootOriginals, p, "index it")
+		}
+	}); related.Main == nil {
+		result.Err = fmt.Errorf("index: found no supported main file for %s", clean.Log(file.RootRelName()))
 		result.Status = IndexFailed
 
 		return result

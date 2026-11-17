@@ -7,8 +7,18 @@ import ContextMenu from "../page-model/context-menu";
 import Photo from "../page-model/photo";
 import Page from "../page-model/page";
 import AlbumDialog from "../page-model/dialog-album";
+import { helperBeforeFixture, helperBeforeEach, helperAfterEach } from "../page-model/helpers";
 
-fixture`Test calendar`.page`${testcafeconfig.url}`;
+fixture`Test calendar`.page`${testcafeconfig.url}`
+.beforeEach(async t => {
+  await helperBeforeEach(t);
+})
+.afterEach(async t => {
+  await helperAfterEach(t);
+})
+.before(async ctx => {
+  await helperBeforeFixture(ctx);
+});
 
 const menu = new Menu();
 const album = new Album();
@@ -81,8 +91,8 @@ test.meta("testID", "calendar-002").meta({ mode: "public" })("Common: Update cal
 
   await t
     .click(albumdialog.category)
+    .click(albumdialog.category)
     .pressKey("ctrl+a delete")
-    .pressKey("enter")
     .click(albumdialog.description)
     .pressKey("ctrl+a delete")
     .pressKey("enter")
@@ -94,10 +104,15 @@ test.meta("testID", "calendar-002").meta({ mode: "public" })("Common: Update cal
   await toolbar.search("March 2014");
 
   await t
-    .expect(page.cardDescription.innerText)
-    .notContains("We went to ski")
+    .expect(page.cardDescription.exists)
+    .notOk()
     .expect(Selector("button.meta-location").exists)
     .notOk();
+
+  await album.openAlbumWithUid(AlbumUid);
+  await toolbar.triggerToolbarAction("edit");
+  await t.expect(albumdialog.category.value).eql("");
+  await t.click(albumdialog.dialogCancel);
 });
 
 test.meta("testID", "calendar-003").meta({ mode: "public" })(
@@ -117,8 +132,9 @@ test.meta("testID", "calendar-004").meta({ type: "short", mode: "public" })(
     await album.openAlbumWithUid(HolidayAlbumUid);
     const InitialPhotoCountHoliday = await photo.getPhotoCount("all");
     await menu.openPage("calendar");
-    const SecondCalendarUid = await album.getNthAlbumUid("all", 1);
-    await album.openAlbumWithUid(SecondCalendarUid);
+    await toolbar.search("May 2021");
+    const MayCalendarUid = await album.getAlbumUidByTitle("May 2021");
+    await album.openAlbumWithUid(MayCalendarUid);
     const PhotoCountInCalendar = await photo.getPhotoCount("all");
     const FirstPhotoUid = await photo.getNthPhotoUid("image", 0);
     const SecondPhotoUid = await photo.getNthPhotoUid("image", 1);
@@ -127,7 +143,7 @@ test.meta("testID", "calendar-004").meta({ type: "short", mode: "public" })(
     const FifthPhotoUid = await photo.getNthPhotoUid("image", 4);
 
     await menu.openPage("calendar");
-    await album.selectAlbumFromUID(SecondCalendarUid);
+    await album.selectAlbumFromUID(MayCalendarUid);
     await contextmenu.triggerContextMenuAction("clone", ["NotYetExistingAlbumForCalendar", "Holiday"]);
     await menu.openPage("albums");
     const AlbumCountAfterCreation = await album.getAlbumCount("all");
@@ -166,7 +182,7 @@ test.meta("testID", "calendar-004").meta({ type: "short", mode: "public" })(
     await t.expect(PhotoCountHolidayAfterDelete).eql(InitialPhotoCountHoliday);
 
     await menu.openPage("calendar");
-    await album.openAlbumWithUid(SecondCalendarUid);
+    await album.openAlbumWithUid(MayCalendarUid);
     await photo.checkPhotoVisibility(FirstPhotoUid, true);
     await photo.checkPhotoVisibility(SecondPhotoUid, true);
   }

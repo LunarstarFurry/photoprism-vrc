@@ -29,6 +29,8 @@ export class File extends RestModel {
       Mime: "",
       Primary: false,
       Sidecar: false,
+      KeepStacked: false,
+      StackGroup: "",
       Missing: false,
       Portrait: false,
       Video: false,
@@ -48,8 +50,8 @@ export class File extends RestModel {
       MainColor: "",
       Colors: "",
       Luminance: "",
-      Diff: 0,
-      Chroma: 0,
+      Diff: -1,
+      Chroma: -1,
       Software: "",
       Error: "",
       Markers: [],
@@ -64,14 +66,24 @@ export class File extends RestModel {
   classes(selected) {
     let classes = ["is-file", "uid-" + this.UID];
 
-    if (this.Primary) classes.push("is-primary");
-    if (this.Sidecar) classes.push("is-sidecar");
-    if (this.Video) classes.push("is-video");
-    if (selected) classes.push("is-selected");
+    if (this.Primary) {
+      classes.push("is-primary");
+    }
+    if (this.Sidecar) {
+      classes.push("is-sidecar");
+    }
+    if (this.Video) {
+      classes.push("is-video");
+    }
+    if (selected) {
+      classes.push("is-selected");
+    }
 
     return classes;
   }
 
+  // baseName returns the file name without its path and without bidi and other control characters,
+  // shortened to the optional length.
   baseName(truncate) {
     let result = this.Name;
     const slash = result.lastIndexOf("/");
@@ -79,6 +91,8 @@ export class File extends RestModel {
     if (slash >= 0) {
       result = this.Name.substring(slash + 1);
     }
+
+    result = $util.stripBidiControls(result);
 
     if (truncate) {
       result = $util.truncate(result, truncate, "…");
@@ -175,8 +189,9 @@ export class File extends RestModel {
     }
   }
 
+  // isAnimated returns true when the file is an image with multiple frames or a non-trivial duration.
   isAnimated() {
-    return this.MediaType && this.MediaType === media.Image && ((this.Frames && this.Frames > 1) || (this.Duration && this.Duration > 1));
+    return this.MediaType === media.Image && (this.Frames > 1 || this.Duration > 1);
   }
 
   typeInfo() {
@@ -201,7 +216,8 @@ export class File extends RestModel {
         info.push(format);
       }
 
-      if (this.MediaType && this.MediaType !== this.FileType) {
+      // The "Sidecar" prefix already names the media type of a sidecar file.
+      if (this.MediaType && this.MediaType !== this.FileType && !(this.Sidecar && this.MediaType === "sidecar")) {
         const media = $util.capitalize(this.MediaType);
         if (media) {
           info.push(media);

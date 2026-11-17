@@ -6,9 +6,11 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/urfave/cli/v2"
 
 	"github.com/photoprism/photoprism/internal/config/ttl"
 	"github.com/photoprism/photoprism/pkg/fs"
+	"github.com/photoprism/photoprism/pkg/http/proxy"
 	"github.com/photoprism/photoprism/pkg/http/scheme"
 	"github.com/photoprism/photoprism/pkg/txt"
 )
@@ -117,6 +119,67 @@ func TestConfig_HttpCompression(t *testing.T) {
 	c := NewConfig(CliTestContext())
 
 	assert.Equal(t, "", c.HttpCompression())
+
+	c.Options().HttpCompression = "  Zstd, GZIP "
+	assert.Equal(t, "zstd, gzip", c.HttpCompression())
+}
+
+func TestConfig_HttpCompressionPreferences(t *testing.T) {
+	c := NewConfig(CliTestContext())
+
+	t.Run("Empty", func(t *testing.T) {
+		c.Options().HttpCompression = ""
+		assert.Empty(t, c.HttpCompressionPreferences())
+	})
+	t.Run("None", func(t *testing.T) {
+		c.Options().HttpCompression = "none"
+		assert.Empty(t, c.HttpCompressionPreferences())
+	})
+	t.Run("LegacyGzip", func(t *testing.T) {
+		c.Options().HttpCompression = "gzip"
+		assert.Equal(t, []string{"gzip"}, c.HttpCompressionPreferences())
+	})
+	t.Run("ZstdThenGzip", func(t *testing.T) {
+		c.Options().HttpCompression = "zstd,gzip"
+		assert.Equal(t, []string{"zstd", "gzip"}, c.HttpCompressionPreferences())
+	})
+	t.Run("PreservesOrderAndDeduplicates", func(t *testing.T) {
+		c.Options().HttpCompression = "gzip, zstd, gzip"
+		assert.Equal(t, []string{"gzip", "zstd"}, c.HttpCompressionPreferences())
+	})
+	t.Run("DropsUnknownTokens", func(t *testing.T) {
+		c.Options().HttpCompression = "br, zstd, gzip"
+		assert.Equal(t, []string{"zstd", "gzip"}, c.HttpCompressionPreferences())
+	})
+	t.Run("WhitespaceAndCaseInsensitive", func(t *testing.T) {
+		c.Options().HttpCompression = "  ZSTD ,  GZip  "
+		assert.Equal(t, []string{"zstd", "gzip"}, c.HttpCompressionPreferences())
+	})
+	t.Run("IdentityIsOff", func(t *testing.T) {
+		c.Options().HttpCompression = "identity"
+		assert.Empty(t, c.HttpCompressionPreferences())
+	})
+}
+
+func TestConfig_HttpCompressionUnknown(t *testing.T) {
+	c := NewConfig(CliTestContext())
+
+	t.Run("None", func(t *testing.T) {
+		c.Options().HttpCompression = "zstd, gzip"
+		assert.Empty(t, c.HttpCompressionUnknown())
+	})
+	t.Run("ReportsUnknown", func(t *testing.T) {
+		c.Options().HttpCompression = "br, zstd, deflate, gzip"
+		assert.Equal(t, []string{"br", "deflate"}, c.HttpCompressionUnknown())
+	})
+	t.Run("DeduplicatesUnknown", func(t *testing.T) {
+		c.Options().HttpCompression = "br, br, deflate"
+		assert.Equal(t, []string{"br", "deflate"}, c.HttpCompressionUnknown())
+	})
+	t.Run("EmptyDoesNotReportUnknown", func(t *testing.T) {
+		c.Options().HttpCompression = ""
+		assert.Empty(t, c.HttpCompressionUnknown())
+	})
 }
 
 func TestConfig_HttpHeaderTimeout(t *testing.T) {
@@ -191,4 +254,40 @@ func TestConfig_HttpVideoMaxAge(t *testing.T) {
 	assert.Equal(t, ttl.CacheMaxAge, c.HttpVideoMaxAge())
 	c.Options().HttpVideoMaxAge = 0
 	assert.Equal(t, ttl.CacheVideo, c.HttpVideoMaxAge())
+}
+
+func TestConfig_TrustedProxies(t *testing.T) {
+	t.Run("Default", func(t *testing.T) {
+		var defaults []string
+
+		for _, f := range Flags {
+			if ssf, ok := f.Flag.(*cli.StringSliceFlag); ok && ssf.Name == "trusted-proxy" {
+				defaults = ssf.Value.Value()
+			}
+		}
+
+		assert.Equal(t, []string{"172.16.0.0/12", "127.0.0.0/8", "::1"}, defaults)
+
+		// The documented default is a list that can be copied into PHOTOPRISM_TRUSTED_PROXY as it is.
+		for _, f := range Flags {
+			if f.Name() == "trusted-proxy" {
+				assert.Equal(t, "172.16.0.0/12, 127.0.0.0/8, ::1", f.Default())
+			}
+		}
+
+		c := NewConfig(CliTestContext())
+		c.options.TrustedProxies = defaults
+		assert.Equal(t, "172.16.0.0/12, 127.0.0.0/8, ::1", c.TrustedProxy())
+
+		trusted := proxy.ParseTrustedProxies(c.TrustedProxies())
+		assert.Len(t, trusted, 3)
+
+		for _, ip := range []string{"127.0.0.1", "127.0.0.2", "::1", "::ffff:127.0.0.1", "172.18.0.2", "172.31.255.254"} {
+			assert.True(t, proxy.TrustedIP(ip, trusted), ip)
+		}
+
+		for _, ip := range []string{"203.0.113.5", "10.0.0.1", "192.168.1.1", "fd00::1", "2001:db8::1", "::"} {
+			assert.False(t, proxy.TrustedIP(ip, trusted), ip)
+		}
+	})
 }

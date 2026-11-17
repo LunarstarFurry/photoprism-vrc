@@ -3,13 +3,13 @@ package config
 import (
 	"fmt"
 	"net/url"
-	"os"
 	"time"
 
 	"github.com/urfave/cli/v2"
 	"gopkg.in/yaml.v2"
 
 	"github.com/photoprism/photoprism/internal/ai/face"
+	"github.com/photoprism/photoprism/internal/event"
 	"github.com/photoprism/photoprism/pkg/clean"
 	"github.com/photoprism/photoprism/pkg/fs"
 )
@@ -31,6 +31,7 @@ type Options struct {
 	AdminUser                 string        `yaml:"AdminUser" json:"-" flag:"admin-user"`
 	AdminPassword             string        `yaml:"AdminPassword" json:"-" flag:"admin-password"`
 	AdminScope                string        `yaml:"AdminScope" json:"-" flag:"admin-scope" tags:"portal,pro"`
+	AdminOIDCSub              string        `yaml:"AdminOIDCSub" json:"-" flag:"admin-oidc-sub" tags:"portal,pro"`
 	PasswordLength            int           `yaml:"PasswordLength" json:"-" flag:"password-length"`
 	PasswordResetUri          string        `yaml:"PasswordResetUri" json:"-" flag:"password-reset-uri" tags:"plus,portal,pro"`
 	RegisterUri               string        `yaml:"RegisterUri" json:"-" flag:"register-uri" tags:"portal,pro"`
@@ -40,10 +41,12 @@ type Options struct {
 	OIDCClient                string        `yaml:"OIDCClient" json:"-" flag:"oidc-client"`
 	OIDCSecret                string        `yaml:"OIDCSecret" json:"-" flag:"oidc-secret"`
 	OIDCScopes                string        `yaml:"OIDCScopes" json:"-" flag:"oidc-scopes"`
+	OIDCPrompt                string        `yaml:"OIDCPrompt" json:"-" flag:"oidc-prompt"`
 	OIDCProvider              string        `yaml:"OIDCProvider" json:"OIDCProvider" flag:"oidc-provider"`
 	OIDCIcon                  string        `yaml:"OIDCIcon" json:"OIDCIcon" flag:"oidc-icon"`
 	OIDCRedirect              bool          `yaml:"OIDCRedirect" json:"OIDCRedirect" flag:"oidc-redirect"`
 	OIDCRegister              bool          `yaml:"OIDCRegister" json:"OIDCRegister" flag:"oidc-register"`
+	OIDCLogout                bool          `yaml:"OIDCLogout" json:"OIDCLogout" flag:"oidc-logout"`
 	OIDCUsername              string        `yaml:"OIDCUsername" json:"-" flag:"oidc-username"`
 	OIDCGroupClaim            string        `yaml:"OIDCGroupClaim" json:"-" flag:"oidc-group-claim" tags:"portal,pro"`
 	OIDCGroup                 []string      `yaml:"OIDCGroup" json:"-" flag:"oidc-group" tags:"portal,pro"`
@@ -52,9 +55,13 @@ type Options struct {
 	OIDCRole                  string        `yaml:"-" json:"-" flag:"oidc-role" tags:"portal,pro"`
 	OIDCWebDAV                bool          `yaml:"OIDCWebDAV" json:"-" flag:"oidc-webdav"`
 	DisableOIDC               bool          `yaml:"DisableOIDC" json:"DisableOIDC" flag:"disable-oidc"`
+	OAuthApps                 string        `yaml:"OAuthApps" json:"-" flag:"oauth-apps"`
 	SessionMaxAge             int64         `yaml:"SessionMaxAge" json:"-" flag:"session-maxage"`
 	SessionTimeout            int64         `yaml:"SessionTimeout" json:"-" flag:"session-timeout"`
 	SessionCache              int64         `yaml:"SessionCache" json:"-" flag:"session-cache"`
+	DownloadToken             string        `yaml:"DownloadToken" json:"-" flag:"download-token"`
+	DownloadTokenMaxAge       int64         `yaml:"DownloadTokenMaxAge" json:"-" flag:"download-token-maxage"`
+	PreviewToken              string        `yaml:"PreviewToken" json:"-" flag:"preview-token"`
 	LogLevel                  string        `yaml:"LogLevel" json:"-" flag:"log-level"`
 	Prod                      bool          `yaml:"Prod" json:"Prod" flag:"prod"`
 	Debug                     bool          `yaml:"Debug" json:"Debug" flag:"debug"`
@@ -63,14 +70,17 @@ type Options struct {
 	Unsafe                    bool          `yaml:"-" json:"-" flag:"unsafe"`
 	Demo                      bool          `yaml:"-" json:"-" flag:"demo"`
 	Sponsor                   bool          `yaml:"-" json:"-" flag:"sponsor"`
+	StoragePath               string        `yaml:"StoragePath" json:"-" flag:"storage-path"`
+	StorageCase               string        `yaml:"StorageCase" json:"-" flag:"storage-case"`
+	StorageFree               float64       `yaml:"StorageFree" json:"-" flag:"storage-free"`
 	ConfigPath                string        `yaml:"ConfigPath" json:"-" flag:"config-path"`
 	OptionsYaml               string        `json:"-" yaml:"-" flag:"-"`
 	DefaultsYaml              string        `json:"-" yaml:"-" flag:"defaults-yaml"`
 	OriginalsPath             string        `yaml:"OriginalsPath" json:"-" flag:"originals-path"`
+	OriginalsCase             string        `yaml:"OriginalsCase" json:"-" flag:"originals-case"`
 	OriginalsLimit            int           `yaml:"OriginalsLimit" json:"OriginalsLimit" flag:"originals-limit"`
 	ResolutionLimit           int           `yaml:"ResolutionLimit" json:"ResolutionLimit" flag:"resolution-limit"`
 	UsersPath                 string        `yaml:"UsersPath" json:"-" flag:"users-path"`
-	StoragePath               string        `yaml:"StoragePath" json:"-" flag:"storage-path"`
 	ImportPath                string        `yaml:"ImportPath" json:"-" flag:"import-path"`
 	ImportDest                string        `yaml:"ImportDest" json:"-" flag:"import-dest"`
 	ImportAllow               string        `yaml:"ImportAllow" json:"ImportAllow" flag:"import-allow"`
@@ -78,6 +88,7 @@ type Options struct {
 	UploadAllow               string        `yaml:"UploadAllow" json:"-" flag:"upload-allow"`
 	UploadArchives            bool          `yaml:"UploadArchives" json:"-" flag:"upload-archives"`
 	UploadLimit               int           `yaml:"UploadLimit" json:"-" flag:"upload-limit"`
+	UploadMaxAge              int64         `yaml:"UploadMaxAge" json:"-" flag:"upload-maxage"`
 	CachePath                 string        `yaml:"CachePath" json:"-" flag:"cache-path"`
 	TempPath                  string        `yaml:"TempPath" json:"-" flag:"temp-path"`
 	AssetsPath                string        `yaml:"AssetsPath" json:"-" flag:"assets-path"`
@@ -94,7 +105,7 @@ type Options struct {
 	BackupRetain              int           `yaml:"BackupRetain" json:"BackupRetain" flag:"backup-retain"`
 	BackupDatabase            bool          `yaml:"BackupDatabase" json:"BackupDatabase" flag:"backup-database" default:"true"`
 	BackupAlbums              bool          `yaml:"BackupAlbums" json:"BackupAlbums" flag:"backup-albums" default:"true"`
-	IndexWorkers              int           `yaml:"IndexWorkers" json:"IndexWorkers" flag:"index-workers"`
+	IndexWorkers              string        `yaml:"IndexWorkers" json:"IndexWorkers" flag:"index-workers"`
 	IndexSchedule             string        `yaml:"IndexSchedule" json:"IndexSchedule" flag:"index-schedule"`
 	WakeupInterval            time.Duration `yaml:"WakeupInterval" json:"WakeupInterval" flag:"wakeup-interval"`
 	AutoIndex                 int           `yaml:"AutoIndex" json:"AutoIndex" flag:"auto-index"`
@@ -106,6 +117,7 @@ type Options struct {
 	DisableBackups            bool          `yaml:"DisableBackups" json:"DisableBackups" flag:"disable-backups"`
 	DisableRestart            bool          `yaml:"DisableRestart" json:"-" flag:"disable-restart"`
 	DisableWebDAV             bool          `yaml:"DisableWebDAV" json:"DisableWebDAV" flag:"disable-webdav"`
+	DisableMCP                bool          `yaml:"DisableMCP" json:"DisableMCP" flag:"disable-mcp"`
 	DisablePlaces             bool          `yaml:"DisablePlaces" json:"DisablePlaces" flag:"disable-places"`
 	DisableTensorFlow         bool          `yaml:"DisableTensorFlow" json:"DisableTensorFlow" flag:"disable-tensorflow"`
 	DisableFaces              bool          `yaml:"DisableFaces" json:"DisableFaces" flag:"disable-faces"`
@@ -137,6 +149,7 @@ type Options struct {
 	SiteUrl                   string        `yaml:"SiteUrl" json:"SiteUrl" flag:"site-url"`
 	FrontendUri               string        `yaml:"FrontendUri" json:"-" flag:"frontend-uri" tags:"portal,pro"`
 	SiteAuthor                string        `yaml:"SiteAuthor" json:"SiteAuthor" flag:"site-author"`
+	SiteName                  string        `yaml:"SiteName" json:"SiteName" flag:"site-name"`
 	SiteTitle                 string        `yaml:"SiteTitle" json:"SiteTitle" flag:"site-title"`
 	SiteCaption               string        `yaml:"SiteCaption" json:"SiteCaption" flag:"site-caption"`
 	SiteDescription           string        `yaml:"SiteDescription" json:"SiteDescription" flag:"site-description"`
@@ -150,7 +163,12 @@ type Options struct {
 	ClusterDomain             string        `yaml:"ClusterDomain" json:"-" flag:"cluster-domain"`
 	ClusterCIDR               string        `yaml:"ClusterCIDR" json:"-" flag:"cluster-cidr"`
 	ClusterUUID               string        `yaml:"ClusterUUID" json:"-" flag:"cluster-uuid"`
+	ClusterOIDC               bool          `yaml:"ClusterOIDC" json:"-" flag:"cluster-oidc"`
+	ClusterAllowGroups        []string      `yaml:"ClusterAllowGroups" json:"-" flag:"cluster-allow-groups"`
+	ClusterAllowGroupRoles    []string      `yaml:"ClusterAllowGroupRoles" json:"-" flag:"cluster-allow-group-roles"`
+	ClusterGroupsFullView     bool          `yaml:"ClusterGroupsFullView" json:"-" flag:"cluster-groups-full-view"`
 	PortalUrl                 string        `yaml:"PortalUrl" json:"-" flag:"portal-url"`
+	PortalLoginUrl            string        `yaml:"PortalLoginUrl" json:"-" flag:"portal-login-url"`
 	PortalProxy               bool          `yaml:"PortalProxy" json:"-" flag:"portal-proxy"`
 	PortalProxyUri            string        `yaml:"PortalProxyUri" json:"-" flag:"portal-proxy-uri"`
 	JoinToken                 string        `yaml:"JoinToken" json:"-" flag:"join-token"`
@@ -163,6 +181,11 @@ type Options struct {
 	JWKSCacheTTL              int           `yaml:"JWKSCacheTTL" json:"-" flag:"jwks-cache-ttl"`
 	JWTScope                  string        `yaml:"JWTScope" json:"-" flag:"jwt-scope"`
 	JWTLeeway                 int           `yaml:"JWTLeeway" json:"-" flag:"jwt-leeway"`
+	JWTRotateDays             int           `yaml:"JWTRotateDays" json:"-" flag:"jwt-rotate-days"`
+	PortalOIDCIssuer          string        `yaml:"PortalOIDCIssuer" json:"-" flag:"portal-oidc-issuer"`
+	PortalOIDCTTL             int           `yaml:"PortalOIDCTTL" json:"-" flag:"portal-oidc-ttl"`
+	PortalOIDCCodeTTL         int           `yaml:"PortalOIDCCodeTTL" json:"-" flag:"portal-oidc-code-ttl"`
+	PortalOIDCDefaultPolicy   string        `yaml:"PortalOIDCDefaultPolicy" json:"-" flag:"portal-oidc-default-policy"`
 	AdvertiseUrl              string        `yaml:"AdvertiseUrl" json:"-" flag:"advertise-url"`
 	HttpsProxy                string        `yaml:"HttpsProxy" json:"HttpsProxy" flag:"https-proxy"`
 	HttpsProxyInsecure        bool          `yaml:"HttpsProxyInsecure" json:"HttpsProxyInsecure" flag:"https-proxy-insecure"`
@@ -206,10 +229,14 @@ type Options struct {
 	FFmpegSize                int           `yaml:"FFmpegSize" json:"FFmpegSize" flag:"ffmpeg-size"`
 	FFmpegQuality             int           `yaml:"FFmpegQuality" json:"FFmpegQuality" flag:"ffmpeg-quality"`
 	FFmpegBitrate             int           `yaml:"FFmpegBitrate" json:"FFmpegBitrate" flag:"ffmpeg-bitrate"`
+	FFmpegFisheyeFov          int           `yaml:"FFmpegFisheyeFov" json:"FFmpegFisheyeFov" flag:"ffmpeg-fisheye-fov"`
 	FFmpegPreset              string        `yaml:"FFmpegPreset" json:"FFmpegPreset" flag:"ffmpeg-preset"`
 	FFmpegDevice              string        `yaml:"FFmpegDevice" json:"-" flag:"ffmpeg-device"`
 	FFmpegMapVideo            string        `yaml:"FFmpegMapVideo" json:"FFmpegMapVideo" flag:"ffmpeg-map-video"`
 	FFmpegMapAudio            string        `yaml:"FFmpegMapAudio" json:"FFmpegMapAudio" flag:"ffmpeg-map-audio"`
+	FFmpegExclude             string        `yaml:"FFmpegExclude" json:"-" flag:"ffmpeg-exclude"`
+	ConvertTimeout            int           `yaml:"ConvertTimeout" json:"-" flag:"convert-timeout"`
+	TranscodeTimeout          int           `yaml:"TranscodeTimeout" json:"-" flag:"transcode-timeout"`
 	ExifToolBin               string        `yaml:"ExifToolBin" json:"-" flag:"exiftool-bin"`
 	SipsBin                   string        `yaml:"SipsBin" json:"-" flag:"sips-bin"`
 	SipsExclude               string        `yaml:"SipsExclude" json:"-" flag:"sips-exclude"`
@@ -224,12 +251,11 @@ type Options struct {
 	HeifConvertBin            string        `yaml:"HeifConvertBin" json:"-" flag:"heifconvert-bin"`
 	HeifConvertOrientation    string        `yaml:"HeifConvertOrientation" json:"-" flag:"heifconvert-orientation"`
 	RsvgConvertBin            string        `yaml:"RsvgConvertBin" json:"-" flag:"rsvgconvert-bin"`
-	DownloadToken             string        `yaml:"DownloadToken" json:"-" flag:"download-token"`
-	PreviewToken              string        `yaml:"PreviewToken" json:"-" flag:"preview-token"`
 	ThumbLibrary              string        `yaml:"ThumbLibrary" json:"ThumbLibrary" flag:"thumb-library"`
 	ThumbColor                string        `yaml:"ThumbColor" json:"ThumbColor" flag:"thumb-color"`
 	ThumbSize                 int           `yaml:"ThumbSize" json:"ThumbSize" flag:"thumb-size"`
 	ThumbSizeUncached         int           `yaml:"ThumbSizeUncached" json:"ThumbSizeUncached" flag:"thumb-size-uncached"`
+	ThumbSizeFace             int           `yaml:"ThumbSizeFace" json:"ThumbSizeFace" flag:"thumb-size-face"`
 	ThumbUncached             bool          `yaml:"ThumbUncached" json:"ThumbUncached" flag:"thumb-uncached"`
 	JpegQuality               int           `yaml:"JpegQuality" json:"JpegQuality" flag:"jpeg-quality"`
 	JpegSize                  int           `yaml:"JpegSize" json:"JpegSize" flag:"jpeg-size"`
@@ -240,22 +266,38 @@ type Options struct {
 	VisionKey                 string        `yaml:"VisionKey" json:"-" flag:"vision-key"`
 	VisionSchedule            string        `yaml:"VisionSchedule" json:"VisionSchedule" flag:"vision-schedule"`
 	VisionFilter              string        `yaml:"VisionFilter" json:"VisionFilter" flag:"vision-filter"`
+	OnnxProvider              string        `yaml:"OnnxProvider" json:"-" flag:"onnx-provider"`
+	LabelsModel               string        `yaml:"LabelsModel" json:"-" flag:"labels-model"`
+	NsfwModel                 string        `yaml:"NsfwModel" json:"-" flag:"nsfw-model"`
 	DetectNSFW                bool          `yaml:"DetectNSFW" json:"DetectNSFW" flag:"detect-nsfw"`
+	XMPFaces                  bool          `yaml:"XMPFaces" json:"XMPFaces" flag:"xmp-faces"`
+	FaceRun                   string        `yaml:"FaceRun" json:"-" flag:"face-run"`
 	FaceEngine                string        `yaml:"FaceEngine" json:"-" flag:"face-engine"`
 	FaceEngineThreads         int           `yaml:"FaceEngineThreads" json:"-" flag:"face-engine-threads"`
+	FaceDetector              string        `yaml:"FaceDetector" json:"-" flag:"face-detector"`
+	FaceDetectorThreads       int           `yaml:"FaceDetectorThreads" json:"-" flag:"face-detector-threads"`
 	FaceSize                  int           `yaml:"-" json:"-" flag:"face-size"`
+	FaceSizeRetry             int           `yaml:"-" json:"-" flag:"face-size-retry"`
 	FaceScore                 float64       `yaml:"-" json:"-" flag:"face-score"`
+	FaceMigrateSize           int           `yaml:"-" json:"-" flag:"face-migrate-size"`
+	FaceMigrateScore          float64       `yaml:"-" json:"-" flag:"face-migrate-score"`
 	FaceOverlap               int           `yaml:"-" json:"-" flag:"face-overlap"`
+	FaceModel                 string        `yaml:"FaceModel" json:"-" flag:"face-model"`
+	FaceModelThreads          int           `yaml:"FaceModelThreads" json:"-" flag:"face-model-threads"`
 	FaceClusterSize           int           `yaml:"-" json:"-" flag:"face-cluster-size"`
 	FaceClusterScore          int           `yaml:"-" json:"-" flag:"face-cluster-score"`
 	FaceClusterCore           int           `yaml:"-" json:"-" flag:"face-cluster-core"`
+	FaceClusterCoreRetry      int           `yaml:"-" json:"-" flag:"face-cluster-core-retry"`
+	FaceClusterSplitRounds    int           `yaml:"-" json:"-" flag:"face-cluster-split-rounds"`
+	FaceClusterSplitShrink    float64       `yaml:"-" json:"-" flag:"face-cluster-split-shrink"`
 	FaceClusterDist           float64       `yaml:"-" json:"-" flag:"face-cluster-dist"`
 	FaceClusterRadius         float64       `yaml:"-" json:"-" flag:"face-cluster-radius"`
+	FaceClusterPercentile     int           `yaml:"-" json:"-" flag:"face-cluster-percentile"`
+	FaceMatchDist             float64       `yaml:"-" json:"-" flag:"face-match-dist"`
+	FaceMatchMargin           float64       `yaml:"-" json:"-" flag:"face-match-margin"`
 	FaceCollisionDist         float64       `yaml:"-" json:"-" flag:"face-collision-dist"`
 	FaceEpsilonDist           float64       `yaml:"-" json:"-" flag:"face-epsilon-dist"`
-	FaceMatchDist             float64       `yaml:"-" json:"-" flag:"face-match-dist"`
-	FaceSkipChildren          bool          `yaml:"-" json:"-" flag:"face-skip-children"`
-	FaceAllowBackground       bool          `yaml:"-" json:"-" flag:"face-allow-background"`
+	FaceRecomputeStats        bool          `yaml:"-" json:"-" flag:"face-recompute-stats"`
 	PIDFilename               string        `yaml:"PIDFilename" json:"-" flag:"pid-filename"`
 	LogFilename               string        `yaml:"LogFilename" json:"-" flag:"log-filename"`
 	DetachServer              bool          `yaml:"DetachServer" json:"-" flag:"detach-server"`
@@ -306,12 +348,12 @@ func NewOptions(ctx *cli.Context) *Options {
 	if c.DefaultsYaml = defaultsYaml(ctx); !fs.FileExistsNotEmpty(c.DefaultsYaml) {
 		log.Tracef("config: defaults file is empty or missing")
 	} else if err := c.Load(c.DefaultsYaml); err != nil {
-		log.Warnf("config: failed loading defaults from %s (%s)", clean.Log(c.DefaultsYaml), err)
+		event.SystemWarn([]string{"config", "defaults", "load %s", "%s"}, clean.Log(c.DefaultsYaml), clean.ErrorFull(err))
 	}
 
 	// Apply options specified with environment variables and command-line flags.
 	if err := c.ApplyCliContext(ctx); err != nil {
-		log.Error(err)
+		log.Errorf("config: %s", clean.Error(err))
 	}
 
 	return c
@@ -342,7 +384,7 @@ func (o *Options) Load(fileName string) error {
 		return fmt.Errorf("%s not found", fileName)
 	}
 
-	yamlConfig, err := os.ReadFile(fileName) //nolint:gosec // configuration file path provided by user/config
+	yamlConfig, err := readOptionsFile(fileName)
 
 	if err != nil {
 		return err

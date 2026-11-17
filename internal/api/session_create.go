@@ -6,6 +6,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/photoprism/photoprism/internal/auth/acl"
 	"github.com/photoprism/photoprism/internal/entity"
 	"github.com/photoprism/photoprism/internal/event"
 	"github.com/photoprism/photoprism/internal/form"
@@ -23,9 +24,9 @@ import (
 //	@Tags		Authentication
 //	@Accept		json
 //	@Produce	json
-//	@Param		credentials	body		form.Login	true	"login credentials"
-//	@Success	200			{object}	gin.H
-//	@Failure	400,401,429	{object}	i18n.Response
+//	@Param		credentials		body		form.Login	true	"login credentials"
+//	@Success	200				{object}	gin.H
+//	@Failure	400,401,413,429	{object}	i18n.Response
 //	@Router		/api/v1/session [post]
 //	@Router		/api/v1/sessions [post]
 func CreateSession(router *gin.RouterGroup) {
@@ -97,7 +98,7 @@ func CreateSession(router *gin.RouterGroup) {
 		var err error
 
 		// Find existing session, if any.
-		if s := Session(clientIp, AuthToken(c)); s != nil {
+		if s := Session(clientIp, AuthToken(c)); sessionReusable(s) {
 			// Update existing session.
 			sess = s
 		} else {
@@ -110,14 +111,23 @@ func CreateSession(router *gin.RouterGroup) {
 		if err = sess.LogIn(frm, c); err != nil {
 			switch {
 			case sess.GetMethod().IsNot(authn.Method2FA):
-				c.AbortWithStatusJSON(sess.HttpStatus(), gin.H{"error": i18n.Msg(i18n.ErrInvalidCredentials)})
+				Abort(c, sess.HttpStatus(), i18n.ErrInvalidCredentials)
 			case errors.Is(err, authn.ErrPasscodeRequired):
-				c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": err.Error(), "code": 32, "message": i18n.Msg(i18n.ErrPasscodeRequired)})
+				// Code 32 asks the client to enter a 2FA passcode (a continuation request,
+				// not a failure), so the text goes in "message" (code < 400) with messageId.
+				c.AbortWithStatusJSON(http.StatusUnauthorized, i18n.NewResponse(32, i18n.ErrPasscodeRequired))
 				// Return the reserved request rate limit tokens if password is correct, even if the verification code is missing.
 				r.Success()
 			default:
-				c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": err.Error(), "code": http.StatusUnauthorized, "message": i18n.Msg(i18n.ErrInvalidPasscode)})
+				Abort(c, http.StatusUnauthorized, i18n.ErrInvalidPasscode)
 			}
+			return
+		}
+
+		// App passwords can only be used while they are enabled.
+		if sess.IsApplication() && conf.DisableAppPasswords() {
+			event.AuditWarn([]string{clientIp, "session %s", "sign in with app password", status.Disabled}, sess.RefID)
+			AbortFeatureDisabled(c)
 			return
 		}
 
@@ -131,10 +141,10 @@ func CreateSession(router *gin.RouterGroup) {
 		switch saved, saveErr := get.Session().Save(sess); {
 		case saveErr != nil:
 			event.AuditErr([]string{clientIp, status.Error(saveErr)})
-			c.AbortWithStatusJSON(sess.HttpStatus(), gin.H{"error": i18n.Msg(i18n.ErrInvalidCredentials)})
+			Abort(c, sess.HttpStatus(), i18n.ErrInvalidCredentials)
 			return
 		case saved == nil:
-			c.AbortWithStatusJSON(sess.HttpStatus(), gin.H{"error": i18n.Msg(i18n.ErrUnexpected)})
+			Abort(c, sess.HttpStatus(), i18n.ErrUnexpected)
 			return
 		case isNew:
 			event.AuditInfo([]string{clientIp, "session %s", "created"}, saved.RefID)
@@ -150,10 +160,34 @@ func CreateSession(router *gin.RouterGroup) {
 		// Response includes user data, session data, and client config values.
 		response := CreateSessionResponse(sess.AuthToken(), sess, conf.ClientSession(sess))
 
+		// On the Portal (OIDC OP), set a narrowly-scoped session cookie so the
+		// /api/v1/oauth/authorize endpoint can authenticate top-level browser
+		// navigations, which carry no Authorization header. See SetOIDCSessionCookie.
+		if conf.Portal() {
+			SetOIDCSessionCookie(c, sess, OIDCSessionCookiePath(conf), conf.SiteHttps())
+		}
+
 		// Return JSON response.
 		c.JSON(sess.HttpStatus(), response)
 	}
 
 	router.POST("/session", createSessionHandler)
 	router.POST("/sessions", createSessionHandler)
+}
+
+// sessionReusable reports whether sign-in may continue an existing session: its row must still exist, and a
+// client session needs an enabled client, a scope that includes creating sessions, and an owner that admits it.
+func sessionReusable(s *entity.Session) bool {
+	switch {
+	case s == nil || s.VerifyStored() != nil || s.ClientDisabled():
+		return false
+	case !s.IsClient():
+		return true
+	case s.IsApplication() && s.GetUser().DenyLogIn():
+		return false
+	case s.HasUser() && s.GetUser().DenyClientAccess():
+		return false
+	default:
+		return s.ValidateScope(acl.ResourceSessions, acl.Permissions{acl.ActionCreate})
+	}
 }

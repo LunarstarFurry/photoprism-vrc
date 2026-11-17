@@ -1,6 +1,16 @@
 ## View Helper Guidelines
 
-**Last Updated:** March 8, 2026
+**Last Updated:** October 23, 2026
+
+### Export Helpers
+
+`export.js`: `canExport(config)` reads the server-filtered `settings.features.export` flag (`Settings.ApplyACL` requires both `photos.access_all` and `photos.download`, `Settings.ApplyScope` the `photos` scope); Export is independent of the Download setting and its file filters. `buildExportGroups(files, thumbs, thumbLimit)` creates original, existing preview, and resized JPEG choices from the complete photo-detail `Files` list. It excludes unavailable files and metadata sidecars, resolves previews across the full stack, and merges duplicate JPEG dimensions within the effective client-config `thumbLimit`. RAW labels use the source filename extension. Records with an omitted media type are classified from their known file type before the `Video` flag; indexed frame and duration metadata still identifies animations. Inputs are not modified.
+
+`export-media.js`: `buildMediaExportGroups(files, thumbs, thumbLimit)` adds AVC choices for videos that are not already AVC, animations, and live photos using indexed metadata. A choice is marked ready, with its size, when an AVC derivative is indexed under a name the server looks up for it; Insta360 sources are offered only then. Audio is omitted, Apple image and video files retain separate groups, and no capability probes or preparation requests are made.
+
+`export-download.js`: `buildExportDownloads(groups, selectedIds)` freezes the selected sources, ordering, and the filenames shown in the dialog, which follow the server's attachment names for originals (their own name), AVC choices (`<stem>.mp4`) and resized JPEGs (`<stem>_<size>.jpg`, after the original they belong to); a full-size preview is listed as `<stem>_preview.<ext>` but saved under the preview file's own name. `exportDownloadUrl(item, config)` uses `apiUri` for all attachment URLs: originals and previews use `/dl/{hash}?t=...&name=original`, AVC choices add `&format=avc`, and resized JPEGs use `/t/{hash}/{previewToken}/{size}?download=1&name=original`. For `format=avc`, the server sends an existing AVC derivative, the video embedded in a live photo, or a conversion made during the request, and answers 404 for files the dialog offers no AVC choice for; the streaming video endpoint is unchanged. Response headers decide the saved names, so a name with unusual characters may be sanitized differently than shown. `ExportQueue` hands downloads to browser anchors, spaces handoffs, and retries failed handoffs without repeating successful ones; a handoff does not confirm that the browser saved the file.
+
+`component/photo/export/dialog.vue` refreshes tokens and the Export feature flag through `$config.update()` before initial downloads and retries. A failed config request preserves the current session and tokens, while a refresh that returns the public config, as for a session the server no longer accepts, marks pending downloads as failed; Retry recovers from a transient refusal such as rate limiting, and an ended session needs a new sign-in. Cancellation, permission loss, a changed picture, or Lightbox closure stops pending client work and discards late responses. Conversion-dependent choices show the single sentence "Download starts after transcoding."
 
 ### Focus Management
 
@@ -17,6 +27,7 @@ When integrating third-party clients such as native mobile apps that embed the P
 - Storage keys are namespaced per app site via `storageNamespace` and use the format `pp:<storageNamespace>:<key>`. When no namespace is available, the fallback prefix is `pp:root:`.
 - Session restore requires both `session.token` and `session.id`. A token-only write does not create an authenticated session state during startup.
 - Optional session metadata keys are `session.provider`, `session.user`, `session.scope`, `session.data`, and `session.error`.
+- The login-flow keys `login.next` and `login.logout` live in namespaced `localStorage` outside the `session.*` prefix so they survive the OIDC callback's clear list. `login.next` is the deep-link target captured by the global router guard via `$session.setLoginRedirectUrl(to.href)`; the `/login` route reads it through `$session.hasLoginRedirectUrl()` (deep-link arrival signal) and consumes it with `$session.followLoginRedirectUrl()` after authentication. `login.logout` is a one-shot raised by every logout path so the very next deep-link arrival skips the auto-OIDC bounce, letting users sign in locally instead.
 - The storage preference flag is always stored in namespaced `localStorage` under `session`. A value of `"true"` tells the app to use namespaced `sessionStorage` for the active session; any other value falls back to namespaced `localStorage`.
 - `Session` must resolve `storageNamespace` from the actual client config shape used at runtime. In production, that value may be present on `config.values.storageNamespace` even when a direct `config.storageNamespace` property is absent.
 - The OIDC callback template clears legacy global auth/session payload keys and namespaced session data keys from `localStorage` and `sessionStorage`, but preserves the `session` storage-preference flag so OIDC flows using ephemeral `sessionStorage` remain logged in after redirect.
@@ -26,6 +37,7 @@ When integrating third-party clients such as native mobile apps that embed the P
 - In the standard login UI, this preference is exposed through the `Stay signed in on this device` toggle. Checked means persistent namespaced `localStorage`; unchecked means ephemeral namespaced `sessionStorage`.
 - The login page initializes that toggle from the current session storage mode when available, and otherwise falls back to the stored namespaced `session` preference flag.
 - Logout and session reset clear the current app namespace from both `localStorage` and `sessionStorage`, and also remove deprecated raw legacy auth keys from both stores, without touching other namespaced instances on the same origin.
+- When `PHOTOPRISM_OIDC_LOGOUT` is enabled, `DELETE /api/v1/session` returns a `providerLogoutUri`; `logout()` passes it to `onLogout()`, which redirects the browser to the provider's end-session endpoint (RP-initiated logout) instead of the local login page, so the provider's SSO session is ended too. `onLogout()` also resolves to that landing URL, so callers that pass `noRedirect` and navigate themselves — the `/logout` route guard and the Portal instance-chooser Sign-Out — follow the same provider URL rather than discarding it. Without the flag, sign-out lands on the local/Portal login page as before.
 - Regression tests for session restore should exercise both preferred `sessionStorage` and a real `Config`-shaped object so namespace resolution bugs cannot silently fall back to `pp:root:`.
 
 Preferred integration contract for new native or web view clients:
@@ -128,7 +140,7 @@ Vuetify dialogs are teleported to the overlay container, so consistent refs and 
 
 3. **Avoid per-dialog traps unless necessary**
 
-   Only add local `@focusout` handlers if a dialog needs custom behaviour. If you do, always call `ev.preventDefault()` when you redirect focus so you do not fight the global handler.
+   Only add local `@focusout` handlers if a dialog needs custom behavior. If you do, always call `ev.preventDefault()` when you redirect focus so you do not fight the global handler.
 
 #### Keyboard Event Handling
 
@@ -193,8 +205,8 @@ onKeyDown(ev) {
 ```
 
 - Implement `onShortCut(ev)` on pages or dialogs when you need to react to Ctrl / ⌘ combinations or global Escape handling. The helper only forwards events where `ev.ctrlKey` or `ev.metaKey` is `true`, or the Escape key is pressed, so it cannot be repurposed for arbitrary keys.
-- Persistent dialogs that must suppress Vuetify’s rejection animation should still attach a direct `@keydown.esc.exact` handler; `onShortCut(ev)` alone does not override the built-in dialog behaviour.
-- Return `true` from `onShortCut(ev)` after handling a shortcut to signal `preventDefault()`. Return `false` to fall back to the browser’s native behaviour.
+- Persistent dialogs that must suppress Vuetify’s rejection animation should still attach a direct `@keydown.esc.exact` handler; `onShortCut(ev)` alone does not override the built-in dialog behavior.
+- Return `true` from `onShortCut(ev)` after handling a shortcut to signal `preventDefault()`. Return `false` to fall back to the browser’s native behavior.
 
 #### Example: Delete Confirmation Dialog
 
@@ -274,7 +286,7 @@ This pattern ensures:
 
 ##### Custom Focusout Handler Keeps Fighting the Trap
 - Make sure the handler checks `this.$view.isActive(this)` and calls `ev.preventDefault()` when redirecting focus.
-- Consider removing the custom handler if the global trap already matches the desired behaviour.
+- Consider removing the custom handler if the global trap already matches the desired behavior.
 
 ##### Nested Dialogs (Dialog Inside Dialog)
 - Each dialog must have `ref="dialog"` so the helper can distinguish them.

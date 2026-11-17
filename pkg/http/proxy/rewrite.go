@@ -3,30 +3,38 @@ package proxy
 import (
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
+	"strconv"
 	"strings"
 
-	"github.com/photoprism/photoprism/pkg/http/header"
+	"github.com/photoprism/photoprism/pkg/http/dns"
 )
 
-// ForwardedProto determines the forwarded scheme for proxy headers.
-func ForwardedProto(req *http.Request) string {
-	if req == nil {
-		return ""
-	}
+// portalRootPathPrefixes lists URL paths that are served by the Portal root,
+// not by any proxied instance. Locations under these prefixes are deliberate
+// instance-to-Portal redirects (for example the Pro OIDC RP redirecting to
+// the Portal's authorize endpoint), and the per-instance path prefix must
+// not be added to them. The OIDC OP endpoints live under "/api/v1/oauth/"
+// specifically (not all of "/api/v1/", which is an instance surface too).
+var portalRootPathPrefixes = []string{
+	"/api/v1/oauth/",
+	"/.well-known/",
+	"/portal/",
+}
 
-	if v := strings.TrimSpace(req.Header.Get(header.XForwardedProto)); v != "" {
-		if comma := strings.IndexByte(v, ','); comma > 0 {
-			return strings.TrimSpace(v[:comma])
+// isPortalRootPath reports whether a URL path targets a Portal-root surface.
+func isPortalRootPath(p string) bool {
+	if p == "" {
+		return false
+	}
+	scoped := "/" + strings.TrimLeft(p, "/")
+	for _, prefix := range portalRootPathPrefixes {
+		if scoped == strings.TrimSuffix(prefix, "/") || strings.HasPrefix(scoped, prefix) {
+			return true
 		}
-		return v
 	}
-
-	if req.TLS != nil {
-		return "https"
-	}
-
-	return "http"
+	return false
 }
 
 // RewriteLocation prefixes redirect targets to keep clients within a proxy path scope.
@@ -36,7 +44,7 @@ func RewriteLocation(location, pathPrefix, proxyHost string) string {
 	}
 
 	if strings.HasPrefix(location, "/") {
-		if HasPathPrefix(location, pathPrefix) {
+		if HasPathPrefix(location, pathPrefix) || isPortalRootPath(location) {
 			return location
 		}
 		return JoinPathPrefix(pathPrefix, location)
@@ -52,7 +60,7 @@ func RewriteLocation(location, pathPrefix, proxyHost string) string {
 		return location
 	}
 
-	if HasPathPrefix(u.Path, pathPrefix) {
+	if HasPathPrefix(u.Path, pathPrefix) || isPortalRootPath(u.Path) {
 		return location
 	}
 
@@ -115,25 +123,45 @@ func RewriteSetCookiePath(value, pathPrefix string) string {
 	return value + "; Path=" + pathPrefix
 }
 
-// HostMatch compares hosts while tolerating optional ports.
+// HostMatch compares hosts while tolerating optional ports, and reports false if either is not a valid
+// host[:port], where only an IPv6 address may be in brackets and a port must be numeric.
 func HostMatch(a, b string) bool {
-	if strings.EqualFold(a, b) {
-		return true
+	aHost, aOk := hostKey(a)
+	bHost, bOk := hostKey(b)
+
+	return aOk && bOk && aHost == bHost
+}
+
+// hostKey returns the host of a host[:port] value in comparable form: an IP address in canonical form
+// or a lowercase ASCII name. It reports false for an empty, malformed, or non-ASCII value.
+func hostKey(s string) (string, bool) {
+	host := s
+
+	if h, port, err := net.SplitHostPort(s); err == nil {
+		if n, convErr := strconv.ParseUint(port, 10, 16); convErr != nil || n < 1 || port[0] == '0' {
+			return "", false
+		}
+
+		host = h
+	} else if bracketed := dns.TrimBrackets(s); bracketed != s {
+		host = bracketed
 	}
 
-	aHost := a
+	if strings.HasPrefix(s, "[") || strings.Contains(host, ":") {
+		addr, err := netip.ParseAddr(host)
 
-	if host, _, err := net.SplitHostPort(a); err == nil && host != "" {
-		aHost = host
+		if err != nil || !addr.Is6() || addr.Is4In6() {
+			return "", false
+		}
+
+		return addr.WithZone("").String(), true
+	} else if addr, err := netip.ParseAddr(host); err == nil {
+		return addr.String(), true
+	} else if host == "" || strings.ContainsAny(host, "[]@/ ") || !dns.IsASCII(host) {
+		return "", false
 	}
 
-	bHost := b
-
-	if host, _, err := net.SplitHostPort(b); err == nil && host != "" {
-		bHost = host
-	}
-
-	return strings.EqualFold(aHost, bHost)
+	return strings.ToLower(host), true
 }
 
 // RewriteDestinationHost rewrites absolute WebDAV Destination headers from a proxy host to the upstream host.

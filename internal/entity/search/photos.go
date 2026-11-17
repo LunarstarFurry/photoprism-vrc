@@ -1,13 +1,16 @@
 package search
 
 import (
+	"errors"
 	"fmt"
 	"path"
 	"strings"
 	"time"
 
+	"gorm.io/gorm/clause"
+
 	"github.com/dustin/go-humanize/english"
-	"github.com/jinzhu/gorm"
+	"gorm.io/gorm"
 
 	"github.com/photoprism/photoprism/internal/auth/acl"
 	"github.com/photoprism/photoprism/internal/entity"
@@ -15,6 +18,7 @@ import (
 	"github.com/photoprism/photoprism/internal/event"
 	"github.com/photoprism/photoprism/internal/form"
 	"github.com/photoprism/photoprism/pkg/clean"
+	"github.com/photoprism/photoprism/pkg/dsn"
 	"github.com/photoprism/photoprism/pkg/enum"
 	"github.com/photoprism/photoprism/pkg/fs"
 	"github.com/photoprism/photoprism/pkg/geo"
@@ -29,32 +33,46 @@ import (
 // PhotosColsAll contains all supported result column names.
 var PhotosColsAll = SelectString(Photo{}, []string{"*"})
 
-// PhotosColsView contains the result column names necessary for the photo viewer.
+// PhotosColsView contains the result column names necessary for the photo viewer, derived from the
+// GeoResult select tags so the map and the lightbox load the same fields.
 var PhotosColsView = SelectString(Photo{}, SelectCols(GeoResult{}, []string{"*"}))
 
 // Photos finds PhotoResults based on the search form without checking rights or permissions.
 func Photos(frm form.SearchPhotos) (results PhotoResults, count int, err error) {
-	return searchPhotos(frm, nil, PhotosColsAll)
+	return searchPhotos(frm, nil, PhotosColsAll, false)
+}
+
+// SharedPhotos finds PhotoResults for a context that renders to anyone holding a link, such as a
+// share preview or an album cover. A smart album's stored filter is parsed as usual, and the
+// public-only constraints are applied after it.
+func SharedPhotos(frm form.SearchPhotos) (results PhotoResults, count int, err error) {
+	return searchPhotos(frm, nil, PhotosColsAll, true)
 }
 
 // UserPhotos finds PhotoResults based on the search form and user session.
 func UserPhotos(frm form.SearchPhotos, sess *entity.Session) (results PhotoResults, count int, err error) {
-	return searchPhotos(frm, sess, PhotosColsAll)
+	return searchPhotos(frm, sess, PhotosColsAll, false)
 }
 
 // PhotoIds finds photo and file ids based on the search form provided and returns them as PhotoResults.
 func PhotoIds(frm form.SearchPhotos) (files PhotoResults, count int, err error) {
 	frm.Merged = false
 	frm.Primary = true
-	return searchPhotos(frm, nil, "photos.id, photos.photo_uid, files.file_uid")
+	return searchPhotos(frm, nil, "photos.id, photos.photo_uid, files.file_uid", false)
 }
 
-// searchPhotos finds photos based on the search form and user session then returns them as PhotoResults.
-func searchPhotos(frm form.SearchPhotos, sess *entity.Session, resultCols string) (results PhotoResults, count int, err error) {
+// searchPhotos finds photos based on the search form and user session then returns them as
+// PhotoResults. When shared is set, the selection is bounded to public content after any stored
+// album filter has been parsed.
+func searchPhotos(frm form.SearchPhotos, sess *entity.Session, resultCols string, shared bool) (results PhotoResults, count int, err error) {
 	start := time.Now()
 
-	// Parse query string and filter.
-	if err = frm.ParseQueryString(); err != nil {
+	// Parse query string and filter. A search that can match nothing still runs the scope check below.
+	noMatch := false
+
+	if err = frm.ParseQueryString(); errors.Is(err, form.ErrNoMatch) {
+		noMatch = true
+	} else if err != nil {
 		log.Debugf("search: %s", err)
 		return PhotoResults{}, 0, ErrBadRequest
 	}
@@ -63,7 +81,19 @@ func searchPhotos(frm form.SearchPhotos, sess *entity.Session, resultCols string
 	if txt.NotEmpty(frm.Near) {
 		photo := Photo{}
 
-		// Find a nearby picture using the UID or return an empty result otherwise.
+		// Require the reference to be visible to the session before its position is used. A reference
+		// the session may not see takes the same path as a missing one. This block must stay above
+		// the scope block: PhotoVisibleToSession re-enters UserPhotos through the shared smart album
+		// fallback, and the inner form carries no reference only because it is built before one is
+		// deserialized from a stored filter.
+		if visible, vErr := PhotoVisibleToSession(frm.Near, sess); vErr != nil {
+			log.Debugf("search: %s (check nearby)", vErr)
+			return PhotoResults{}, 0, ErrNotFound
+		} else if !visible {
+			return PhotoResults{}, 0, ErrNotFound
+		}
+
+		// Find the picture whose visibility was checked above; the result type has no soft-delete scope.
 		if err = Db().First(&photo, "photo_uid = ?", frm.Near).Error; err != nil {
 			log.Debugf("search: %s (find nearby)", err)
 			return PhotoResults{}, 0, ErrNotFound
@@ -115,13 +145,21 @@ func searchPhotos(frm form.SearchPhotos, sess *entity.Session, resultCols string
 			return PhotoResults{}, 0, ErrInvalidId
 		} else if album.AlbumFilter == "" {
 			s = s.Joins("JOIN photos_albums ON photos_albums.photo_uid = files.photo_uid").
-				Where("photos_albums.hidden = 0 AND photos_albums.album_uid = ?", album.AlbumUID)
-		} else if formErr := form.Unserialize(&frm, album.AlbumFilter); formErr != nil {
+				Where("photos_albums.hidden = FALSE AND photos_albums.album_uid = ?", album.AlbumUID)
+		} else if filterNoMatch, formErr := form.UnserializeFilter(&frm, album.AlbumFilter); formErr != nil {
 			log.Debugf("search: %s (%s)", clean.Error(formErr), clean.Log(album.AlbumFilter))
 			return PhotoResults{}, 0, ErrBadFilter
 		} else {
 			frm.Filter = album.AlbumFilter
-			s = s.Where("files.photo_uid NOT IN (SELECT photo_uid FROM photos_albums pa WHERE pa.hidden = 1 AND pa.album_uid = ?)", album.AlbumUID)
+
+			// Folder albums show the pictures in their folder, compared by exact path. Folder albums whose
+			// folder is unknown, and other albums whose stored filter can match nothing, show no pictures.
+			if p := folderAlbumPath(album); p != "" {
+				frm.Path = p
+			} else if filterNoMatch || album.AlbumType == entity.AlbumFolder {
+				noMatch = true
+			}
+			s = s.Where("files.photo_uid NOT IN (SELECT photo_uid FROM photos_albums pa WHERE pa.hidden = TRUE AND pa.album_uid = ?)", album.AlbumUID)
 		}
 
 		// Enforce search distance range (km).
@@ -134,48 +172,54 @@ func searchPhotos(frm form.SearchPhotos, sess *entity.Session, resultCols string
 		frm.Scope = ""
 	}
 
-	// Check session permissions and apply as needed.
-	if sess != nil {
-		user := sess.GetUser()
-		aclRole := user.AclRole()
+	// Applied after the stored filter above, so what a link exposes is decided by the context
+	// the request arrived in. These are the same constraints the session block below applies to
+	// a role without delete or full file access, which every share-link visitor is.
+	if shared {
+		frm.Public = true
+		frm.Private = false
+		frm.Hidden = false
+		frm.Archived = false
+		frm.Review = false
+	}
 
+	// Check session permissions and apply as needed. Each check evaluates the session's effective
+	// role: for a client session, the intersection of the client and user roles.
+	if sess != nil {
 		// Exclude private content.
-		if acl.Rules.Deny(acl.ResourcePhotos, aclRole, acl.AccessPrivate) {
+		if sess.Denies(acl.ResourcePhotos, acl.AccessPrivate) {
 			frm.Public = true
 			frm.Private = false
 		}
 
 		// Exclude archived content.
-		if acl.Rules.Deny(acl.ResourcePhotos, aclRole, acl.ActionDelete) {
+		if sess.Denies(acl.ResourcePhotos, acl.ActionDelete) {
 			frm.Archived = false
 			frm.Review = false
 		}
 
 		// Exclude hidden files.
-		if acl.Rules.Deny(acl.ResourceFiles, aclRole, acl.AccessAll) {
+		if sess.Denies(acl.ResourceFiles, acl.AccessAll) {
 			frm.Hidden = false
 		}
 
-		// Visitors and other restricted users can only access shared content.
-		if frm.Scope != "" && album.CreatedBy != user.UserUID && !sess.HasShare(frm.Scope) && (sess.GetUser().HasSharedAccessOnly(acl.ResourcePhotos) || sess.NotRegistered()) ||
-			frm.Scope == "" && acl.Rules.Deny(acl.ResourcePhotos, aclRole, acl.ActionSearch) {
-			event.AuditErr([]string{sess.IP(), "session %s", "%s %s as %s", status.Denied}, sess.RefID, acl.ActionSearch.String(), string(acl.ResourcePhotos), aclRole)
+		// Visitors and other restricted users can only access shared content. A non-empty Scope
+		// bypasses the personal ScopePhotosForSession filter below, so it is gated here instead: a
+		// session without whole-library reach may scope only to an album it owns or has shared.
+		if frm.Scope != "" && !album.SharedWithSession(sess) && (sess.DeniesAll(acl.ResourcePhotos, libraryAccess) || sess.NotRegistered()) ||
+			frm.Scope == "" && sess.Denies(acl.ResourcePhotos, acl.ActionSearch) {
+			event.AuditErr([]string{sess.IP(), "session %s", "%s %s as %s", status.Denied}, sess.RefID, acl.ActionSearch.String(), string(acl.ResourcePhotos), sessionAuditRole(sess))
 			return PhotoResults{}, 0, ErrForbidden
 		}
 
-		// Limit results for external users.
-		if frm.Scope == "" && acl.Rules.DenyAll(acl.ResourcePhotos, aclRole, acl.Permissions{acl.AccessAll, acl.AccessLibrary}) {
-			sharedAlbums := "photos.photo_uid IN (SELECT photo_uid FROM photos_albums WHERE hidden = 0 AND missing = 0 AND album_uid IN (?)) OR "
-
-			if sess.IsVisitor() || sess.NotRegistered() {
-				s = s.Where(sharedAlbums+"photos.published_at > ?", sess.SharedUIDs(), entity.Now())
-			} else if basePath := user.GetBasePath(); basePath == "" {
-				s = s.Where(sharedAlbums+"photos.created_by = ? OR photos.published_at > ?", sess.SharedUIDs(), user.UserUID, entity.Now())
-			} else {
-				s = s.Where(sharedAlbums+"photos.created_by = ? OR photos.published_at > ? OR photos.photo_path = ? OR photos.photo_path LIKE ?",
-					sess.SharedUIDs(), user.UserUID, entity.Now(), basePath, basePath+"/%")
-			}
+		// Limit results to the content this session may access.
+		if frm.Scope == "" {
+			s = ScopePhotosForSession(s, sess)
 		}
+	}
+
+	if noMatch {
+		return PhotoResults{}, 0, nil
 	}
 
 	// Set sort order.
@@ -208,7 +252,7 @@ func searchPhotos(frm form.SearchPhotos, sess *entity.Session, resultCols string
 	case sortby.Title:
 		s = s.Order(OrderExpr("photos.photo_title ASC, photos.photo_name ASC, files.time_index", frm.Reverse))
 	case sortby.Random:
-		s = s.Order(sortby.RandomExpr(s.Dialect()))
+		s = s.Order(clause.OrderBy{Expression: sortby.RandomExpr(entity.DbDialect())})
 	case sortby.Default, sortby.Imported, sortby.Added:
 		s = s.Order(OrderExpr("files.media_id", frm.Reverse))
 	default:
@@ -226,16 +270,16 @@ func searchPhotos(frm form.SearchPhotos, sess *entity.Session, resultCols string
 
 	// Find primary files only?
 	if frm.Primary {
-		s = s.Where("files.file_primary = 1")
+		s = s.Where("files.file_primary = TRUE")
 	} else if frm.Order == sortby.Size {
-		s = s.Where("files.file_root <> 'sidecar' AND files.file_sidecar = 0")
+		s = s.Where("files.file_root <> 'sidecar' AND files.file_sidecar = FALSE")
 	} else if frm.Order == sortby.Similar {
-		s = s.Where("files.file_primary = 1 OR files.media_type = ?", media.Video)
+		s = s.Where("files.file_primary = TRUE OR files.media_type = ?", media.Video)
 	} else if frm.Order == sortby.Random {
-		s = s.Where("files.file_primary = 1 AND photos.photo_type NOT IN ('live','video') OR photos.photo_type IN ('live','video') AND files.media_type IN ('live','video')")
+		s = s.Where("files.file_primary = TRUE AND photos.photo_type NOT IN ('live','video') OR photos.photo_type IN ('live','video') AND files.media_type IN ('live','video')")
 	} else {
 		// Otherwise, find all matching media except sidecar files.
-		s = s.Where("files.file_sidecar = 0")
+		s = s.Where("files.file_sidecar = FALSE")
 	}
 
 	// Find specific UIDs only.
@@ -261,6 +305,8 @@ func searchPhotos(frm form.SearchPhotos, sess *entity.Session, resultCols string
 
 		// Find UIDs only to improve performance.
 		if sess == nil && frm.FindUidOnly() {
+			results = make(PhotoResults, 0)
+
 			if result := s.Scan(&results); result.Error != nil {
 				return results, 0, result.Error
 			}
@@ -286,12 +332,31 @@ func searchPhotos(frm form.SearchPhotos, sess *entity.Session, resultCols string
 
 	// Filter by label, label category and keywords.
 	if txt.NotEmpty(frm.Label) {
-		if labelIds, labelErr := entity.FindLabelIDs(frm.Label, txt.Or, true); labelErr != nil || len(labelIds) == 0 {
-			log.Debugf("search: label %s not found", txt.LogParamLower(frm.Label))
+		include, exclude, sawPositive, labelErr := entity.ParseLabelFilter(frm.Label)
+
+		if labelErr != nil || (sawPositive && len(include) == 0) {
+			log.Debugf("search: label %s not found", clean.LogLower(frm.Label))
 			return PhotoResults{}, 0, nil
-		} else {
-			s = s.Joins("JOIN photos_labels ON photos_labels.photo_id = files.photo_id AND photos_labels.uncertainty < 100 AND photos_labels.label_id IN (?)", labelIds).
-				Group("photos.id, files.id")
+		}
+
+		// JOIN the first positive group so photos_labels.uncertainty is
+		// available for the "relevance" sort order; subsequent positive
+		// groups compose as AND via IN subqueries.
+		for i, ids := range include {
+			if i == 0 && entity.DbDialect() == dsn.DialectPostgreSQL {
+				// PostgreSQL cannot group rows whose other columns differ, so the photo's best match is joined.
+				s = s.Joins("JOIN (SELECT photo_id, MIN(uncertainty) AS uncertainty FROM photos_labels "+
+					"WHERE uncertainty < 100 AND label_id IN (?) GROUP BY photo_id) photos_labels ON photos_labels.photo_id = files.photo_id", ids)
+			} else if i == 0 {
+				s = s.Joins("JOIN photos_labels ON photos_labels.photo_id = files.photo_id AND photos_labels.uncertainty < 100 AND photos_labels.label_id IN (?)", ids).
+					Group("photos.id, files.id")
+			} else {
+				s = s.Where("files.photo_id IN (SELECT photo_id FROM photos_labels WHERE uncertainty < 100 AND label_id IN (?))", ids)
+			}
+		}
+
+		for _, ids := range exclude {
+			s = s.Where("files.photo_id NOT IN (SELECT photo_id FROM photos_labels WHERE uncertainty < 100 AND label_id IN (?))", ids)
 		}
 	}
 
@@ -360,6 +425,9 @@ func searchPhotos(frm form.SearchPhotos, sess *entity.Session, resultCols string
 		case terms["panoramas"]:
 			frm.Query = strings.ReplaceAll(frm.Query, "panoramas", "")
 			frm.Panorama = true
+		case terms["fisheye"]:
+			frm.Query = strings.ReplaceAll(frm.Query, "fisheye", "")
+			frm.Fisheye = true
 		case terms["scans"]:
 			frm.Query = strings.ReplaceAll(frm.Query, "scans", "")
 			frm.Scan = "true"
@@ -382,16 +450,17 @@ func searchPhotos(frm form.SearchPhotos, sess *entity.Session, resultCols string
 	// Filter by query string.
 	if frm.Query != "" {
 		if labelIds, labelsErr := entity.FindLabelIDs(frm.Query, " ", true); labelsErr != nil || len(labelIds) == 0 {
-			log.Tracef("search: label %s not found, using fuzzy search", txt.LogParamLower(frm.Query))
+			log.Tracef("search: label %s not found, using fuzzy search", clean.LogLower(frm.Query))
 
-			for _, where := range LikeAnyKeyword("k.keyword", frm.Query) {
-				s = s.Where("files.photo_id IN (SELECT pk.photo_id FROM keywords k JOIN photos_keywords pk ON k.id = pk.keyword_id WHERE (?))", gorm.Expr(where))
+			wheres, values := LikeAnyKeyword("k.keyword", frm.Query, false)
+			for i, where := range wheres {
+				s = s.Where("files.photo_id IN (SELECT pk.photo_id FROM keywords k JOIN photos_keywords pk ON k.id = pk.keyword_id WHERE (?))", gorm.Expr(where, values[i]...))
 			}
 		} else {
-			if wheres := LikeAnyKeyword("k.keyword", frm.Query); len(wheres) > 0 {
-				for _, where := range wheres {
+			if wheres, values := LikeAnyKeyword("k.keyword", frm.Query, false); len(wheres) > 0 {
+				for i, where := range wheres {
 					s = s.Where("files.photo_id IN (SELECT pk.photo_id FROM keywords k JOIN photos_keywords pk ON k.id = pk.keyword_id WHERE (?)) OR "+
-						"files.photo_id IN (SELECT pl.photo_id FROM photos_labels pl WHERE pl.uncertainty < 100 AND pl.label_id IN (?))", gorm.Expr(where), labelIds)
+						"files.photo_id IN (SELECT pl.photo_id FROM photos_labels pl WHERE pl.uncertainty < 100 AND pl.label_id IN (?))", gorm.Expr(where, values[i]...), labelIds)
 				}
 			} else {
 				s = s.Where("files.photo_id IN (SELECT pl.photo_id FROM photos_labels pl WHERE pl.uncertainty < 100 AND pl.label_id IN (?))", labelIds)
@@ -401,8 +470,9 @@ func searchPhotos(frm form.SearchPhotos, sess *entity.Session, resultCols string
 
 	// Search for one or more keywords.
 	if txt.NotEmpty(frm.Keywords) {
-		for _, where := range LikeAnyWord("k.keyword", frm.Keywords) {
-			s = s.Where("files.photo_id IN (SELECT pk.photo_id FROM keywords k JOIN photos_keywords pk ON k.id = pk.keyword_id WHERE (?))", gorm.Expr(where))
+		wheres, values := LikeAnyWord("k.keyword", frm.Keywords, false)
+		for i, where := range wheres {
+			s = s.Where("files.photo_id IN (SELECT pk.photo_id FROM keywords k JOIN photos_keywords pk ON k.id = pk.keyword_id WHERE (?))", gorm.Expr(where, values[i]...))
 		}
 	}
 
@@ -425,20 +495,20 @@ func searchPhotos(frm form.SearchPhotos, sess *entity.Session, resultCols string
 		// Do nothing.
 	} else if len(frm.Face) >= 32 {
 		for _, f := range SplitAnd(strings.ToUpper(frm.Face)) {
-			s = s.Where(fmt.Sprintf("files.photo_id IN (SELECT photo_id FROM files f JOIN %s m ON f.file_uid = m.file_uid AND m.marker_invalid = 0 WHERE face_id IN (?))",
+			s = s.Where(fmt.Sprintf("files.photo_id IN (SELECT photo_id FROM files f JOIN %s m ON f.file_uid = m.file_uid AND m.marker_invalid = FALSE WHERE face_id IN (?))",
 				entity.Marker{}.TableName()), SplitOr(f))
 		}
 	} else if txt.New(frm.Face) {
-		s = s.Where(fmt.Sprintf("files.photo_id IN (SELECT photo_id FROM files f JOIN %s m ON f.file_uid = m.file_uid AND m.marker_invalid = 0 AND m.marker_type = ? WHERE subj_uid IS NULL OR subj_uid = '')",
+		s = s.Where(fmt.Sprintf("files.photo_id IN (SELECT photo_id FROM files f JOIN %s m ON f.file_uid = m.file_uid AND m.marker_invalid = FALSE AND m.marker_type = ? WHERE subj_uid IS NULL OR subj_uid = '')",
 			entity.Marker{}.TableName()), entity.MarkerFace)
 	} else if txt.No(frm.Face) {
-		s = s.Where(fmt.Sprintf("files.photo_id IN (SELECT photo_id FROM files f JOIN %s m ON f.file_uid = m.file_uid AND m.marker_invalid = 0 AND m.marker_type = ? WHERE face_id IS NULL OR face_id = '')",
+		s = s.Where(fmt.Sprintf("files.photo_id IN (SELECT photo_id FROM files f JOIN %s m ON f.file_uid = m.file_uid AND m.marker_invalid = FALSE AND m.marker_type = ? WHERE face_id IS NULL OR face_id = '')",
 			entity.Marker{}.TableName()), entity.MarkerFace)
 	} else if txt.Yes(frm.Face) {
-		s = s.Where(fmt.Sprintf("files.photo_id IN (SELECT photo_id FROM files f JOIN %s m ON f.file_uid = m.file_uid AND m.marker_invalid = 0 AND m.marker_type = ? WHERE face_id IS NOT NULL AND face_id <> '')",
+		s = s.Where(fmt.Sprintf("files.photo_id IN (SELECT photo_id FROM files f JOIN %s m ON f.file_uid = m.file_uid AND m.marker_invalid = FALSE AND m.marker_type = ? WHERE face_id IS NOT NULL AND face_id <> '')",
 			entity.Marker{}.TableName()), entity.MarkerFace)
 	} else if txt.IsUInt(frm.Face) {
-		s = s.Where("files.photo_id IN (SELECT photo_id FROM files f JOIN markers m ON f.file_uid = m.file_uid AND m.marker_invalid = 0 AND m.marker_type = ? JOIN faces ON faces.id = m.face_id WHERE m.face_id IS NOT NULL AND m.face_id <> '' AND faces.face_kind = ?)",
+		s = s.Where("files.photo_id IN (SELECT photo_id FROM files f JOIN markers m ON f.file_uid = m.file_uid AND m.marker_invalid = FALSE AND m.marker_type = ? JOIN faces ON faces.id = m.face_id WHERE m.face_id IS NOT NULL AND m.face_id <> '' AND faces.face_kind = ?)",
 			entity.MarkerFace, txt.Int(frm.Face))
 	}
 
@@ -446,17 +516,19 @@ func searchPhotos(frm form.SearchPhotos, sess *entity.Session, resultCols string
 	if txt.NotEmpty(frm.Subject) {
 		for _, subj := range SplitAnd(strings.ToLower(frm.Subject)) {
 			if subjects := SplitOr(subj); rnd.ContainsUID(subjects, 'j') {
-				s = s.Where(fmt.Sprintf("files.photo_id IN (SELECT photo_id FROM files f JOIN %s m ON f.file_uid = m.file_uid AND m.marker_invalid = 0 WHERE subj_uid IN (?))",
+				s = s.Where(fmt.Sprintf("files.photo_id IN (SELECT photo_id FROM files f JOIN %s m ON f.file_uid = m.file_uid AND m.marker_invalid = FALSE WHERE subj_uid IN (?))",
 					entity.Marker{}.TableName()), subjects)
 			} else {
-				s = s.Where(fmt.Sprintf("files.photo_id IN (SELECT photo_id FROM files f JOIN %s m ON f.file_uid = m.file_uid AND m.marker_invalid = 0 JOIN %s s ON s.subj_uid = m.subj_uid WHERE (?))",
-					entity.Marker{}.TableName(), entity.Subject{}.TableName()), gorm.Expr(AnySlug("s.subj_slug", subj, txt.Or)))
+				w, v := AnySlug("s.subj_slug", subj, txt.Or)
+				s = s.Where(fmt.Sprintf("files.photo_id IN (SELECT photo_id FROM files f JOIN %s m ON f.file_uid = m.file_uid AND m.marker_invalid = FALSE JOIN %s s ON s.subj_uid = m.subj_uid WHERE (?))",
+					entity.Marker{}.TableName(), entity.Subject{}.TableName()), gorm.Expr(w, v...))
 			}
 		}
 	} else if txt.NotEmpty(frm.Subjects) {
-		for _, where := range LikeAllNames(Cols{"subj_name", "subj_alias"}, frm.Subjects) {
-			s = s.Where(fmt.Sprintf("files.photo_id IN (SELECT photo_id FROM files f JOIN %s m ON f.file_uid = m.file_uid AND m.marker_invalid = 0 JOIN %s s ON s.subj_uid = m.subj_uid WHERE (?))",
-				entity.Marker{}.TableName(), entity.Subject{}.TableName()), gorm.Expr(where))
+		wheres, values := LikeAllNames(Cols{"subj_name", "subj_alias"}, frm.Subjects, false)
+		for i, where := range wheres {
+			s = s.Where(fmt.Sprintf("files.photo_id IN (SELECT photo_id FROM files f JOIN %s m ON f.file_uid = m.file_uid AND m.marker_invalid = FALSE JOIN %s s ON s.subj_uid = m.subj_uid WHERE (?))",
+				entity.Marker{}.TableName(), entity.Subject{}.TableName()), gorm.Expr(where, values[i]...))
 		}
 	}
 
@@ -472,32 +544,32 @@ func searchPhotos(frm form.SearchPhotos, sess *entity.Session, resultCols string
 
 		if frm.Review {
 			s = s.Where("photos.photo_quality < 3")
-		} else if frm.Quality != 0 && frm.Private == false {
+		} else if frm.Quality != 0 && !frm.Private {
 			s = s.Where("photos.photo_quality >= ?", frm.Quality)
 		}
 	}
 
 	// Filter private pictures.
 	if frm.Public {
-		s = s.Where("photos.photo_private = 0")
+		s = s.Where("photos.photo_private = FALSE")
 	} else if frm.Private {
-		s = s.Where("photos.photo_private = 1")
+		s = s.Where("photos.photo_private = TRUE")
 	}
 
 	// Filter by camera id or name.
 	if txt.IsPosInt(frm.Camera) {
 		s = s.Where("photos.camera_id = ?", txt.UInt(frm.Camera))
 	} else if txt.NotEmpty(frm.Camera) {
-		v := strings.Trim(frm.Camera, "*%") + "%"
-		s = s.Where("cameras.camera_name LIKE ? OR cameras.camera_model LIKE ? OR cameras.camera_slug LIKE ?", v, v, v)
+		v := clean.SqlLike(strings.Trim(frm.Camera, "*%")) + "%"
+		s = s.Where(likeCond("cameras.camera_name", false)+" OR "+likeCond("cameras.camera_model", false)+" OR "+likeCond("cameras.camera_slug", true), v, v, v)
 	}
 
 	// Filter by lens id or name.
 	if txt.IsPosInt(frm.Lens) {
 		s = s.Where("photos.lens_id = ?", txt.UInt(frm.Lens))
 	} else if txt.NotEmpty(frm.Lens) {
-		v := strings.Trim(frm.Lens, "*%") + "%"
-		s = s.Where("lenses.lens_name LIKE ? OR lenses.lens_model LIKE ? OR lenses.lens_slug LIKE ?", v, v, v)
+		v := clean.SqlLike(strings.Trim(frm.Lens, "*%")) + "%"
+		s = s.Where(likeCond("lenses.lens_name", false)+" OR "+likeCond("lenses.lens_model", false)+" OR "+likeCond("lenses.lens_slug", true), v, v, v)
 	}
 
 	// Filter by ISO Number (light sensitivity) range.
@@ -517,17 +589,20 @@ func searchPhotos(frm form.SearchPhotos, sess *entity.Session, resultCols string
 
 	// Filter by year.
 	if frm.Year != "" {
-		s = s.Where(AnyInt("photos.photo_year", frm.Year, txt.Or, entity.UnknownYear, txt.YearMax))
+		w, v := AnyInt("photos.photo_year", frm.Year, txt.Or, entity.UnknownYear, txt.YearMax)
+		s = s.Where(w, v...)
 	}
 
 	// Filter by month.
 	if frm.Month != "" {
-		s = s.Where(AnyInt("photos.photo_month", frm.Month, txt.Or, entity.UnknownMonth, txt.MonthMax))
+		w, v := AnyInt("photos.photo_month", frm.Month, txt.Or, entity.UnknownMonth, txt.MonthMax)
+		s = s.Where(w, v...)
 	}
 
 	// Filter by day.
 	if frm.Day != "" {
-		s = s.Where(AnyInt("photos.photo_day", frm.Day, txt.Or, entity.UnknownDay, txt.DayMax))
+		w, v := AnyInt("photos.photo_day", frm.Day, txt.Or, entity.UnknownDay, txt.DayMax)
+		s = s.Where(w, v...)
 	}
 
 	// Filter by Resolution in Megapixels (MP).
@@ -537,12 +612,17 @@ func searchPhotos(frm form.SearchPhotos, sess *entity.Session, resultCols string
 
 	// Find panoramic pictures only.
 	if frm.Panorama {
-		s = s.Where("photos.photo_panorama = 1")
+		s = s.Where("photos.photo_panorama = TRUE")
+	}
+
+	// Find fisheye 360° originals only.
+	if frm.Fisheye {
+		s = fisheyePhotoFilter(s)
 	}
 
 	// Find portrait/landscape/square pictures only.
 	if frm.Portrait {
-		s = s.Where("files.file_portrait = 1")
+		s = s.Where("files.file_portrait = TRUE")
 	} else if frm.Landscape {
 		s = s.Where("files.file_aspect_ratio > 1.25")
 	} else if frm.Square {
@@ -559,13 +639,15 @@ func searchPhotos(frm form.SearchPhotos, sess *entity.Session, resultCols string
 		s = s.Where("files.file_codec IN (?)", SplitOr(strings.ToLower(frm.Codec)))
 	}
 
-	// Filter by chroma.
+	// Filter by chroma, which is stored as percent plus one, so that 1 is monochrome and -1 unknown.
+	// Chroma values in queries are percentages, and low values exclude monochrome files. Stored values do not
+	// exceed 100, so a larger threshold is clamped to it, which also keeps it within the column type.
 	if frm.Mono {
-		s = s.Where("files.file_chroma = 0")
+		s = s.Where("files.file_chroma = 1")
 	} else if frm.Chroma > 9 {
-		s = s.Where("files.file_chroma > ?", frm.Chroma)
+		s = s.Where("files.file_chroma > ?", min(int(frm.Chroma)+1, 100))
 	} else if frm.Chroma > 0 {
-		s = s.Where("files.file_chroma > 0 AND files.file_chroma <= ?", frm.Chroma)
+		s = s.Where("files.file_chroma > 1 AND files.file_chroma <= ?", frm.Chroma+1)
 	}
 
 	if frm.Diff != 0 {
@@ -574,16 +656,16 @@ func searchPhotos(frm form.SearchPhotos, sess *entity.Session, resultCols string
 
 	// Filter by favorite flag.
 	if txt.No(frm.Favorite) {
-		s = s.Where("photos.photo_favorite = 0")
+		s = s.Where("photos.photo_favorite = FALSE")
 	} else if txt.NotEmpty(frm.Favorite) {
-		s = s.Where("photos.photo_favorite = 1")
+		s = s.Where("photos.photo_favorite = TRUE")
 	}
 
 	// Filter by scan flag.
 	if txt.No(frm.Scan) {
-		s = s.Where("photos.photo_scan = 0")
+		s = s.Where("photos.photo_scan = FALSE")
 	} else if txt.NotEmpty(frm.Scan) {
-		s = s.Where("photos.photo_scan = 1")
+		s = s.Where("photos.photo_scan = TRUE")
 	}
 
 	// Filter by stack flag.
@@ -643,21 +725,19 @@ func searchPhotos(frm form.SearchPhotos, sess *entity.Session, resultCols string
 	if txt.NotEmpty(frm.Path) {
 		p := frm.Path
 
-		if strings.HasPrefix(p, "/") {
-			p = p[1:]
-		}
+		p = strings.TrimPrefix(p, "/")
 
 		if strings.HasSuffix(p, "/") {
 			s = s.Where("photos.photo_path = ?", p[:len(p)-1])
 		} else {
-			where, values := OrLike("photos.photo_path", p)
+			where, values := OrLike("photos.photo_path", p, true)
 			s = s.Where(where, values...)
 		}
 	}
 
 	// Filter by primary file name without path and extension.
 	if txt.NotEmpty(frm.Name) {
-		where, names := OrLike("photos.photo_name", frm.Name)
+		where, names := OrLike("photos.photo_name", frm.Name, true)
 
 		// Omit file path and known extensions.
 		for i := range names {
@@ -669,13 +749,13 @@ func searchPhotos(frm form.SearchPhotos, sess *entity.Session, resultCols string
 
 	// Filter by complete file names.
 	if txt.NotEmpty(frm.Filename) {
-		where, values := OrLike("files.file_name", frm.Filename)
+		where, values := OrLike("files.file_name", frm.Filename, true)
 		s = s.Where(where, values...)
 	}
 
 	// Filter by original file name.
 	if txt.NotEmpty(frm.Original) {
-		where, values := OrLike("photos.original_name", frm.Original)
+		where, values := OrLike("photos.original_name", frm.Original, true)
 		s = s.Where(where, values...)
 	}
 
@@ -686,7 +766,7 @@ func searchPhotos(frm form.SearchPhotos, sess *entity.Session, resultCols string
 		} else if frm.Title == enum.True {
 			s = s.Where("photos.photo_title <> ''")
 		} else {
-			where, values := OrLike("photos.photo_title", frm.Title)
+			where, values := OrLike("photos.photo_title", frm.Title, false)
 			s = s.Where(where, values...)
 		}
 	}
@@ -698,7 +778,7 @@ func searchPhotos(frm form.SearchPhotos, sess *entity.Session, resultCols string
 		} else if frm.Caption == enum.True {
 			s = s.Where("photos.photo_caption <> ''")
 		} else {
-			where, values := OrLike("photos.photo_caption", frm.Caption)
+			where, values := OrLike("photos.photo_caption", frm.Caption, false)
 			s = s.Where(where, values...)
 		}
 	}
@@ -710,7 +790,7 @@ func searchPhotos(frm form.SearchPhotos, sess *entity.Session, resultCols string
 		} else if frm.Description == enum.True {
 			s = s.Where("photos.photo_title <> '' OR photos.photo_caption <> ''")
 		} else {
-			where, values := OrLikeCols([]string{"photos.photo_title", "photos.photo_caption"}, frm.Description)
+			where, values := OrLikeCols([]string{"photos.photo_title", "photos.photo_caption"}, frm.Description, false)
 			s = s.Where(where, values...)
 		}
 	}
@@ -822,13 +902,16 @@ func searchPhotos(frm form.SearchPhotos, sess *entity.Session, resultCols string
 	// Find photos in albums or not in an album, unless search results are limited to a scope.
 	if frm.Scope == "" {
 		if frm.Unsorted {
-			s = s.Where("photos.photo_uid NOT IN (SELECT photo_uid FROM photos_albums pa JOIN albums a ON a.album_uid = pa.album_uid WHERE pa.hidden = 0 AND a.deleted_at IS NULL)")
+			s = s.Where("photos.photo_uid NOT IN (SELECT photo_uid FROM photos_albums pa JOIN albums a ON a.album_uid = pa.album_uid WHERE pa.hidden = FALSE AND a.deleted_at IS NULL)")
 		} else if txt.NotEmpty(frm.Album) {
-			v := strings.Trim(frm.Album, "*%") + "%"
-			s = s.Where("photos.photo_uid IN (SELECT pa.photo_uid FROM photos_albums pa JOIN albums a ON a.album_uid = pa.album_uid AND pa.hidden = 0 WHERE (a.album_title LIKE ? OR a.album_slug LIKE ?))", v, v)
+			v := clean.SqlLike(strings.Trim(frm.Album, "*%")) + "%"
+			// Slugs are stored as lowercase binary strings, so the value must be
+			// folded to match on MySQL/MariaDB as well.
+			s = s.Where("photos.photo_uid IN (SELECT pa.photo_uid FROM photos_albums pa JOIN albums a ON a.album_uid = pa.album_uid AND pa.hidden = FALSE WHERE ("+likeCond("a.album_title", false)+" OR "+likeCond("a.album_slug", true)+"))", v, strings.ToLower(v))
 		} else if txt.NotEmpty(frm.Albums) {
-			for _, where := range LikeAnyWord("a.album_title", frm.Albums) {
-				s = s.Where("photos.photo_uid IN (SELECT pa.photo_uid FROM photos_albums pa JOIN albums a ON a.album_uid = pa.album_uid AND pa.hidden = 0 WHERE (?))", gorm.Expr(where))
+			wheres, values := LikeAnyWord("a.album_title", frm.Albums, false)
+			for i, where := range wheres {
+				s = s.Where("photos.photo_uid IN (SELECT pa.photo_uid FROM photos_albums pa JOIN albums a ON a.album_uid = pa.album_uid AND pa.hidden = FALSE WHERE (?))", gorm.Expr(where, values[i]...))
 			}
 		}
 	}
@@ -841,6 +924,8 @@ func searchPhotos(frm form.SearchPhotos, sess *entity.Session, resultCols string
 	s = s.Limit(frm.Count).Offset(frm.Offset)
 
 	// Query database.
+	results = make(PhotoResults, 0)
+
 	if err = s.Scan(&results).Error; err != nil {
 		return results, 0, err
 	}

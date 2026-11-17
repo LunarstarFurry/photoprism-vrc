@@ -1,7 +1,8 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, afterEach } from "vitest";
 import "../fixtures";
 import $util from "common/util";
 import { tokenRegexp, tokenLength } from "common/util";
+import { $config } from "app/session";
 import * as can from "common/can";
 import { ContentTypeMp4AvcMain, ContentTypeMp4HvcMain } from "common/media";
 
@@ -180,14 +181,58 @@ describe("common/util", () => {
     const result = $util.truncate("teststring for vitest", 5, "ng");
     expect(result).toBe("tesng");
   });
+  it("should remove bidi and other control characters from names", () => {
+    expect($util.stripBidiControls("photo\u202Eabc.jpg")).toBe("photoabc.jpg");
+    expect($util.stripBidiControls("a\u2066b\u2069c\u200Fd\u061Ce")).toBe("abcde");
+    expect($util.stripBidiControls("file\u0000\u001b\u007f.jpg")).toBe("file.jpg");
+    expect($util.stripBidiControls("صورة 日本 👩\u200D👩\u200D👧.jpg")).toBe("صورة 日本 👩\u200D👩\u200D👧.jpg");
+    for (const c of ["\u202A", "\u202B", "\u202C", "\u202D", "\u2066", "\u2067", "\u2068", "\u0085", "\u009B", "\u2028", "\u2029"]) {
+      expect($util.stripBidiControls("a" + c + "b")).toBe("ab");
+    }
+    expect($util.stripBidiControls("می\u200Cخواهم")).toBe("می\u200Cخواهم");
+    expect($util.stripBidiControls("")).toBe("");
+    expect($util.stripBidiControls(undefined)).toBe(undefined);
+  });
+  it("should balance isolates and keep bidi marks", () => {
+    expect($util.balanceBidi("رحلة PhotoPrism \u200F2026")).toBe("رحلة PhotoPrism \u200F2026");
+    expect($util.balanceBidi("a\u2067b\u2069c")).toBe("a\u2067b\u2069c");
+    expect($util.balanceBidi("a\u2069b\u200Fc")).toBe("ab\u200Fc");
+    expect($util.balanceBidi("a\u2068b\u2066c\u2069")).toBe("a\u2068b\u2066c\u2069\u2069");
+    expect($util.balanceBidi("a\u2066b\u2069\u2069c")).toBe("a\u2066b\u2069c");
+    expect($util.balanceBidi("a\u2029b\u0085c\u001cd\u001de\u001ef")).toBe("a b c d e f");
+    expect($util.balanceBidi("a\nb\u2028c")).toBe("a\nb\u2028c");
+    expect($util.balanceBidi("a\r\nb\rc")).toBe("a\nb c");
+    expect($util.balanceBidi("a\u2066b\nc\u2069d")).toBe("a\u2066b\u2069\ncd");
+    expect($util.balanceBidi("a\u2067b\u2069\nc")).toBe("a\u2067b\u2069\nc");
+    expect($util.balanceBidi("")).toBe("");
+    expect($util.balanceBidi(undefined)).toBe(undefined);
+  });
+  it("should isolate text for strings", () => {
+    expect($util.isolate("رحلة 2026")).toBe("\u2068رحلة 2026\u2069");
+    expect($util.isolate("a\u2069\u200Fb")).toBe("\u2068a\u200Fb\u2069");
+    expect($util.isolate("a\u2029b")).toBe("\u2068a b\u2069");
+    expect($util.isolate("a\u2066b\r\nc")).toBe("\u2068a\u2066b\u2069 c\u2069");
+    expect($util.isolate("")).toBe("");
+    expect($util.isolate(null)).toBe(null);
+  });
+  it("should link http URLs with https", () => {
+    expect($util.encodeHTML("see http://example.com/a")).toBe(
+      `see <a href="https://example.com/a" target="_blank" rel="noopener noreferrer" dir="ltr">http://example.com/a</a>`
+    );
+  });
+  it("should isolate linked URLs", () => {
+    expect($util.encodeHTML("\u202Esee https://example.com/a")).toBe(
+      `\u202Esee <a href="https://example.com/a" target="_blank" rel="noopener noreferrer" dir="ltr">https://example.com/a</a>`
+    );
+  });
   it("should encode html", () => {
-    const result = $util.encodeHTML("Micha & Theresa > < 'Lilly'");
-    expect(result).toBe("Micha &amp; Theresa &gt; &lt; &apos;Lilly&apos;");
+    const result = $util.encodeHTML("Alice & Bob > < 'Carol'");
+    expect(result).toBe("Alice &amp; Bob &gt; &lt; &apos;Carol&apos;");
   });
   it("should encode link", () => {
     const result = $util.encodeHTML("Try this: https://photoswipe.com/options/?foo=bar&bar=baz. It's a link!");
     expect(result).toBe(
-      `Try this: <a href="https://photoswipe.com/options/" target="_blank" rel="noopener noreferrer">https://photoswipe.com/options/</a> It&apos;s a link!`
+      `Try this: <a href="https://photoswipe.com/options/" target="_blank" rel="noopener noreferrer" dir="ltr">https://photoswipe.com/options/</a> It&apos;s a link!`
     );
   });
   it("should sanitize html using the shared allowlist", () => {
@@ -208,5 +253,265 @@ describe("common/util", () => {
     }
     // Check they are all unique
     expect(tokens.size).toBe(numTokens);
+  });
+
+  describe("normalizeTitle", () => {
+    it("preserves lowercase ASCII", () => {
+      expect($util.normalizeTitle("cat")).toBe("cat");
+    });
+    it("lowercases input", () => {
+      expect($util.normalizeTitle("Cat")).toBe("cat");
+    });
+    it("replaces & with and", () => {
+      expect($util.normalizeTitle("Rock & Roll")).toBe("rock and roll");
+    });
+    it("replaces underscores with spaces", () => {
+      expect($util.normalizeTitle("hello_world")).toBe("hello world");
+    });
+    it("replaces hyphens with spaces", () => {
+      expect($util.normalizeTitle("hello-world")).toBe("hello world");
+    });
+    it("replaces pluses with spaces", () => {
+      expect($util.normalizeTitle("hello+world")).toBe("hello world");
+    });
+    it("replaces periods with spaces", () => {
+      expect($util.normalizeTitle("hello.cat")).toBe("hello cat");
+      expect($util.normalizeTitle("photoprism.app")).toBe("photoprism app");
+      expect($util.normalizeTitle("2024.07.15")).toBe("2024 07 15");
+    });
+    it("treats all punctuation as word separators for case-insensitive comparison", () => {
+      // All punctuation (`.`, `,`, `;`, `:`, `!`, `?`, `/`, …) collapses
+      // to whitespace so the dedup comparison ignores it. Letters, digits,
+      // and emoji are preserved.
+      expect($util.normalizeTitle("foo,bar")).toBe("foo bar");
+      expect($util.normalizeTitle("foo;bar")).toBe("foo bar");
+      expect($util.normalizeTitle("foo:bar")).toBe("foo bar");
+      expect($util.normalizeTitle("foo!bar?baz")).toBe("foo bar baz");
+      expect($util.normalizeTitle("Mr. Smith")).toBe("mr smith");
+    });
+    it("collapses runs of mixed word separators into a single space", () => {
+      expect($util.normalizeTitle("hello._-+cat")).toBe("hello cat");
+      expect($util.normalizeTitle("hello . cat")).toBe("hello cat");
+      expect($util.normalizeTitle("foo,,, bar")).toBe("foo bar");
+    });
+    it("normalizes hello.cat, hello-cat, hello_cat, hello,cat, and Hello Cat to the same value", () => {
+      expect($util.normalizeTitle("hello.cat")).toBe("hello cat");
+      expect($util.normalizeTitle("hello-cat")).toBe("hello cat");
+      expect($util.normalizeTitle("hello_cat")).toBe("hello cat");
+      expect($util.normalizeTitle("hello,cat")).toBe("hello cat");
+      expect($util.normalizeTitle("Hello Cat")).toBe("hello cat");
+    });
+    it("preserves emoji", () => {
+      expect($util.normalizeTitle("🌅")).toBe("🌅");
+    });
+    it("preserves emoji with text", () => {
+      expect($util.normalizeTitle("🏔️ Mountains")).toBe("🏔️ mountains");
+    });
+    it("preserves compound emoji with ZWJ", () => {
+      expect($util.normalizeTitle("👨‍👩‍👧")).toBe("👨‍👩‍👧");
+    });
+    it("preserves accented characters", () => {
+      expect($util.normalizeTitle("café")).toBe("café");
+    });
+    it("preserves flag emoji", () => {
+      expect($util.normalizeTitle("🇺🇸")).toBe("🇺🇸");
+    });
+    it("preserves skin tone emoji", () => {
+      expect($util.normalizeTitle("👋🏽")).toBe("👋🏽");
+    });
+    it("preserves keycap sequences", () => {
+      expect($util.normalizeTitle("1️⃣")).toBe("1️⃣");
+    });
+    it("preserves CJK characters", () => {
+      expect($util.normalizeTitle("猫")).toBe("猫");
+    });
+    it("converts punctuation to whitespace and keeps emoji and text", () => {
+      expect($util.normalizeTitle("hello! 🌅 world")).toBe("hello 🌅 world");
+    });
+    it("returns empty for punctuation-only input", () => {
+      // Punctuation-only inputs collapse to a single space and then trim,
+      // so they normalize to empty — a title made entirely of punctuation
+      // characters cannot be created or matched.
+      expect($util.normalizeTitle("!!!")).toBe("");
+      expect($util.normalizeTitle("...")).toBe("");
+      expect($util.normalizeTitle("---")).toBe("");
+      expect($util.normalizeTitle("+_-.")).toBe("");
+      expect($util.normalizeTitle(",;:!?")).toBe("");
+    });
+    it("trims leading and trailing whitespace", () => {
+      expect($util.normalizeTitle("  hello cat  ")).toBe("hello cat");
+      expect($util.normalizeTitle(".hello-cat.")).toBe("hello cat");
+      expect($util.normalizeTitle("!!!hello!!!")).toBe("hello");
+    });
+    it("returns empty for null", () => {
+      expect($util.normalizeTitle(null)).toBe("");
+    });
+    it("returns empty for undefined", () => {
+      expect($util.normalizeTitle(undefined)).toBe("");
+    });
+  });
+
+  describe("fileType", () => {
+    it("returns the label for known file types", () => {
+      expect($util.fileType("jpg")).toBe("JPEG");
+      expect($util.fileType("cin")).toBe("Kodak Cineon");
+      expect($util.fileType("insp")).toBe("Insta360 Panoramic");
+      expect($util.fileType("insv")).toBe("Insta360");
+      expect($util.fileType("lrv")).toBe("Insta360 Proxy");
+      expect($util.fileType("thm")).toBe("Thumbnail");
+      expect($util.fileType("dv")).toBe("DV");
+      expect($util.fileType("mpo")).toBe("Stereoscopic JPEG (3D)");
+      expect($util.fileType("mxf")).toBe("Material Exchange Format (MXF)");
+      expect($util.fileType("3g2")).toBe("Mobile Multimedia Container (CDMA2000)");
+    });
+
+    it("should return the label of a metadata source", () => {
+      expect($util.sourceName("modified")).toBe("Modified");
+      expect($util.sourceName("meta")).toBe("Metadata");
+      expect($util.sourceName("name")).toBe("Name");
+      expect($util.sourceName("", "File")).toBe("File");
+    });
+    it("distinguishes the AV1 image format from the AV1 codec", () => {
+      expect($util.fileType("avif")).toBe("AV1 Image File Format (AVIF)");
+      expect($util.fileType("av1")).toBe("AOMedia Video 1 (AV1)");
+    });
+    it("falls back to the uppercase type", () => {
+      expect($util.fileType("json")).toBe("JSON");
+    });
+    it("returns empty for missing or non-string input", () => {
+      expect($util.fileType("")).toBe("");
+      expect($util.fileType(null)).toBe("");
+      expect($util.fileType(42)).toBe("");
+    });
+  });
+
+  describe("typeName", () => {
+    it("returns the localized label for known media types", () => {
+      expect($util.typeName("image")).toBe("Image");
+      expect($util.typeName("raw")).toBe("Raw");
+      expect($util.typeName("live")).toBe("Live");
+      expect($util.typeName("video")).toBe("Video");
+      expect($util.typeName("audio")).toBe("Audio");
+      expect($util.typeName("animated")).toBe("Animated");
+      expect($util.typeName("vector")).toBe("Vector");
+      expect($util.typeName("document")).toBe("Document");
+      expect($util.typeName("sidecar")).toBe("Sidecar");
+    });
+    it("falls back to defaultValue for unknown type", () => {
+      expect($util.typeName("unknown", "File")).toBe("File");
+    });
+    it("falls back to defaultValue for empty/null/undefined input", () => {
+      expect($util.typeName("", "File")).toBe("File");
+      expect($util.typeName(null, "File")).toBe("File");
+      expect($util.typeName(undefined, "File")).toBe("File");
+    });
+    it("returns empty string when no defaultValue and unknown type", () => {
+      expect($util.typeName("unknown")).toBe("");
+      expect($util.typeName(null)).toBe("");
+    });
+  });
+
+  // isMobile must return a Boolean. Earlier code short-circuited
+  // `navigator.maxTouchPoints && maxTouchPoints > 2`, which returned the
+  // Number 0 on desktop and tripped Vue prop type checks (VTooltip.disabled).
+  describe("isMobile", () => {
+    const userAgent = navigator.userAgent;
+    const maxTouchPoints = navigator.maxTouchPoints;
+    const stub = (ua, touch) => {
+      Object.defineProperty(navigator, "userAgent", { value: ua, configurable: true });
+      Object.defineProperty(navigator, "maxTouchPoints", { value: touch, configurable: true });
+    };
+    afterEach(() => stub(userAgent, maxTouchPoints));
+
+    it("returns Boolean false on desktop with no touch", () => {
+      stub("Mozilla/5.0 (X11; Linux x86_64)", 0);
+      const result = $util.isMobile();
+      expect(typeof result).toBe("boolean");
+      expect(result).toBe(false);
+    });
+    it("returns Boolean false when maxTouchPoints is undefined", () => {
+      stub("Mozilla/5.0 (X11; Linux x86_64)", undefined);
+      const result = $util.isMobile();
+      expect(typeof result).toBe("boolean");
+      expect(result).toBe(false);
+    });
+    it("returns true for a mobile user agent", () => {
+      stub("Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)", 0);
+      expect($util.isMobile()).toBe(true);
+    });
+    it("returns true when maxTouchPoints > 2 (iPad in desktop mode)", () => {
+      stub("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)", 5);
+      expect($util.isMobile()).toBe(true);
+    });
+    it("returns false when maxTouchPoints is 2 or less", () => {
+      stub("Mozilla/5.0 (X11; Linux x86_64)", 2);
+      expect($util.isMobile()).toBe(false);
+    });
+  });
+
+  describe("shouldOpenOnHover", () => {
+    const maxTouchPoints = navigator.maxTouchPoints;
+    const settings = $config.getSettings();
+    const openOnHover = settings.ui.openOnHover;
+    const stubTouch = (touch) => Object.defineProperty(navigator, "maxTouchPoints", { value: touch, configurable: true });
+    afterEach(() => {
+      stubTouch(maxTouchPoints);
+      settings.ui.openOnHover = openOnHover;
+    });
+
+    it("returns true when enabled and the device has no touch", () => {
+      stubTouch(0);
+      settings.ui.openOnHover = true;
+      expect($util.shouldOpenOnHover()).toBe(true);
+    });
+    it("returns false when the setting is disabled", () => {
+      stubTouch(0);
+      settings.ui.openOnHover = false;
+      expect($util.shouldOpenOnHover()).toBe(false);
+    });
+    it("defaults to true when the setting is absent", () => {
+      stubTouch(0);
+      delete settings.ui.openOnHover;
+      expect($util.shouldOpenOnHover()).toBe(true);
+    });
+    it("returns false on a touch device regardless of the setting", () => {
+      stubTouch(5);
+      settings.ui.openOnHover = true;
+      expect($util.shouldOpenOnHover()).toBe(false);
+    });
+  });
+
+  describe("pdfUrl", () => {
+    const hash = "bfdcf45e58b1978af66bbf6212c195851dc65814";
+    it("builds the inline PDF URL from the file hash", () => {
+      expect($util.pdfUrl(hash)).toBe(`${$config.apiUri}/files/${hash}/file.pdf`);
+      // No preview token in the path: the request is authenticated by header.
+      expect($util.pdfUrl(hash)).toBe("/api/v1/files/bfdcf45e58b1978af66bbf6212c195851dc65814/file.pdf");
+    });
+    it("returns an empty string without a hash", () => {
+      expect($util.pdfUrl("")).toBe("");
+      expect($util.pdfUrl(undefined)).toBe("");
+    });
+  });
+
+  describe("mapAnimateDuration", () => {
+    it("returns the global Maps.Animate duration by default", () => {
+      expect($util.mapAnimateDuration({ maps: { animate: 400 } })).toBe(400);
+    });
+    it("prefers a non-negative override over the global setting", () => {
+      expect($util.mapAnimateDuration({ maps: { animate: 400 } }, 0)).toBe(0);
+      expect($util.mapAnimateDuration({ maps: { animate: 400 } }, 250)).toBe(250);
+    });
+    it("ignores a negative override and falls back to the global setting", () => {
+      expect($util.mapAnimateDuration({ maps: { animate: 400 } }, -1)).toBe(400);
+    });
+    it("forces 0 when Reduce Motion is enabled, overriding both sources", () => {
+      expect($util.mapAnimateDuration({ ui: { reduceMotion: true }, maps: { animate: 400 } })).toBe(0);
+      expect($util.mapAnimateDuration({ ui: { reduceMotion: true }, maps: { animate: 400 } }, 250)).toBe(0);
+    });
+    it("returns 0 when no settings or animation value is available", () => {
+      expect($util.mapAnimateDuration(undefined)).toBe(0);
+      expect($util.mapAnimateDuration({})).toBe(0);
+    });
   });
 });

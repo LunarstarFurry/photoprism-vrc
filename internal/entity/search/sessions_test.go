@@ -4,7 +4,9 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
+	"github.com/photoprism/photoprism/internal/entity"
 	"github.com/photoprism/photoprism/internal/entity/sortby"
 	"github.com/photoprism/photoprism/internal/form"
 	"github.com/photoprism/photoprism/pkg/rnd"
@@ -13,7 +15,9 @@ import (
 func TestSessions(t *testing.T) {
 	expectedUserUid := "uqxetse3cy5eo9z2"
 	expectedUserName := "alice"
-	expectedSessionId := "fde4d5154d5383370c9f0c21fd51655d54a185a26dc043d1866fc4678e7ecb62"
+	// First of alice's sessions ordered by ClientName: the "alice_app_password"
+	// app-password fixture (application provider, default method).
+	expectedSessionId := "84ced4d6b1b9e5db31d4ad5364d9b7da6b2a0e85372a46df9784852d8ada6e48"
 
 	t.Run("Default", func(t *testing.T) {
 		if results, err := Sessions(form.SearchSessions{}); err != nil {
@@ -103,6 +107,18 @@ func TestSessions(t *testing.T) {
 			}
 		}
 	})
+	t.Run("SortByLoginAtReverse", func(t *testing.T) {
+		if results, err := Sessions(form.SearchSessions{Count: 100, Offset: 2, Order: sortby.LoginAt, Reverse: true}); err != nil {
+			t.Fatal(err)
+		} else {
+			// t.Logf("sessions: %#v", results)
+			assert.LessOrEqual(t, 1, len(results))
+			if len(results) > 0 {
+				assert.Equal(t, "Analytics", results[0].ClientName)
+				assert.Equal(t, "Invalid", results[1].ClientName)
+			}
+		}
+	})
 	t.Run("SortByCreatedAt", func(t *testing.T) {
 		if results, err := Sessions(form.SearchSessions{Count: 100, Order: sortby.CreatedAt}); err != nil {
 			t.Fatal(err)
@@ -120,4 +136,62 @@ func TestSessions(t *testing.T) {
 		assert.Error(t, err)
 		assert.Empty(t, results)
 	})
+}
+
+func TestSessions_Literal(t *testing.T) {
+	base := "zzl" + rnd.Base36(5)
+
+	for _, name := range []string{base + "_a", base + "Xa"} {
+		s := entity.NewSession(3600, 0)
+		s.UserName = name
+		require.NoError(t, s.Create())
+		t.Cleanup(func() { _ = entity.UnscopedDb().Delete(s).Error })
+	}
+
+	result, err := Sessions(form.SearchSessions{Query: base + "_a", Count: 100})
+	require.NoError(t, err)
+
+	if assert.Len(t, result, 1) {
+		assert.Equal(t, base+"_a", result[0].UserName)
+	}
+}
+
+func TestSessions_Bindable(t *testing.T) {
+	base := "zzb" + rnd.Base36(5)
+
+	s := entity.NewSession(3600, 0)
+	s.UserName = base + "name"
+	require.NoError(t, s.Create())
+	t.Cleanup(func() { _ = entity.UnscopedDb().Delete(s).Error })
+
+	result, err := Sessions(form.SearchSessions{Query: base + "\x00na\xffme", Count: 100})
+	require.NoError(t, err)
+
+	if assert.Len(t, result, 1) {
+		assert.Equal(t, base+"name", result[0].UserName)
+	}
+
+	uid := entity.UserFixtures.Get("alice").UserUID
+	expected, err := Sessions(form.SearchSessions{UID: uid, Count: 100})
+	require.NoError(t, err)
+	require.NotEmpty(t, expected)
+
+	result, err = Sessions(form.SearchSessions{UID: uid[:4] + "\x00" + uid[4:] + "\xff", Count: 100})
+	require.NoError(t, err)
+	assert.Len(t, result, len(expected))
+}
+
+func TestSessions_NoMatch(t *testing.T) {
+	// A filter value of only NUL bytes and invalid UTF-8 matches nothing, while an empty one stays unfiltered.
+	all, err := Sessions(form.SearchSessions{Count: 100})
+	require.NoError(t, err)
+	require.NotEmpty(t, all)
+
+	for _, frm := range []form.SearchSessions{{Query: "\x00", Count: 100}, {UID: "\xff", Count: 100},
+		{Provider: "\xff", Count: 100}, {Method: "\x00", Count: 100}, {Query: "\x00 ", Count: 100}, {Query: "\xff|", Count: 100}} {
+		result, err := Sessions(frm)
+		require.NoError(t, err)
+		assert.NotNil(t, result)
+		assert.Empty(t, result, "%+v", frm)
+	}
 }

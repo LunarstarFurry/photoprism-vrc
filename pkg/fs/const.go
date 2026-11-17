@@ -2,11 +2,14 @@ package fs
 
 // Common file names and patterns used across packages.
 const (
-	PPIgnoreFilename  = ".ppignore"
 	PPIgnoreAll       = "*"
+	PPIgnoreFilename  = ".ppignore"
 	PPStorageFilename = ".ppstorage"
 	PPHiddenPathname  = ".photoprism"
 )
+
+// NameMaxLen is the length in bytes of the longest file or folder name that common file systems accept.
+const NameMaxLen = 255
 
 // Common directory names used across packages (sorted by name).
 const (
@@ -23,6 +26,7 @@ const (
 	ConfigDir       = "config"
 	IconsDir        = "icons"
 	ImgDir          = "img"
+	KeysDir         = "keys"
 	LocalesDir      = "locales"
 	MediaDir        = "media"
 	ModelsDir       = "models"
@@ -52,4 +56,24 @@ const (
 	VersionTxtFile       = "version.txt"
 	JoinTokenFile        = "join_token"
 	ClientSecretFile     = "client_secret"
+)
+
+// EnvFileName is the standard environment-file basename.
+const EnvFileName = ".env"
+
+// SerialFile is the storage-identity filename.
+const SerialFile = "serial"
+
+// SigningKeyFile is the instance signing-key filename.
+const SigningKeyFile = "signing.key"
+
+// IgnoreFilePattern matches hidden ignore-configuration basenames.
+const IgnoreFilePattern = ".*ignore"
+
+// Common configuration basenames retain extension selection through ConfigFilePath.
+const (
+	ConfigDefaultsName = "defaults"
+	ConfigHubName      = "hub"
+	ConfigOptionsName  = "options"
+	ConfigSettingsName = "settings"
 )

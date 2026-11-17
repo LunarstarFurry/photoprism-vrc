@@ -29,7 +29,7 @@ func (m PhotoMap) Pointer(name string) *Photo {
 }
 
 var PhotoFixtures = PhotoMap{
-	"19800101_000002_D640C559": { //JPG, Imported, No Geo-information
+	"19800101_000002_D640C559": { // JPG, Imported, No Geo-information
 		ID: 1000000,
 		// UUID:
 		PhotoUID:      "ps6sg6be2lvl0yh7",
@@ -46,7 +46,7 @@ var PhotoFixtures = PhotoMap{
 		PhotoName:     "27900704_070228_D6D51B6C",
 		OriginalName:  "Vacation/exampleFileNameOriginal",
 		PhotoFavorite: false,
-		//PhotoSingle
+		// PhotoSingle
 		PhotoPrivate:     false,
 		PhotoScan:        false,
 		PhotoPanorama:    false,
@@ -92,12 +92,11 @@ var PhotoFixtures = PhotoMap{
 		UpdatedAt:  time.Date(2008, 1, 1, 0, 0, 0, 0, time.UTC),
 		EditedAt:   nil,
 		CheckedAt:  &checkedTime,
-		DeletedAt:  nil,
 		PhotoColor: 9,
 		PhotoStack: 0,
 		PhotoFaces: 3,
 	},
-	"Photo01": { //DNG + XMP,  Indexed, lat/lng manually set
+	"Photo01": { // DNG + XMP,  Indexed, lat/lng manually set
 		ID:               1000001,
 		PhotoUID:         "ps6sg6be2lvl0yh8",
 		TakenAt:          time.Date(2006, 1, 1, 2, 0, 0, 0, time.UTC),
@@ -153,12 +152,11 @@ var PhotoFixtures = PhotoMap{
 		UpdatedAt:  time.Date(2020, 3, 28, 14, 6, 0, 0, time.UTC),
 		EditedAt:   nil,
 		CheckedAt:  &checkedTime,
-		DeletedAt:  nil,
 		PhotoColor: 3,
 		PhotoStack: 0,
 		PhotoFaces: 0,
 	},
-	"Photo02": { //JPG, Indexed, No Geo-information
+	"Photo02": { // JPG, Indexed, No Geo-information
 		ID:               1000002,
 		PhotoUID:         "ps6sg6be2lvl0yh9",
 		TakenAt:          time.Date(1990, 3, 2, 0, 0, 0, 0, time.UTC),
@@ -214,7 +212,6 @@ var PhotoFixtures = PhotoMap{
 		UpdatedAt:  time.Date(2010, 1, 1, 0, 0, 0, 0, time.UTC),
 		EditedAt:   nil,
 		CheckedAt:  &checkedTime,
-		DeletedAt:  nil,
 		PhotoColor: 12,
 		PhotoStack: 0,
 		PhotoFaces: 1,
@@ -223,7 +220,7 @@ var PhotoFixtures = PhotoMap{
 		ID:               1000003,
 		PhotoUID:         "ps6sg6be2lvl0yh0",
 		TakenAt:          time.Date(1990, 4, 18, 1, 0, 0, 0, time.UTC),
-		TakenAtLocal:     time.Date(1990, 4, 18, 1, 0, 0, 0, time.UTC),
+		TakenAtLocal:     time.Date(1990, 4, 18, 1, 0, 0, 0, time.FixedZone("UTC+8", +8*60*60)),
 		TakenSrc:         SrcMeta,
 		PhotoType:        MediaVideo,
 		PhotoDuration:    time.Hour * 2,
@@ -278,12 +275,11 @@ var PhotoFixtures = PhotoMap{
 		UpdatedAt:  time.Date(2008, 1, 1, 0, 0, 0, 0, time.UTC),
 		EditedAt:   Time("2022-01-01T00:00:00Z"),
 		CheckedAt:  &checkedTime,
-		DeletedAt:  nil,
 		PhotoColor: 12,
 		PhotoStack: 0,
 		PhotoFaces: 1,
 	},
-	"Photo04": { //JPG, Indexed, Place estimated
+	"Photo04": { // JPG, Indexed, Place estimated
 		ID:               1000004,
 		PhotoUID:         "ps6sg6be2lvl0y11",
 		TakenAt:          time.Date(2014, 7, 17, 15, 42, 12, 0, time.UTC),
@@ -342,12 +338,11 @@ var PhotoFixtures = PhotoMap{
 		UpdatedAt:  time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC),
 		EditedAt:   Time("2020-06-01T00:00:00Z"),
 		CheckedAt:  &checkedTime,
-		DeletedAt:  nil,
 		PhotoColor: 12,
 		PhotoStack: 0,
 		PhotoFaces: 3,
 	},
-	"Photo05": { //JPG, Imported, File error, TakenAtSrc Name, titleSrc Name
+	"Photo05": { // JPG, Imported, File error, TakenAtSrc Name, titleSrc Name
 		ID:               1000005,
 		PhotoUID:         "ps6sg6be2lvl0y12",
 		TakenAt:          time.Date(2015, 11, 1, 0, 0, 0, 0, time.UTC),
@@ -401,7 +396,6 @@ var PhotoFixtures = PhotoMap{
 		UpdatedAt:        time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC),
 		EditedAt:         nil,
 		CheckedAt:        &checkedTime,
-		DeletedAt:        nil,
 		PhotoColor:       6,
 		PhotoStack:       0,
 		PhotoFaces:       2,
@@ -460,7 +454,6 @@ var PhotoFixtures = PhotoMap{
 		UpdatedAt:        time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC),
 		EditedAt:         nil,
 		CheckedAt:        &checkedTime,
-		DeletedAt:        nil,
 		PhotoColor:       4,
 		PhotoStack:       0,
 		PhotoFaces:       0,
@@ -519,7 +512,6 @@ var PhotoFixtures = PhotoMap{
 		UpdatedAt:        time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC),
 		EditedAt:         &editTime,
 		CheckedAt:        &checkedTime,
-		DeletedAt:        nil,
 		PhotoColor:       4,
 		PhotoStack:       0,
 		PhotoFaces:       0,
@@ -578,7 +570,6 @@ var PhotoFixtures = PhotoMap{
 		UpdatedAt:        time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC),
 		EditedAt:         nil,
 		CheckedAt:        &checkedTime,
-		DeletedAt:        nil,
 		PhotoColor:       1,
 		PhotoStack:       0,
 		PhotoFaces:       0,
@@ -637,12 +628,11 @@ var PhotoFixtures = PhotoMap{
 		UpdatedAt:        time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC),
 		EditedAt:         nil,
 		CheckedAt:        &checkedTime,
-		DeletedAt:        nil,
 		PhotoColor:       1,
 		PhotoStack:       0,
 		PhotoFaces:       0,
 	},
-	"Photo10": { //mp4 + mp4 with error + jpg in sidecar, Indexed
+	"Photo10": { // mp4 + mp4 with error + jpg in sidecar, Indexed
 		ID:               1000010,
 		PhotoUID:         "ps6sg6be2lvl0y17",
 		TakenAt:          time.Date(2016, 11, 11, 9, 7, 18, 0, time.UTC),
@@ -697,7 +687,6 @@ var PhotoFixtures = PhotoMap{
 		UpdatedAt:        time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC),
 		EditedAt:         nil,
 		CheckedAt:        &checkedTime,
-		DeletedAt:        nil,
 		PhotoColor:       9,
 		PhotoStack:       0,
 		PhotoFaces:       1,
@@ -756,12 +745,11 @@ var PhotoFixtures = PhotoMap{
 		UpdatedAt:        time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC),
 		EditedAt:         nil,
 		CheckedAt:        &checkedTime,
-		DeletedAt:        nil,
 		PhotoColor:       11,
 		PhotoStack:       0,
 		PhotoFaces:       0,
 	},
-	"Photo12": { //JPG
+	"Photo12": { // JPG
 		ID:               1000012,
 		PhotoUID:         "ps6sg6be2lvl0y19",
 		TakenAt:          time.Date(2016, 01, 11, 9, 7, 18, 0, time.UTC),
@@ -815,12 +803,11 @@ var PhotoFixtures = PhotoMap{
 		UpdatedAt:        time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC),
 		EditedAt:         nil,
 		CheckedAt:        &checkedTime,
-		DeletedAt:        nil,
 		PhotoColor:       1,
 		PhotoStack:       0,
 		PhotoFaces:       0,
 	},
-	"Photo13": { //JPG
+	"Photo13": { // JPG
 		ID:               1000013,
 		PhotoUID:         "ps6sg6be2lvl0y20",
 		TakenAt:          time.Date(2016, 06, 11, 9, 7, 18, 0, time.UTC),
@@ -874,12 +861,11 @@ var PhotoFixtures = PhotoMap{
 		UpdatedAt:        time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC),
 		EditedAt:         nil,
 		CheckedAt:        &checkedTime,
-		DeletedAt:        nil,
 		PhotoColor:       1,
 		PhotoStack:       0,
 		PhotoFaces:       0,
 	},
-	"Photo14": { //JPG
+	"Photo14": { // JPG
 		ID:               1000014,
 		PhotoUID:         "ps6sg6be2lvl0y21",
 		TakenAt:          time.Date(2018, 11, 11, 9, 7, 18, 0, time.UTC),
@@ -933,7 +919,6 @@ var PhotoFixtures = PhotoMap{
 		UpdatedAt:        time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC),
 		EditedAt:         nil,
 		CheckedAt:        &checkedTime,
-		DeletedAt:        nil,
 		PhotoColor:       1,
 		PhotoStack:       0,
 		PhotoFaces:       0,
@@ -992,12 +977,11 @@ var PhotoFixtures = PhotoMap{
 		UpdatedAt:        time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC),
 		EditedAt:         nil,
 		CheckedAt:        &checkedTime,
-		DeletedAt:        nil,
 		PhotoColor:       6,
 		PhotoStack:       0,
 		PhotoFaces:       0,
 	},
-	"Photo16": { //JPG
+	"Photo16": { // JPG
 		ID:               1000016,
 		PhotoUID:         "ps6sg6be2lvl0y23",
 		TakenAt:          time.Date(2013, 11, 11, 9, 7, 18, 0, time.UTC),
@@ -1051,7 +1035,6 @@ var PhotoFixtures = PhotoMap{
 		UpdatedAt:        time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC),
 		EditedAt:         nil,
 		CheckedAt:        &checkedTime,
-		DeletedAt:        nil,
 		PhotoColor:       1,
 		PhotoStack:       0,
 		PhotoFaces:       0,
@@ -1112,7 +1095,6 @@ var PhotoFixtures = PhotoMap{
 		UpdatedAt:  time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC),
 		EditedAt:   nil,
 		CheckedAt:  &checkedTime,
-		DeletedAt:  nil,
 		PhotoColor: 6,
 		PhotoStack: 0,
 		PhotoFaces: 0,
@@ -1173,7 +1155,7 @@ var PhotoFixtures = PhotoMap{
 		UpdatedAt:  time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC),
 		EditedAt:   nil,
 		CheckedAt:  &checkedTime,
-		DeletedAt:  &deleteTime,
+		DeletedAt:  DeletedAtTime(deleteTime),
 		PhotoColor: 9,
 		PhotoStack: 0,
 		PhotoFaces: 0,
@@ -1233,7 +1215,6 @@ var PhotoFixtures = PhotoMap{
 		UpdatedAt:        time.Date(2010, 1, 1, 0, 0, 0, 0, time.UTC),
 		EditedAt:         nil,
 		CheckedAt:        &checkedTime,
-		DeletedAt:        nil,
 		PhotoColor:       12,
 		PhotoStack:       0,
 		PhotoFaces:       0,
@@ -1292,7 +1273,6 @@ var PhotoFixtures = PhotoMap{
 		UpdatedAt:        time.Date(2008, 1, 1, 0, 0, 0, 0, time.UTC),
 		EditedAt:         nil,
 		CheckedAt:        &checkedTime,
-		DeletedAt:        nil,
 		PhotoColor:       1,
 		PhotoStack:       0,
 		PhotoFaces:       0,
@@ -1351,7 +1331,6 @@ var PhotoFixtures = PhotoMap{
 		UpdatedAt:        time.Date(2021, 1, 1, 0, 0, 0, 0, time.UTC),
 		EditedAt:         nil,
 		CheckedAt:        &checkedTime,
-		DeletedAt:        nil,
 		PhotoColor:       14,
 		PhotoStack:       0,
 		PhotoFaces:       0,
@@ -1410,12 +1389,11 @@ var PhotoFixtures = PhotoMap{
 		UpdatedAt:        time.Date(2010, 1, 1, 8, 0, 0, 0, time.UTC),
 		EditedAt:         nil,
 		CheckedAt:        &checkedTime,
-		DeletedAt:        nil,
 		PhotoColor:       14,
 		PhotoStack:       0,
 		PhotoFaces:       0,
 	},
-	"Photo23": { //JPG, Favorite
+	"Photo23": { // JPG, Favorite
 		ID:               1000023,
 		PhotoUID:         "ps6sg6be2lvl0y43",
 		TakenAt:          time.Date(2020, 11, 11, 9, 7, 18, 0, time.UTC),
@@ -1465,13 +1443,11 @@ var PhotoFixtures = PhotoMap{
 		Albums:           []Album{},
 		Files:            []File{},
 		Labels: []PhotoLabel{
-			LabelFixtures.PhotoLabel(10000018, "landscape", 20, "image"),
-			LabelFixtures.PhotoLabel(10000018, "likeLabel", 20, "image")},
+			LabelFixtures.PhotoLabel(1000023, "landscape", 20, "image")},
 		CreatedAt:  time.Date(2021, 1, 1, 0, 0, 0, 0, time.UTC),
 		UpdatedAt:  time.Date(2021, 1, 1, 0, 0, 0, 0, time.UTC),
 		EditedAt:   nil,
 		CheckedAt:  &checkedTime,
-		DeletedAt:  nil,
 		PhotoColor: 14,
 		PhotoStack: 0,
 		PhotoFaces: 0,
@@ -1526,13 +1502,11 @@ var PhotoFixtures = PhotoMap{
 		Albums:           []Album{},
 		Files:            []File{},
 		Labels: []PhotoLabel{
-			LabelFixtures.PhotoLabel(10000018, "landscape", 20, "image"),
-			LabelFixtures.PhotoLabel(10000018, "likeLabel", 20, "image")},
+			LabelFixtures.PhotoLabel(1000024, "likeLabel", 20, "image")},
 		CreatedAt:  time.Date(2021, 1, 1, 0, 0, 0, 0, time.UTC),
 		UpdatedAt:  time.Date(2021, 1, 1, 0, 0, 0, 0, time.UTC),
 		EditedAt:   nil,
 		CheckedAt:  &checkedTime,
-		DeletedAt:  nil,
 		PhotoColor: 14,
 		PhotoStack: 0,
 		PhotoFaces: 0,
@@ -1595,7 +1569,6 @@ var PhotoFixtures = PhotoMap{
 		UpdatedAt:  time.Date(2007, 3, 1, 0, 0, 0, 0, time.UTC),
 		EditedAt:   &editTime,
 		CheckedAt:  &checkedTime,
-		DeletedAt:  nil,
 		PhotoColor: 12,
 		PhotoStack: IsUnstacked,
 		PhotoFaces: 0,
@@ -1656,7 +1629,6 @@ var PhotoFixtures = PhotoMap{
 		UpdatedAt:  time.Date(2021, 1, 1, 0, 0, 0, 0, time.UTC),
 		EditedAt:   nil,
 		CheckedAt:  &checkedTime,
-		DeletedAt:  nil,
 		PhotoColor: 14,
 		PhotoStack: IsUnstacked,
 		PhotoFaces: 0,
@@ -1718,7 +1690,6 @@ var PhotoFixtures = PhotoMap{
 		UpdatedAt:  time.Date(2021, 1, 1, 0, 0, 0, 0, time.UTC),
 		EditedAt:   nil,
 		CheckedAt:  &checkedTime,
-		DeletedAt:  nil,
 		PhotoColor: 12,
 		PhotoStack: IsStackable,
 		PhotoFaces: 3,
@@ -1784,7 +1755,6 @@ var PhotoFixtures = PhotoMap{
 		EditedAt:    nil,
 		CheckedAt:   nil,
 		EstimatedAt: nil,
-		DeletedAt:   nil,
 		PhotoColor:  12,
 		PhotoStack:  IsStackable,
 		PhotoFaces:  0,
@@ -1850,12 +1820,11 @@ var PhotoFixtures = PhotoMap{
 		EditedAt:    nil,
 		CheckedAt:   nil,
 		EstimatedAt: nil,
-		DeletedAt:   nil,
 		PhotoColor:  12,
 		PhotoStack:  IsStackable,
 		PhotoFaces:  0,
 	},
-	"%photo28": { //JPG, Geo from metadata, indexed
+	"%photo28": { // JPG, Geo from metadata, indexed
 		ID:               10000029,
 		PhotoUID:         "ps6sg6byk7wrbk21",
 		TakenAt:          time.Date(2020, 11, 11, 9, 7, 18, 0, time.UTC),
@@ -1913,12 +1882,11 @@ var PhotoFixtures = PhotoMap{
 		UpdatedAt:  time.Date(2021, 1, 1, 0, 0, 0, 0, time.UTC),
 		EditedAt:   nil,
 		CheckedAt:  &checkedTime,
-		DeletedAt:  nil,
 		PhotoColor: 14,
 		PhotoStack: 0,
 		PhotoFaces: 0,
 	},
-	"photo29%": { //JPG, Geo from metadata, indexed
+	"photo29%": { // JPG, Geo from metadata, indexed
 		ID:               1000030,
 		PhotoUID:         "ps6sg6byk7wrbk22",
 		TakenAt:          time.Date(2020, 11, 11, 9, 7, 18, 0, time.UTC),
@@ -1976,12 +1944,11 @@ var PhotoFixtures = PhotoMap{
 		UpdatedAt:  time.Date(2021, 1, 1, 0, 0, 0, 0, time.UTC),
 		EditedAt:   nil,
 		CheckedAt:  &checkedTime,
-		DeletedAt:  nil,
 		PhotoColor: 14,
 		PhotoStack: 0,
 		PhotoFaces: 0,
 	},
-	"photo%30": { //JPG, Geo from metadata, indexed
+	"photo%30": { // JPG, Geo from metadata, indexed
 		ID:               1000031,
 		PhotoUID:         "ps6sg6byk7wrbk23",
 		TakenAt:          time.Date(2020, 11, 11, 9, 7, 18, 0, time.UTC),
@@ -2039,12 +2006,11 @@ var PhotoFixtures = PhotoMap{
 		UpdatedAt:  time.Date(2021, 1, 1, 0, 0, 0, 0, time.UTC),
 		EditedAt:   nil,
 		CheckedAt:  &checkedTime,
-		DeletedAt:  nil,
 		PhotoColor: 14,
 		PhotoStack: 0,
 		PhotoFaces: 0,
 	},
-	"&photo31": { //JPG, Geo from metadata, indexed
+	"&photo31": { // JPG, Geo from metadata, indexed
 		ID:               1000032,
 		PhotoUID:         "ps6sg6byk7wrbk24",
 		TakenAt:          time.Date(2020, 11, 11, 9, 7, 18, 0, time.UTC),
@@ -2102,12 +2068,11 @@ var PhotoFixtures = PhotoMap{
 		UpdatedAt:  time.Date(2021, 1, 1, 0, 0, 0, 0, time.UTC),
 		EditedAt:   nil,
 		CheckedAt:  &checkedTime,
-		DeletedAt:  nil,
 		PhotoColor: 14,
 		PhotoStack: 0,
 		PhotoFaces: 0,
 	},
-	"photo&32": { //JPG, Geo from metadata, indexed
+	"photo&32": { // JPG, Geo from metadata, indexed
 		ID:               1000033,
 		PhotoUID:         "ps6sg6byk7wrbk25",
 		TakenAt:          time.Date(2020, 11, 11, 9, 7, 18, 0, time.UTC),
@@ -2165,12 +2130,11 @@ var PhotoFixtures = PhotoMap{
 		UpdatedAt:  time.Date(2021, 1, 1, 0, 0, 0, 0, time.UTC),
 		EditedAt:   nil,
 		CheckedAt:  &checkedTime,
-		DeletedAt:  nil,
 		PhotoColor: 14,
 		PhotoStack: 0,
 		PhotoFaces: 0,
 	},
-	"photo33&": { //JPG, Geo from metadata, indexed
+	"photo33&": { // JPG, Geo from metadata, indexed
 		ID:               1000034,
 		PhotoUID:         "ps6sg6byk7wrbk26",
 		TakenAt:          time.Date(2020, 11, 11, 9, 7, 18, 0, time.UTC),
@@ -2228,12 +2192,11 @@ var PhotoFixtures = PhotoMap{
 		UpdatedAt:  time.Date(2021, 1, 1, 0, 0, 0, 0, time.UTC),
 		EditedAt:   nil,
 		CheckedAt:  &checkedTime,
-		DeletedAt:  nil,
 		PhotoColor: 14,
 		PhotoStack: 0,
 		PhotoFaces: 0,
 	},
-	"'photo34": { //JPG, Geo from metadata, indexed
+	"'photo34": { // JPG, Geo from metadata, indexed
 		ID:               1000035,
 		PhotoUID:         "ps6sg6byk7wrbk27",
 		TakenAt:          time.Date(2020, 11, 11, 9, 7, 18, 0, time.UTC),
@@ -2291,12 +2254,11 @@ var PhotoFixtures = PhotoMap{
 		UpdatedAt:  time.Date(2021, 1, 1, 0, 0, 0, 0, time.UTC),
 		EditedAt:   nil,
 		CheckedAt:  &checkedTime,
-		DeletedAt:  nil,
 		PhotoColor: 14,
 		PhotoStack: 0,
 		PhotoFaces: 0,
 	},
-	"photo'35": { //JPG, Geo from metadata, indexed
+	"photo'35": { // JPG, Geo from metadata, indexed
 		ID:               1000036,
 		PhotoUID:         "ps6sg6byk7wrbk28",
 		TakenAt:          time.Date(2020, 11, 11, 9, 7, 18, 0, time.UTC),
@@ -2354,12 +2316,11 @@ var PhotoFixtures = PhotoMap{
 		UpdatedAt:  time.Date(2021, 1, 1, 0, 0, 0, 0, time.UTC),
 		EditedAt:   nil,
 		CheckedAt:  &checkedTime,
-		DeletedAt:  nil,
 		PhotoColor: 14,
 		PhotoStack: 0,
 		PhotoFaces: 0,
 	},
-	"photo36'": { //JPG, Geo from metadata, indexed
+	"photo36'": { // JPG, Geo from metadata, indexed
 		ID:               1000037,
 		PhotoUID:         "ps6sg6byk7wrbk29",
 		TakenAt:          time.Date(2020, 11, 11, 9, 7, 18, 0, time.UTC),
@@ -2417,12 +2378,11 @@ var PhotoFixtures = PhotoMap{
 		UpdatedAt:  time.Date(2021, 1, 1, 0, 0, 0, 0, time.UTC),
 		EditedAt:   nil,
 		CheckedAt:  &checkedTime,
-		DeletedAt:  nil,
 		PhotoColor: 14,
 		PhotoStack: 0,
 		PhotoFaces: 0,
 	},
-	"*photo37": { //JPG, Geo from metadata, indexed
+	"*photo37": { // JPG, Geo from metadata, indexed
 		ID:               1000038,
 		PhotoUID:         "ps6sg6byk7wrbk30",
 		TakenAt:          time.Date(2020, 11, 11, 9, 7, 18, 0, time.UTC),
@@ -2480,12 +2440,11 @@ var PhotoFixtures = PhotoMap{
 		UpdatedAt:  time.Date(2021, 1, 1, 0, 0, 0, 0, time.UTC),
 		EditedAt:   nil,
 		CheckedAt:  &checkedTime,
-		DeletedAt:  nil,
 		PhotoColor: 14,
 		PhotoStack: 0,
 		PhotoFaces: 0,
 	},
-	"photo*38": { //JPG, Geo from metadata, indexed
+	"photo*38": { // JPG, Geo from metadata, indexed
 		ID:               1000039,
 		PhotoUID:         "ps6sg6byk7wrbk31",
 		TakenAt:          time.Date(2020, 11, 11, 9, 7, 18, 0, time.UTC),
@@ -2543,16 +2502,15 @@ var PhotoFixtures = PhotoMap{
 		UpdatedAt:  time.Date(2021, 1, 1, 0, 0, 0, 0, time.UTC),
 		EditedAt:   nil,
 		CheckedAt:  &checkedTime,
-		DeletedAt:  nil,
 		PhotoColor: 14,
 		PhotoStack: 0,
 		PhotoFaces: 0,
 	},
-	"photo39*": { //JPG, Geo from metadata, indexed
+	"photo39*": { // JPG, Geo from metadata, indexed
 		ID:               1000040,
 		PhotoUID:         "ps6sg6byk7wrbk32",
-		TakenAt:          time.Date(2020, 11, 11, 9, 7, 18, 0, time.UTC),
-		TakenAtLocal:     time.Date(2020, 11, 11, 9, 7, 18, 0, time.UTC),
+		TakenAt:          time.Date(2020, 11, 11, 15, 7, 18, 0, time.UTC), // ensure 24h time_index on the file (Postgres regression test)
+		TakenAtLocal:     time.Date(2020, 11, 11, 15, 7, 18, 0, time.UTC),
 		TakenSrc:         SrcMeta,
 		PhotoType:        "image",
 		TypeSrc:          "",
@@ -2606,12 +2564,11 @@ var PhotoFixtures = PhotoMap{
 		UpdatedAt:  time.Date(2021, 1, 1, 0, 0, 0, 0, time.UTC),
 		EditedAt:   nil,
 		CheckedAt:  &checkedTime,
-		DeletedAt:  nil,
 		PhotoColor: 14,
 		PhotoStack: 0,
 		PhotoFaces: 0,
 	},
-	"|photo40": { //JPG, Geo from metadata, indexed
+	"|photo40": { // JPG, Geo from metadata, indexed
 		ID:               1000041,
 		PhotoUID:         "ps6sg6byk7wrbk33",
 		TakenAt:          time.Date(2020, 11, 11, 9, 7, 18, 0, time.UTC),
@@ -2669,12 +2626,11 @@ var PhotoFixtures = PhotoMap{
 		UpdatedAt:  time.Date(2021, 1, 1, 0, 0, 0, 0, time.UTC),
 		EditedAt:   nil,
 		CheckedAt:  &checkedTime,
-		DeletedAt:  nil,
 		PhotoColor: 14,
 		PhotoStack: 0,
 		PhotoFaces: 0,
 	},
-	"photo|41": { //JPG, Geo from metadata, indexed
+	"photo|41": { // JPG, Geo from metadata, indexed
 		ID:               1000042,
 		PhotoUID:         "ps6sg6byk7wrbk34",
 		TakenAt:          time.Date(2020, 11, 11, 9, 7, 18, 0, time.UTC),
@@ -2732,12 +2688,11 @@ var PhotoFixtures = PhotoMap{
 		UpdatedAt:  time.Date(2021, 1, 1, 0, 0, 0, 0, time.UTC),
 		EditedAt:   nil,
 		CheckedAt:  &checkedTime,
-		DeletedAt:  nil,
 		PhotoColor: 14,
 		PhotoStack: 0,
 		PhotoFaces: 0,
 	},
-	"photo42|": { //JPG, Geo from metadata, indexed
+	"photo42|": { // JPG, Geo from metadata, indexed
 		ID:               1000043,
 		PhotoUID:         "ps6sg6byk7wrbk35",
 		TakenAt:          time.Date(2020, 11, 11, 9, 7, 18, 0, time.UTC),
@@ -2795,12 +2750,11 @@ var PhotoFixtures = PhotoMap{
 		UpdatedAt:  time.Date(2021, 1, 1, 0, 0, 0, 0, time.UTC),
 		EditedAt:   nil,
 		CheckedAt:  &checkedTime,
-		DeletedAt:  nil,
 		PhotoColor: 14,
 		PhotoStack: 0,
 		PhotoFaces: 0,
 	},
-	"43photo": { //JPG, Geo from metadata, indexed
+	"43photo": { // JPG, Geo from metadata, indexed
 		ID:               1000044,
 		PhotoUID:         "ps6sg6byk7wrbk36",
 		TakenAt:          time.Date(2020, 11, 11, 9, 7, 18, 0, time.UTC),
@@ -2858,12 +2812,11 @@ var PhotoFixtures = PhotoMap{
 		UpdatedAt:  time.Date(2021, 1, 1, 0, 0, 0, 0, time.UTC),
 		EditedAt:   nil,
 		CheckedAt:  &checkedTime,
-		DeletedAt:  nil,
 		PhotoColor: 14,
 		PhotoStack: 0,
 		PhotoFaces: 0,
 	},
-	"pho44to": { //JPG, Geo from metadata, indexed
+	"pho44to": { // JPG, Geo from metadata, indexed
 		ID:               1000045,
 		PhotoUID:         "ps6sg6byk7wrbk37",
 		TakenAt:          time.Date(2020, 11, 11, 9, 7, 18, 0, time.UTC),
@@ -2921,12 +2874,11 @@ var PhotoFixtures = PhotoMap{
 		UpdatedAt:  time.Date(2021, 1, 1, 0, 0, 0, 0, time.UTC),
 		EditedAt:   nil,
 		CheckedAt:  &checkedTime,
-		DeletedAt:  nil,
 		PhotoColor: 14,
 		PhotoStack: 0,
 		PhotoFaces: 0,
 	},
-	"photo45": { //JPG, Geo from metadata, indexed
+	"photo45": { // JPG, Geo from metadata, indexed
 		ID:               1000046,
 		PhotoUID:         "ps6sg6byk7wrbk38",
 		TakenAt:          time.Date(2020, 11, 11, 9, 7, 18, 0, time.UTC),
@@ -2984,12 +2936,11 @@ var PhotoFixtures = PhotoMap{
 		UpdatedAt:  time.Date(2021, 1, 1, 0, 0, 0, 0, time.UTC),
 		EditedAt:   nil,
 		CheckedAt:  &checkedTime,
-		DeletedAt:  nil,
 		PhotoColor: 14,
 		PhotoStack: 0,
 		PhotoFaces: 0,
 	},
-	"\"photo46": { //JPG, Geo from metadata, indexed
+	"\"photo46": { // JPG, Geo from metadata, indexed
 		ID:               1000047,
 		PhotoUID:         "ps6sg6byk7wrbk39",
 		TakenAt:          time.Date(2020, 11, 11, 9, 7, 18, 0, time.UTC),
@@ -3047,12 +2998,11 @@ var PhotoFixtures = PhotoMap{
 		UpdatedAt:  time.Date(2021, 1, 1, 0, 0, 0, 0, time.UTC),
 		EditedAt:   nil,
 		CheckedAt:  &checkedTime,
-		DeletedAt:  nil,
 		PhotoColor: 14,
 		PhotoStack: 0,
 		PhotoFaces: 0,
 	},
-	"photo\"47": { //JPG, Geo from metadata, indexed
+	"photo\"47": { // JPG, Geo from metadata, indexed
 		ID:               1000048,
 		PhotoUID:         "ps6sg6byk7wrbk40",
 		TakenAt:          time.Date(2020, 11, 11, 9, 7, 18, 0, time.UTC),
@@ -3110,12 +3060,11 @@ var PhotoFixtures = PhotoMap{
 		UpdatedAt:  time.Date(2021, 1, 1, 0, 0, 0, 0, time.UTC),
 		EditedAt:   nil,
 		CheckedAt:  &checkedTime,
-		DeletedAt:  nil,
 		PhotoColor: 14,
 		PhotoStack: 0,
 		PhotoFaces: 0,
 	},
-	"photo48\"": { //JPG, Geo from metadata, indexed
+	"photo48\"": { // JPG, Geo from metadata, indexed
 		ID:               1000049,
 		PhotoUID:         "ps6sg6byk7wrbk41",
 		TakenAt:          time.Date(2020, 11, 11, 9, 7, 18, 0, time.UTC),
@@ -3173,12 +3122,11 @@ var PhotoFixtures = PhotoMap{
 		UpdatedAt:  time.Date(2021, 1, 1, 0, 0, 0, 0, time.UTC),
 		EditedAt:   nil,
 		CheckedAt:  &checkedTime,
-		DeletedAt:  nil,
 		PhotoColor: 14,
 		PhotoStack: 0,
 		PhotoFaces: 0,
 	},
-	" photo49": { //JPG, Geo from metadata, indexed
+	" photo49": { // JPG, Geo from metadata, indexed
 		ID:               1000050,
 		PhotoUID:         "ps6sg6byk7wrbk42",
 		TakenAt:          time.Date(2020, 11, 11, 9, 7, 18, 0, time.UTC),
@@ -3236,12 +3184,11 @@ var PhotoFixtures = PhotoMap{
 		UpdatedAt:  time.Date(2021, 1, 1, 0, 0, 0, 0, time.UTC),
 		EditedAt:   nil,
 		CheckedAt:  &checkedTime,
-		DeletedAt:  nil,
 		PhotoColor: 14,
 		PhotoStack: 0,
 		PhotoFaces: 0,
 	},
-	"photo 50": { //JPG, Geo from metadata, indexed
+	"photo 50": { // JPG, Geo from metadata, indexed
 		ID:               1000051,
 		PhotoUID:         "ps6sg6byk7wrbk43",
 		TakenAt:          time.Date(2020, 11, 11, 9, 7, 18, 0, time.UTC),
@@ -3299,12 +3246,11 @@ var PhotoFixtures = PhotoMap{
 		UpdatedAt:  time.Date(2021, 1, 1, 0, 0, 0, 0, time.UTC),
 		EditedAt:   nil,
 		CheckedAt:  &checkedTime,
-		DeletedAt:  nil,
 		PhotoColor: 14,
 		PhotoStack: 0,
 		PhotoFaces: 0,
 	},
-	"photo51 ": { //JPG, Geo from metadata, indexed, in review
+	"photo51 ": { // JPG, Geo from metadata, indexed, in review
 		ID:               1000052,
 		PhotoUID:         "ps6sg6byk7wrbk44",
 		TakenAt:          time.Date(2020, 11, 11, 9, 7, 18, 0, time.UTC),
@@ -3362,12 +3308,11 @@ var PhotoFixtures = PhotoMap{
 		UpdatedAt:  time.Date(2021, 1, 1, 0, 0, 0, 0, time.UTC),
 		EditedAt:   nil,
 		CheckedAt:  &checkedTime,
-		DeletedAt:  nil,
 		PhotoColor: 14,
 		PhotoStack: 0,
 		PhotoFaces: 0,
 	},
-	"Photo52": { //GIF + JPG, Geo from metadata, indexed
+	"Photo52": { // GIF + JPG, Geo from metadata, indexed
 		ID:               1000053,
 		PhotoUID:         "ps6sg6byk7wrbk45",
 		TakenAt:          time.Date(2020, 11, 11, 9, 7, 18, 0, time.UTC),
@@ -3421,12 +3366,11 @@ var PhotoFixtures = PhotoMap{
 		UpdatedAt:        time.Date(2021, 1, 1, 0, 0, 0, 0, time.UTC),
 		EditedAt:         nil,
 		CheckedAt:        &checkedTime,
-		DeletedAt:        nil,
 		PhotoColor:       14,
 		PhotoStack:       0,
 		PhotoFaces:       0,
 	},
-	"Photo53": { //JPG, Geo from metadata, indexed
+	"Photo53": { // JPG, Geo from metadata, indexed
 		ID:               1000054,
 		PhotoUID:         "ps6sg6byk7wrbk46",
 		TakenAt:          time.Date(2023, 11, 13, 9, 7, 18, 0, time.UTC),
@@ -3480,12 +3424,11 @@ var PhotoFixtures = PhotoMap{
 		UpdatedAt:        time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC),
 		EditedAt:         nil,
 		CheckedAt:        &checkedTime,
-		DeletedAt:        nil,
 		PhotoColor:       14,
 		PhotoStack:       0,
 		PhotoFaces:       0,
 	},
-	"Photo54": { //JPG + JPG, Geo from metadata, indexed
+	"Photo54": { // JPG + JPG, Geo from metadata, indexed
 		ID:               1000055,
 		PhotoUID:         "ps6sg6byk7wrbk47",
 		TakenAt:          time.Date(2023, 11, 12, 9, 7, 18, 0, time.UTC),
@@ -3539,12 +3482,11 @@ var PhotoFixtures = PhotoMap{
 		UpdatedAt:        time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC),
 		EditedAt:         nil,
 		CheckedAt:        &checkedTime,
-		DeletedAt:        nil,
 		PhotoColor:       14,
 		PhotoStack:       0,
 		PhotoFaces:       0,
 	},
-	"Photo55": { //JPG + PDF, indexed
+	"Photo55": { // JPG + PDF, indexed
 		ID:               1000056,
 		PhotoUID:         "ps6sg6byk7wrbk48",
 		TakenAt:          time.Date(2024, 11, 12, 9, 7, 18, 0, time.UTC),
@@ -3597,12 +3539,11 @@ var PhotoFixtures = PhotoMap{
 		UpdatedAt:        time.Date(2025, 1, 5, 0, 0, 0, 0, time.UTC),
 		EditedAt:         nil,
 		CheckedAt:        &checkedTime,
-		DeletedAt:        nil,
 		PhotoColor:       14,
 		PhotoStack:       0,
 		PhotoFaces:       0,
 	},
-	"Photo56": { //JPG
+	"Photo56": { // JPG
 		ID:               1000057,
 		PhotoUID:         "pqkm36fjqvset8uy",
 		TakenAt:          time.Date(2023, 11, 12, 9, 7, 18, 0, time.UTC),
@@ -3667,12 +3608,11 @@ var PhotoFixtures = PhotoMap{
 		UpdatedAt:  time.Date(2025, 1, 5, 0, 0, 0, 0, time.UTC),
 		EditedAt:   nil,
 		CheckedAt:  &checkedTime,
-		DeletedAt:  nil,
 		PhotoColor: 14,
 		PhotoStack: 0,
 		PhotoFaces: 0,
 	},
-	"Photo57": { //JPG
+	"Photo57": { // JPG
 		ID:               1000058,
 		PhotoUID:         "pqkm36fjqvset9uy",
 		TakenAt:          time.Date(2023, 11, 12, 9, 8, 18, 0, time.UTC),
@@ -3737,12 +3677,11 @@ var PhotoFixtures = PhotoMap{
 		UpdatedAt:  time.Date(2025, 1, 5, 0, 0, 0, 0, time.UTC),
 		EditedAt:   nil,
 		CheckedAt:  &checkedTime,
-		DeletedAt:  nil,
 		PhotoColor: 14,
 		PhotoStack: 0,
 		PhotoFaces: 0,
 	},
-	"Photo58": { //JPG + MP4
+	"Photo58": { // JPG + MP4
 		ID:               1000059,
 		PhotoUID:         "pqkm36fjqvset9uz",
 		TakenAt:          time.Date(2018, 12, 01, 9, 8, 18, 0, time.UTC),
@@ -3808,7 +3747,6 @@ var PhotoFixtures = PhotoMap{
 		UpdatedAt:  time.Date(2025, 1, 5, 0, 0, 0, 0, time.UTC),
 		EditedAt:   nil,
 		CheckedAt:  &checkedTime,
-		DeletedAt:  nil,
 		PhotoColor: 14,
 		PhotoStack: 0,
 		PhotoFaces: 0,
@@ -3868,7 +3806,6 @@ var PhotoFixtures = PhotoMap{
 		UpdatedAt:  time.Date(2024, 3, 15, 10, 5, 0, 0, time.UTC),
 		EditedAt:   nil,
 		CheckedAt:  &checkedTime,
-		DeletedAt:  nil,
 		PhotoColor: 12,
 		PhotoStack: 0,
 		PhotoFaces: 0,
@@ -3878,6 +3815,12 @@ var PhotoFixtures = PhotoMap{
 // CreatePhotoFixtures inserts known entities into the database for testing.
 func CreatePhotoFixtures() {
 	for _, entity := range PhotoFixtures {
-		Db().Create(&entity)
+		createFixture(&entity)
+
+		// Adds the label assignments of the fixture, as related records are saved explicitly.
+		for _, pl := range entity.Labels {
+			pl.PhotoID, pl.Photo, pl.Label = entity.ID, nil, nil
+			createFixture(&pl)
+		}
 	}
 }

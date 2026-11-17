@@ -2,10 +2,11 @@ package entity
 
 import "time"
 
-var date = time.Date(2050, 3, 6, 2, 6, 51, 0, time.UTC)
-
+// LinkMap represents a map of share link fixtures keyed by token.
 type LinkMap map[string]Link
 
+// LinkFixtures provides share link fixtures for use in tests.
+//
 //nolint:gosec // G101: Deterministic fixture tokens for tests only.
 var LinkFixtures = LinkMap{
 	"1jxf3jfn2k": {
@@ -16,7 +17,6 @@ var LinkFixtures = LinkMap{
 		LinkExpires: 0,
 		LinkViews:   12,
 		MaxViews:    0,
-		HasPassword: false,
 		CreatedAt:   time.Date(2020, 3, 6, 2, 6, 51, 0, time.UTC),
 		ModifiedAt:  time.Date(2020, 3, 6, 2, 6, 51, 0, time.UTC),
 	},
@@ -28,7 +28,6 @@ var LinkFixtures = LinkMap{
 		LinkExpires: 0,
 		LinkViews:   0,
 		MaxViews:    0,
-		HasPassword: false,
 		CreatedAt:   time.Date(2020, 3, 6, 2, 6, 51, 0, time.UTC),
 		ModifiedAt:  time.Date(2020, 3, 6, 2, 6, 51, 0, time.UTC),
 	},
@@ -40,7 +39,6 @@ var LinkFixtures = LinkMap{
 		LinkExpires: 0,
 		LinkViews:   0,
 		MaxViews:    0,
-		HasPassword: false,
 		CreatedAt:   time.Date(2020, 3, 6, 2, 6, 51, 0, time.UTC),
 		ModifiedAt:  time.Date(2020, 3, 6, 2, 6, 51, 0, time.UTC),
 	},
@@ -52,7 +50,6 @@ var LinkFixtures = LinkMap{
 		LinkExpires: 0,
 		LinkViews:   0,
 		MaxViews:    0,
-		HasPassword: false,
 		CreatedAt:   time.Date(2020, 3, 6, 2, 6, 51, 0, time.UTC),
 		ModifiedAt:  time.Date(2020, 3, 6, 2, 6, 51, 0, time.UTC),
 	},
@@ -64,7 +61,28 @@ var LinkFixtures = LinkMap{
 		LinkExpires: 0,
 		LinkViews:   0,
 		MaxViews:    0,
-		HasPassword: false,
+		CreatedAt:   time.Date(2020, 3, 6, 2, 6, 51, 0, time.UTC),
+		ModifiedAt:  time.Date(2020, 3, 6, 2, 6, 51, 0, time.UTC),
+	},
+	"8jxf3jfn2k": {
+		LinkUID:     "ss62xpryd1ob3gtf",
+		ShareUID:    "as6sg6bipogaaba1", // "april-1990" folder album (smart, path filter).
+		ShareSlug:   "april-1990",
+		LinkToken:   "8jxf3jfn2k",
+		LinkExpires: 0,
+		LinkViews:   0,
+		MaxViews:    0,
+		CreatedAt:   time.Date(2020, 3, 6, 2, 6, 51, 0, time.UTC),
+		ModifiedAt:  time.Date(2020, 3, 6, 2, 6, 51, 0, time.UTC),
+	},
+	"9jxf3jfn2k": {
+		LinkUID:     "ss62xpryd1ob4gtf",
+		ShareUID:    "as6sg6bipogaab11", // "california-usa" state album (smart, place filter).
+		ShareSlug:   "california-usa",
+		LinkToken:   "9jxf3jfn2k",
+		LinkExpires: 0,
+		LinkViews:   0,
+		MaxViews:    0,
 		CreatedAt:   time.Date(2020, 3, 6, 2, 6, 51, 0, time.UTC),
 		ModifiedAt:  time.Date(2020, 3, 6, 2, 6, 51, 0, time.UTC),
 	},
@@ -73,6 +91,6 @@ var LinkFixtures = LinkMap{
 // CreateLinkFixtures inserts known entities into the database for testing.
 func CreateLinkFixtures() {
 	for _, entity := range LinkFixtures {
-		Db().Create(&entity)
+		createFixture(&entity)
 	}
 }

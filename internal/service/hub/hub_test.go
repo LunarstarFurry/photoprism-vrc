@@ -13,15 +13,18 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
+// TestMain executes runTestMain returning it's results.  It is done this way so that defer can be used to cleanup.
 func TestMain(m *testing.M) {
+	os.Exit(runTestMain(m))
+}
+
+func runTestMain(m *testing.M) int {
 	log = logrus.StandardLogger()
 	log.SetLevel(logrus.TraceLevel)
 
 	ApplyTestConfig()
 
-	code := m.Run()
-
-	os.Exit(code)
+	return m.Run()
 }
 
 // Token returns a random token with length of up to 10 characters.
@@ -61,7 +64,7 @@ func TestNewRequest(t *testing.T) {
 
 	t.Logf("Request: %+v", r)
 
-	if j, err := json.Marshal(r); err != nil {
+	if j, err := json.Marshal(r); err != nil { //nolint:gosec // G117: test request
 		t.Fatal(err)
 	} else {
 		t.Logf("JSON: %s", j)

@@ -63,7 +63,9 @@ function mountPhotoFiles({
       features,
     })),
     get: vi.fn((key) => {
-      if (key === "experimental") return experimental;
+      if (key === "experimental") {
+        return experimental;
+      }
       if (baseConfig.get) {
         return baseConfig.get(key);
       }
@@ -187,6 +189,60 @@ describe("component/photo/edit/files", () => {
     });
   });
 
+  describe("unstack button", () => {
+    // renderUnstackButton reports whether the Unstack button is rendered for a file with the given overrides.
+    const renderUnstackButton = (fileOverrides) => {
+      const previous = VTUConfig.global.renderStubDefaultSlot;
+      VTUConfig.global.renderStubDefaultSlot = true;
+
+      try {
+        const { wrapper } = mountPhotoFiles({
+          fileOverrides: { FileType: "insv", Primary: false, Sidecar: false, Root: "/", Error: "", ...fileOverrides },
+          featuresOverrides: { edit: true },
+        });
+
+        return wrapper.find(".action-unstack").exists();
+      } finally {
+        VTUConfig.global.renderStubDefaultSlot = previous;
+      }
+    };
+
+    it("is rendered for files that can be unstacked", () => {
+      expect(renderUnstackButton({ Name: "2022/VID_20220625_140410_10_008.mp4" })).toBe(true);
+    });
+
+    it("is hidden for files that must stay stacked", () => {
+      expect(renderUnstackButton({ Name: "2022/VID_20220625_140410_10_008.insv", KeepStacked: true })).toBe(false);
+    });
+  });
+
+  describe("keepStacked", () => {
+    const left = { UID: "left", Name: "2022/VID_20220625_140410_00_008.insv", Root: "/", StackGroup: "VID_20220625_140410_00_008" };
+    const right = { ...left, UID: "right", Name: "2022/VID_20220625_140410_10_008.insv", KeepStacked: true };
+    const other = { UID: "other", Name: "2022/VID_20220625_140410_10_008.mp4", Root: "/" };
+
+    it("keeps a left lens stacked with the other originals of its capture", () => {
+      const { wrapper } = mountPhotoFiles({ modelOverrides: { fileModels: vi.fn(() => [left, right, other]) } });
+
+      expect(wrapper.vm.keepStacked(left)).toBe(true);
+      expect(wrapper.vm.keepStacked(right)).toBe(true);
+      expect(wrapper.vm.keepStacked(other)).toBe(false);
+    });
+
+    it("does not keep single-file captures and missing files stacked", () => {
+      const { wrapper } = mountPhotoFiles({ modelOverrides: { fileModels: vi.fn(() => [left, other, { ...right, Sidecar: true }]) } });
+
+      expect(wrapper.vm.keepStacked(left)).toBe(false);
+      expect(wrapper.vm.keepStacked(null)).toBe(false);
+    });
+
+    it("does not keep a left lens stacked with a missing partner", () => {
+      const { wrapper } = mountPhotoFiles({ modelOverrides: { fileModels: vi.fn(() => [left, { ...right, Missing: true }]) } });
+
+      expect(wrapper.vm.keepStacked(left)).toBe(false);
+    });
+  });
+
   describe("file error alert", () => {
     it("renders an outlined alert icon with square edges and outlined styling", () => {
       const previous = VTUConfig.global.renderStubDefaultSlot;
@@ -210,6 +266,54 @@ describe("component/photo/edit/files", () => {
       } finally {
         VTUConfig.global.renderStubDefaultSlot = previous;
       }
+    });
+  });
+
+  describe("chroma", () => {
+    // mountWithSlots renders the default slots of stubbed components, so that the file details are rendered.
+    const mountWithSlots = (fileOverrides) => {
+      const previous = VTUConfig.global.renderStubDefaultSlot;
+      VTUConfig.global.renderStubDefaultSlot = true;
+
+      try {
+        return mountPhotoFiles({ fileOverrides }).wrapper;
+      } finally {
+        VTUConfig.global.renderStubDefaultSlot = previous;
+      }
+    };
+
+    it("shows a bar with the percentage for colored files", () => {
+      const wrapper = mountWithSlots({ Chroma: 40 });
+
+      expect(wrapper.text()).toContain("Chroma");
+      expect(wrapper.find("v-progress-linear-stub").exists()).toBe(true);
+      // Chroma is stored as percent plus one.
+      expect(wrapper.find("v-progress-linear-stub").attributes("modelvalue")).toBe("39");
+      expect(wrapper.find("v-progress-linear-stub").attributes("data-tooltip")).toBe("39%");
+      expect(wrapper.text()).not.toContain("Monochrome");
+    });
+
+    it("shows monochrome files as such", () => {
+      const wrapper = mountWithSlots({ Chroma: 1 });
+
+      expect(wrapper.text()).toContain("Chroma");
+      expect(wrapper.text()).toContain("Monochrome");
+      expect(wrapper.find("v-progress-linear-stub").exists()).toBe(false);
+    });
+
+    it("shows monochrome values of earlier versions as such", () => {
+      const wrapper = mountWithSlots({ Chroma: 0 });
+
+      expect(wrapper.text()).toContain("Monochrome");
+      expect(wrapper.find("v-progress-linear-stub").exists()).toBe(false);
+    });
+
+    it("is hidden when the chroma is unknown", () => {
+      const wrapper = mountWithSlots({ Chroma: -1, MainColor: "grey" });
+
+      expect(wrapper.text()).toContain("Main Color");
+      expect(wrapper.text()).not.toContain("Chroma");
+      expect(wrapper.text()).not.toContain("Monochrome");
     });
   });
 

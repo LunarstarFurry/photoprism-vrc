@@ -29,16 +29,21 @@ func captionInternal(images Files, mediaSrc media.Src) (result *CaptionResult, m
 	if Config == nil {
 		return result, model, errors.New("vision service is not configured")
 	} else if model = Config.Model(ModelTypeCaption); model != nil {
+		// Refuse a model whose own service URI does not resolve.
+		if err = model.unresolvedUriErr(); err != nil {
+			return result, model, err
+		}
+
 		// Use remote service API if a server endpoint has been configured.
 		if uri, method := model.Endpoint(); uri != "" && method != "" {
 			var apiRequest *ApiRequest
 			var apiResponse *ApiResponse
 
 			if engine, ok := EngineFor(model.EndpointRequestFormat()); ok && engine.Builder != nil {
-				if apiRequest, err = engine.Builder.Build(context.Background(), model, images); err != nil {
+				if apiRequest, err = engine.Builder.Build(context.Background(), model, images, mediaSrc); err != nil {
 					return result, model, err
 				}
-			} else if apiRequest, err = NewApiRequest(model.EndpointRequestFormat(), images, model.EndpointFileScheme()); err != nil {
+			} else if apiRequest, err = NewApiRequest(model.EndpointRequestFormat(), images, model.EndpointFileScheme(), mediaSrc); err != nil {
 				return result, model, err
 			}
 

@@ -11,6 +11,7 @@ import (
 
 	"github.com/photoprism/photoprism/pkg/clean"
 	"github.com/photoprism/photoprism/pkg/fs"
+	"github.com/photoprism/photoprism/pkg/rnd"
 )
 
 var albumYamlMutex = sync.Mutex{}
@@ -20,7 +21,7 @@ func (m *Album) Yaml() (out []byte, err error) {
 	m.CreatedAt = m.CreatedAt.UTC().Truncate(time.Second)
 	m.UpdatedAt = m.UpdatedAt.UTC().Truncate(time.Second)
 
-	if err = Db().Model(m).Association("Photos").Find(&m.Photos).Error; err != nil {
+	if err = Db().Model(m).Association("Photos").Find(&m.Photos); err != nil {
 		log.Errorf("album: %s (yaml)", err)
 		return out, err
 	}
@@ -30,11 +31,12 @@ func (m *Album) Yaml() (out []byte, err error) {
 
 // SaveAsYaml writes the album metadata to a YAML backup file with the specified filename.
 func (m *Album) SaveAsYaml(fileName string) error {
-	if m == nil {
+	switch {
+	case m == nil:
 		return fmt.Errorf("album entity is nil - you may have found a bug")
-	} else if m.AlbumUID == "" {
+	case m.AlbumUID == "":
 		return fmt.Errorf("album uid is empty")
-	} else if fileName == "" {
+	case fileName == "":
 		return fmt.Errorf("yaml filename is empty")
 	}
 
@@ -53,19 +55,20 @@ func (m *Album) SaveAsYaml(fileName string) error {
 	defer albumYamlMutex.Unlock()
 
 	// Write YAML data to file.
-	if err = fs.WriteFile(fileName, data, fs.ModeFile); err != nil {
-		return err
-	}
-
-	return nil
+	return fs.WriteFile(fileName, data, fs.ModeFile)
 }
 
 // YamlFileName returns the absolute file path for the YAML backup file.
 func (m *Album) YamlFileName(backupPath string) (absolute, relative string, err error) {
-	if m == nil {
+	switch {
+	case m == nil:
 		return "", "", fmt.Errorf("album entity is nil - you may have found a bug")
-	} else if m.AlbumUID == "" {
+	case m.AlbumUID == "":
 		return "", "", fmt.Errorf("album uid is empty")
+	case len(m.AlbumUID) != 16 || m.AlbumUID[0] != AlbumUID || !rnd.IsAlnum(m.AlbumUID):
+		return "", "", fmt.Errorf("album uid %s is invalid", clean.Log(m.AlbumUID))
+	case !IsAlbumType(m.AlbumType):
+		return "", "", fmt.Errorf("album %s has an unknown type", clean.Log(m.AlbumUID))
 	}
 
 	relative = filepath.Join(m.AlbumType, m.AlbumUID+fs.ExtYml)
@@ -81,11 +84,12 @@ func (m *Album) YamlFileName(backupPath string) (absolute, relative string, err 
 
 // SaveBackupYaml writes the album metadata to a YAML backup file based on the specified storage paths.
 func (m *Album) SaveBackupYaml(backupPath string) error {
-	if m == nil {
+	switch {
+	case m == nil:
 		return fmt.Errorf("album entity is nil - you may have found a bug")
-	} else if m.AlbumUID == "" {
+	case m.AlbumUID == "":
 		return fmt.Errorf("album uid is empty")
-	} else if backupPath == "" {
+	case backupPath == "":
 		return fmt.Errorf("backup path is empty")
 	}
 
@@ -136,5 +140,14 @@ func (m *Album) LoadFromYaml(fileName string) error {
 		return err
 	}
 
-	return yaml.Unmarshal(data, m)
+	if err = yaml.Unmarshal(data, m); err != nil {
+		return err
+	}
+
+	// Clip the restored path to the album_path column's byte budget so a backup
+	// with a long multi-byte path cannot overflow the column on save.
+	m.AlbumPath = ClipPath(m.AlbumPath)
+	m.normalizeText()
+
+	return nil
 }

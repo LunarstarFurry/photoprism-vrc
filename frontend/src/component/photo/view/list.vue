@@ -22,7 +22,7 @@
     <div v-else class="search-results photo-results list-view">
       <div
         :class="$vuetify.display.smAndDown ? 'v-table--density-compact' : 'v-table--density-default'"
-        class="v-table v-table--density-default v-table v-table--hover v-datatable"
+        class="v-table v-table--density-default v-table v-table--gridlines-horizontal v-table--hover v-datatable"
       >
         <div class="v-table__wrapper">
           <table>
@@ -89,7 +89,7 @@
                   :title="m.getLocalizedTitle()"
                   @click.exact="isSharedView ? openPhoto(index) : editPhoto(index)"
                 >
-                  <div class="text-truncate">{{ showTitles && m.Title ? m.getLocalizedTitle() : m.getOriginalName() }}</div>
+                  <div class="text-truncate"><bdi :dir="showTitles && m.Title ? 'auto' : 'ltr'">{{ showTitles && m.Title ? $util.balanceBidi(m.getLocalizedTitle()) : m.getOriginalName() }}</bdi></div>
                   <div v-if="context === contexts.Hidden && hiddenReason(m)" :title="hiddenReason(m)" class="meta-error text-truncate">
                     {{ hiddenReason(m) }}
                   </div>

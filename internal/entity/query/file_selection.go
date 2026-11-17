@@ -4,9 +4,11 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/photoprism/photoprism/pkg/clean"
 	"github.com/photoprism/photoprism/pkg/fs"
 
 	"github.com/photoprism/photoprism/internal/entity"
+	"github.com/photoprism/photoprism/internal/entity/search"
 	"github.com/photoprism/photoprism/internal/form"
 	"github.com/photoprism/photoprism/pkg/media"
 )
@@ -16,16 +18,18 @@ const MiB = 1024 * 1024
 
 // FileSelection represents a selection filter to include/exclude certain files.
 type FileSelection struct {
-	MaxSize   int
-	Media     []string
-	OmitMedia []string
-	Types     []string
-	OmitTypes []string
-	Primary   bool
-	Originals bool
-	Hidden    bool
-	Private   bool
-	Archived  bool
+	Download        bool
+	MaxSize         int
+	Media           []string
+	OmitMedia       []string
+	Types           []string
+	OmitTypes       []string
+	Primary         bool
+	Originals       bool
+	SkipVideoStills bool
+	Hidden          bool
+	Private         bool
+	Archived        bool
 }
 
 // DownloadSelection selects files to download.
@@ -41,16 +45,31 @@ func DownloadSelection(mediaRaw, mediaSidecar, originals bool) FileSelection {
 	}
 
 	return FileSelection{
-		OmitMedia: omitMedia,
-		Originals: originals,
-		Private:   true,
-		Archived:  true,
-		Hidden:    true,
+		Download:        true,
+		OmitMedia:       omitMedia,
+		Originals:       originals,
+		SkipVideoStills: true,
+		Private:         true,
+		Archived:        true,
+		Hidden:          true,
 	}
 }
 
-// ShareSelection selects files to share, for example for upload via WebDAV.
-func ShareSelection(originals bool) FileSelection {
+// AlbumDownloadSelection selects an album's files for a zip download. It keeps archived and hidden
+// pictures out of the archive (they are not part of the visible album) and defers private-picture
+// visibility to the session scope applied by SelectedFilesForSession; when allowPrivate is false
+// (an unidentified session, e.g. the instance-default token) private pictures are excluded outright.
+func AlbumDownloadSelection(mediaRaw, mediaSidecar, originals, allowPrivate bool) FileSelection {
+	sel := DownloadSelection(mediaRaw, mediaSidecar, originals)
+	sel.Archived = false
+	sel.Hidden = false
+	sel.Private = allowPrivate
+
+	return sel
+}
+
+// ShareSelection selects files to share, for example for upload via WebDAV, omitting YAML sidecar files unless yaml is true.
+func ShareSelection(originals, yaml bool) FileSelection {
 	var omitMedia []string
 	var omitTypes []string
 
@@ -61,15 +80,11 @@ func ShareSelection(originals bool) FileSelection {
 			media.Sidecar.String(),
 		}
 
-		omitTypes = []string{
-			fs.ImagePng.String(),
-			fs.ImageWebp.String(),
-			fs.ImageTiff.String(),
-			fs.ImageAvif.String(),
-			fs.ImageHeic.String(),
-			fs.ImageBmp.String(),
-			fs.ImageGif.String(),
-		}
+		// A share size is configured, and workers.Share resizes JPEG only, so any other image
+		// format would upload at its original size. Share the generated JPEG for those instead.
+		omitTypes = media.ImageTypesExceptJpeg()
+	} else if !yaml {
+		omitTypes = []string{fs.SidecarYaml.String()}
 	}
 
 	return FileSelection{
@@ -83,47 +98,74 @@ func ShareSelection(originals bool) FileSelection {
 	}
 }
 
-// SelectedFiles finds files based on the given selection form, e.g. for downloading or sharing.
+// SelectedFiles finds files based on the given selection form, without limiting the result to a
+// session's scope. Handlers serving a request use SelectedFilesForSession instead.
 func SelectedFiles(frm form.Selection, o FileSelection) (results entity.Files, err error) {
+	return selectedFiles(frm, o, nil)
+}
+
+// SelectedFilesForSession applies row scope and download eligibility to the selection.
+// A nil download session is unidentified; non-download selections keep their file policy.
+func SelectedFilesForSession(frm form.Selection, o FileSelection, sess *entity.Session) (results entity.Files, err error) {
+	files, err := selectedFiles(frm, o, sess)
+
+	if err != nil {
+		return nil, err
+	}
+
+	if !o.Download {
+		return files, nil
+	}
+
+	results = make(entity.Files, 0, len(files))
+
+	for _, file := range files {
+		if file.Exportable(sess) {
+			results = append(results, file)
+		}
+	}
+
+	return results, nil
+}
+
+// selectedFiles finds files based on the given selection form, optionally limited to the content
+// the session may access when sess is not nil.
+func selectedFiles(frm form.Selection, o FileSelection, sess *entity.Session) (results entity.Files, err error) {
 	if frm.Empty() {
 		return results, errors.New("no items selected")
 	}
 
 	// Resolve photos in smart albums.
 	if photoIds, err := AlbumsPhotoUIDs(frm.Albums, false, o.Private); err != nil {
-		log.Warnf("query: %s", err.Error())
+		log.Warnf("query: failed to resolve smart album members for selection (%s)", clean.Error(err))
 	} else if len(photoIds) > 0 {
 		frm.Photos = append(frm.Photos, photoIds...)
 	}
 
-	var concat string
-	switch DbDialect() {
-	case MySQL:
-		concat = "CONCAT(a.path, '/%')"
-	case SQLite3:
-		concat = "a.path || '/%'"
-	default:
-		return results, fmt.Errorf("unknown sql dialect: %s", DbDialect())
+	subfolders, err := subfolderCond(DbDialect())
+
+	if err != nil {
+		return results, err
 	}
 
 	// Search condition.
-	where := fmt.Sprintf(`photos.photo_uid IN (?) 
+	where := fmt.Sprintf(`(photos.photo_uid IN (?) 
 		OR photos.place_id IN (?) 
 		OR photos.photo_uid IN (SELECT photo_uid FROM files WHERE file_uid IN (?))
 		OR photos.photo_path IN (
 			SELECT a.path FROM folders a WHERE a.folder_uid IN (?) UNION
-			SELECT b.path FROM folders a JOIN folders b ON b.path LIKE %s WHERE a.folder_uid IN (?))
-		OR photos.photo_uid IN (SELECT photo_uid FROM photos_albums WHERE hidden = 0 AND album_uid IN (?))
+			SELECT b.path FROM folders a JOIN folders b ON %s WHERE a.folder_uid IN (?))
+		OR photos.photo_uid IN (SELECT photo_uid FROM photos_albums WHERE hidden = FALSE AND album_uid IN (?))
 		OR files.file_uid IN (SELECT file_uid FROM %s m WHERE m.subj_uid IN (?))
 		OR photos.id IN (SELECT pl.photo_id FROM photos_labels pl JOIN labels l ON pl.label_id = l.id AND pl.uncertainty < 100 AND l.deleted_at IS NULL WHERE l.label_uid IN (?))
-		OR photos.id IN (SELECT pl.photo_id FROM photos_labels pl JOIN categories c ON c.label_id = pl.label_id AND pl.uncertainty < 100 JOIN labels lc ON lc.id = c.category_id AND lc.deleted_at IS NULL WHERE lc.label_uid IN (?))`,
-		concat, entity.Marker{}.TableName())
+		OR photos.id IN (SELECT pl.photo_id FROM photos_labels pl JOIN categories c ON c.label_id = pl.label_id AND pl.uncertainty < 100 JOIN labels lc ON lc.id = c.category_id AND lc.deleted_at IS NULL WHERE lc.label_uid IN (?)))`,
+		subfolders, entity.Marker{}.TableName())
 
 	// Build search query.
 	s := UnscopedDb().Table("files").
 		Select("files.*").
 		Joins("JOIN photos ON photos.id = files.photo_id").
-		Where("files.file_missing = 0 AND files.file_name <> '' AND files.file_hash <> ''").
+		Where("files.file_missing = FALSE AND files.file_name <> '' AND files.file_hash <> ''").
 		Where(where, frm.Photos, frm.Places, frm.Files, frm.Files, frm.Files, frm.Albums, frm.Subjects, frm.Labels, frm.Labels).
 		Group("files.id")
 
@@ -154,7 +196,7 @@ func SelectedFiles(frm form.Selection, o FileSelection) (results entity.Files, e
 
 	// Previews files only?
 	if o.Primary {
-		s = s.Where("files.file_primary = 1")
+		s = s.Where("files.file_primary = TRUE")
 	}
 
 	// Files in originals only?
@@ -162,9 +204,17 @@ func SelectedFiles(frm form.Selection, o FileSelection) (results entity.Files, e
 		s = s.Where("files.file_root = '/'")
 	}
 
+	// Skip generated still images of videos, i.e. files outside the originals folder that
+	// are neither a video, a live photo part, nor a metadata sidecar. NULL columns keep the file.
+	if o.SkipVideoStills {
+		s = s.Where("COALESCE(photos.photo_type = ? AND files.file_root <> ? AND files.media_type NOT IN (?) "+
+			"AND files.file_video = FALSE AND files.file_sidecar = FALSE, FALSE) = FALSE",
+			media.Video.String(), entity.RootOriginals, []string{media.Video.String(), media.Live.String(), media.Sidecar.String()})
+	}
+
 	// Exclude private?
 	if !o.Private {
-		s = s.Where("photos.photo_private <> 1")
+		s = s.Where("photos.photo_private <> TRUE")
 	}
 
 	// Exclude hidden photos?
@@ -177,7 +227,15 @@ func SelectedFiles(frm form.Selection, o FileSelection) (results entity.Files, e
 		s = s.Where("photos.deleted_at IS NULL")
 	}
 
+	// Limit the selection to the session's shared scope (no-op for full-access sessions). The selected
+	// photo UIDs are passed so pictures shared only through a filter-based smart album stay downloadable.
+	if sess != nil {
+		s = search.ScopeVisibleSelection(s, sess, frm.Photos)
+	}
+
 	// Find and return.
+	results = make(entity.Files, 0)
+
 	if result := s.Scan(&results); result.Error != nil {
 		return results, result.Error
 	}

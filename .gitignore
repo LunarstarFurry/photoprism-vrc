@@ -5,6 +5,7 @@
 *.pid
 *.log
 *.jsonl
+zz_*.go
 *.db
 *.db-journal
 *.sqlite
@@ -28,16 +29,19 @@ __pycache__
 venv
 .venv
 .env*
+!.env.example
 .tmp
 .nv
 .eslintcache
 .gocache
+.gitconfig
 .system
 /pro/
 /portal/
 /plus/
 /tmp/
 /internal/tmp/
+/internal/zz*
 /test/
 *-lock.json
 !/package-lock.json
@@ -48,14 +52,17 @@ venv
 /frontend/tests/screenshots/
 /frontend/src/locales/*.mo
 /frontend/tests_output/
+/frontend/views/
 frontend/coverage/
 **/__screenshots__/
+/.playwright-mcp/
 /photoprism
 /photoprism-*
 /photos/originals/*
 /photos/import/*
 /storage/
 /build/
+/setup/Makefile
 /assets/docs/
 /assets/facenet/
 /assets/nasnet/
@@ -73,6 +80,7 @@ frontend/coverage/
 /TODO.md
 join_token
 client_secret
+/i
 
 # Files created automatically by editors and/or operating systems:
 .DS_Store
@@ -87,6 +95,8 @@ Thumbs.db
 .idea
 .codex
 .config
+.mcp.json
+Dockerfile.local*
 .local
 *.local.json
 *.local.yaml
@@ -98,3 +108,8 @@ Thumbs.db
 .c9revisions
 .settings
 .swp
+*.swp
+
+# Written by scripts/dist/install-sudoers.sh when run from a checkout:
+scripts/dist/.env
+scripts/dist/.init-lock

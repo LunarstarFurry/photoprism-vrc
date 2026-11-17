@@ -1,8 +1,11 @@
 package query
 
 import (
+	"fmt"
+
 	"github.com/photoprism/photoprism/internal/entity"
 	"github.com/photoprism/photoprism/pkg/media"
+	"github.com/photoprism/photoprism/pkg/rnd"
 )
 
 // PhotoLabel returns a photo label entity if exists.
@@ -38,6 +41,28 @@ func LabelByUID(labelUID string) (*entity.Label, error) {
 	return result, nil
 }
 
+// LabelHasThumb tests if a usable cover file has been assigned to the label with the specified UID.
+// Requires the file to still resolve, so a stale hash falls back to a cover query.
+func LabelHasThumb(labelUID string) bool {
+	if rnd.InvalidUID(labelUID, entity.LabelUID) {
+		return false
+	}
+
+	var result []string
+
+	if err := Db().Model(&entity.Label{}).
+		Joins("JOIN files ON files.file_hash = labels.thumb AND files.file_missing = FALSE AND files.file_error = '' AND files.deleted_at IS NULL").
+		Where("labels.label_uid = ?", labelUID).
+		Limit(1).
+		Pluck("labels.thumb", &result).Error; err != nil {
+		return false
+	} else if len(result) == 0 {
+		return false
+	}
+
+	return result[0] != ""
+}
+
 // LabelThumbBySlug returns a label cover file based on the slug name.
 func LabelThumbBySlug(labelSlug string) (*entity.File, error) {
 	result := &entity.File{}
@@ -45,7 +70,7 @@ func LabelThumbBySlug(labelSlug string) (*entity.File, error) {
 	if err := Db().Where("files.file_primary AND files.file_type IN (?) AND files.deleted_at IS NULL", media.PreviewExpr).
 		Joins("JOIN labels ON labels.label_slug = ?", labelSlug).
 		Joins("JOIN photos_labels ON photos_labels.label_id = labels.id AND photos_labels.photo_id = files.photo_id AND photos_labels.uncertainty < 100").
-		Joins("JOIN photos ON photos.id = files.photo_id AND photos.photo_private = 0 AND photos.deleted_at IS NULL").
+		Joins("JOIN photos ON photos.id = files.photo_id AND photos.photo_private = FALSE AND photos.deleted_at IS NULL").
 		Order("photos.photo_quality DESC, photos_labels.uncertainty ASC").
 		First(result).Error; err != nil {
 		return result, err
@@ -58,11 +83,15 @@ func LabelThumbBySlug(labelSlug string) (*entity.File, error) {
 func LabelThumbByUID(labelUID string) (*entity.File, error) {
 	result := &entity.File{}
 
+	if rnd.InvalidUID(labelUID, entity.LabelUID) {
+		return result, fmt.Errorf("invalid label uid")
+	}
+
 	// Search matching label
 	err := Db().Where("files.file_primary AND files.deleted_at IS NULL").
 		Joins("JOIN labels ON labels.label_uid = ?", labelUID).
 		Joins("JOIN photos_labels ON photos_labels.label_id = labels.id AND photos_labels.photo_id = files.photo_id AND photos_labels.uncertainty < 100").
-		Joins("JOIN photos ON photos.id = files.photo_id AND photos.photo_private = 0 AND photos.deleted_at IS NULL").
+		Joins("JOIN photos ON photos.id = files.photo_id AND photos.photo_private = FALSE AND photos.deleted_at IS NULL").
 		Order("photos.photo_quality DESC, photos_labels.uncertainty ASC").
 		First(result).Error
 
@@ -75,7 +104,7 @@ func LabelThumbByUID(labelUID string) (*entity.File, error) {
 		Joins("JOIN photos_labels ON photos_labels.photo_id = files.photo_id AND photos_labels.uncertainty < 100").
 		Joins("JOIN categories c ON photos_labels.label_id = c.label_id").
 		Joins("JOIN labels ON c.category_id = labels.id AND labels.label_uid= ?", labelUID).
-		Joins("JOIN photos ON photos.id = files.photo_id AND photos.photo_private = 0 AND photos.deleted_at IS NULL").
+		Joins("JOIN photos ON photos.id = files.photo_id AND photos.photo_private = FALSE AND photos.deleted_at IS NULL").
 		Order("photos.photo_quality DESC, photos_labels.uncertainty ASC").
 		First(result).Error
 

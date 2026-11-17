@@ -12,6 +12,7 @@ import (
 	"github.com/photoprism/photoprism/internal/entity/query"
 	"github.com/photoprism/photoprism/internal/photoprism/get"
 	"github.com/photoprism/photoprism/internal/thumb"
+	"github.com/photoprism/photoprism/pkg/clean"
 	"github.com/photoprism/photoprism/pkg/fs"
 	"github.com/photoprism/photoprism/pkg/http/header"
 	"github.com/photoprism/photoprism/pkg/rnd"
@@ -19,8 +20,7 @@ import (
 
 // ThumbCache describes files persisted on disk for cached thumbnails and share images.
 type ThumbCache struct {
-	FileName  string
-	ShareName string
+	FileName string
 }
 
 // ByteCache wraps in-memory cached byte slices for fast responses.
@@ -33,6 +33,31 @@ func CacheKey(ns, uid, name string) string {
 	return fmt.Sprintf("%s:%s:%s", ns, uid, name)
 }
 
+// coverThumbName is the cover cache key name for the assigned cover file flag.
+// No thumbnail size is named "thumb", so it cannot collide with a cached file entry.
+const coverThumbName = "thumb"
+
+// CachedCoverHasThumb reports whether a cover file has been assigned to the album or label.
+// Only a positive result is cached, as the negative path continues to a cover query anyway.
+func CachedCoverHasThumb(ns, uid string, hasThumb func(string) bool) bool {
+	cache := get.CoverCache()
+	cacheKey := CacheKey(ns, uid, coverThumbName)
+
+	if cacheData, hit := cache.Get(cacheKey); hit {
+		if result, ok := cacheData.(bool); ok && result {
+			return true
+		}
+	}
+
+	if !hasThumb(uid) {
+		return false
+	}
+
+	cache.SetDefault(cacheKey, true)
+
+	return true
+}
+
 // RemoveFromFolderCache removes an item from the folder cache e.g. after indexing.
 func RemoveFromFolderCache(rootName string) {
 	cache := get.FolderCache()
@@ -42,7 +67,7 @@ func RemoveFromFolderCache(rootName string) {
 	cache.Delete(cacheKey)
 
 	if err := query.UpdateAlbumFolderCovers(); err != nil {
-		log.Error(err)
+		log.Errorf("covers: %s (update folders)", clean.Error(err))
 	}
 
 	log.Debugf("removed %s from cache", cacheKey)
@@ -57,6 +82,8 @@ func RemoveFromAlbumCoverCache(uid string) {
 	cache := get.CoverCache()
 
 	// Flush album cover cache.
+	cache.Delete(CacheKey(albumCover, uid, coverThumbName))
+
 	for thumbName := range thumb.Sizes {
 		cacheKey := CacheKey(albumCover, uid, string(thumbName))
 
@@ -73,7 +100,7 @@ func RemoveFromAlbumCoverCache(uid string) {
 	album, err := query.AlbumByUID(uid)
 
 	if err != nil {
-		log.Error(err)
+		log.Errorf("covers: %s (find album %s)", clean.Error(err), clean.Log(uid))
 		return
 	}
 
@@ -83,7 +110,7 @@ func RemoveFromAlbumCoverCache(uid string) {
 	}
 
 	if err = query.UpdateAlbumCovers(album); err != nil {
-		log.Error(err)
+		log.Errorf("covers: %s (update album %s)", clean.Error(err), clean.Log(uid))
 	}
 }
 
@@ -94,6 +121,8 @@ func RemoveFromLabelCoverCache(uid string) {
 	}
 
 	cache := get.CoverCache()
+
+	cache.Delete(CacheKey(labelCover, uid, coverThumbName))
 
 	for thumbName := range thumb.Sizes {
 		cacheKey := CacheKey(labelCover, uid, string(thumbName))
@@ -107,7 +136,7 @@ func FlushCoverCache() {
 	get.CoverCache().Flush()
 
 	if err := query.UpdateCovers(); err != nil {
-		log.Error(err)
+		log.Errorf("covers: %s (update)", clean.Error(err))
 	}
 
 	log.Debugf("albums: flushed cover cache")

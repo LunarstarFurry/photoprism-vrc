@@ -8,6 +8,7 @@ import (
 
 	"github.com/photoprism/photoprism/internal/auth/acl"
 	"github.com/photoprism/photoprism/internal/entity/query"
+	"github.com/photoprism/photoprism/internal/entity/search"
 	"github.com/photoprism/photoprism/internal/event"
 	"github.com/photoprism/photoprism/internal/photoprism"
 	"github.com/photoprism/photoprism/internal/photoprism/get"
@@ -52,6 +53,18 @@ func DeleteFile(router *gin.RouterGroup) {
 			log.Errorf("files: %s (delete)", err)
 			AbortEntityNotFound(c)
 			return
+		} else if file.PhotoUID != photoUid {
+			log.Errorf("files: %s does not belong to %s (delete)", clean.Log(fileUid), clean.Log(photoUid))
+			AbortEntityNotFound(c)
+			return
+		}
+
+		// Limit the deletion to the file's photo within the session scope.
+		if !search.PhotoSessionSeesEverything(s) {
+			if visible, vErr := search.PhotoVisibleToSession(file.PhotoUID, s); vErr != nil || !visible {
+				AbortForbidden(c)
+				return
+			}
 		}
 
 		// Primary file?
@@ -74,7 +87,7 @@ func DeleteFile(router *gin.RouterGroup) {
 		}
 
 		// Report file deletion.
-		event.AuditWarn([]string{ClientIP(c), s.UserName, "delete", file.FileName})
+		event.AuditWarn([]string{ClientIP(c), clean.LogQuote(s.UserName), "delete", clean.Log(file.FileName)})
 
 		// Remove file from storage.
 		if err = mediaFile.Remove(); err != nil {
@@ -93,7 +106,7 @@ func DeleteFile(router *gin.RouterGroup) {
 		}
 
 		// Notify clients by publishing events.
-		PublishPhotoEvent(StatusUpdated, photoUid, c)
+		PublishPhotoEvent(StatusUpdated, photoUid)
 
 		// Show translated success message.
 		event.SuccessMsg(i18n.MsgFileDeleted)
@@ -102,6 +115,7 @@ func DeleteFile(router *gin.RouterGroup) {
 			AbortEntityNotFound(c)
 			return
 		} else {
+			p.RedactForSession(s)
 			c.JSON(http.StatusOK, p)
 		}
 	})

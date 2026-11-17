@@ -6,47 +6,52 @@ import (
 	"strings"
 
 	"github.com/photoprism/photoprism/internal/entity"
+	"github.com/photoprism/photoprism/pkg/clean"
 	"github.com/photoprism/photoprism/pkg/fs"
 	"github.com/photoprism/photoprism/pkg/media"
 )
 
-// FilesByPath returns a slice of files in a given originals folder.
+// FilesByPath returns a slice of files in a given originals folder. The files carry no markers:
+// a folder listing names files rather than people, and its response is cached across sessions, so
+// a marker list resolved for whoever asked first must not be what the next session reads.
 func FilesByPath(limit, offset int, root, dir string, public bool) (files entity.Files, err error) {
-	if strings.HasPrefix(dir, "/") {
-		dir = dir[1:]
-	}
+	dir = strings.TrimPrefix(dir, "/")
 
 	stmt := Db().
 		Table("files").Select("files.*").
 		Joins("JOIN photos ON photos.id = files.photo_id AND photos.deleted_at IS NULL").
-		Where("files.file_missing = 0 AND files.file_root = ?", root).
+		Where("files.file_missing = FALSE AND files.file_root = ?", root).
 		Where("photos.photo_path = ?", dir)
 
 	if public {
-		stmt = stmt.Where("photos.photo_private = 0")
+		stmt = stmt.Where("photos.photo_private = FALSE")
 	}
 
-	err = stmt.Order("files.file_name").
+	if err = stmt.Order("files.file_name").
 		Limit(limit).Offset(offset).
-		Find(&files).Error
+		Find(&files).Error; err != nil {
+		return files, err
+	}
+
+	for i := range files {
+		files[i].OmitMarkers = true
+	}
 
 	return files, err
 }
 
 // Files returns not-missing and not-deleted file entities in the range of limit and offset sorted by id.
 func Files(limit, offset int, dir string, includeMissing bool) (files entity.Files, err error) {
-	if strings.HasPrefix(dir, "/") {
-		dir = dir[1:]
-	}
+	dir = strings.TrimPrefix(dir, "/")
 
 	stmt := Db()
 
 	if !includeMissing {
-		stmt = stmt.Where("file_missing = 0")
+		stmt = stmt.Where("file_missing = FALSE")
 	}
 
 	if dir != "" {
-		stmt = stmt.Where("files.file_name LIKE ?", dir+"/%")
+		stmt = stmt.Where(clean.SqlPrefixCond(DbDialect(), true, "files.file_name"), clean.SqlPrefixArgs(dir+"/")...)
 	}
 
 	err = stmt.Order("id").Limit(limit).Offset(offset).Find(&files).Error
@@ -56,11 +61,59 @@ func Files(limit, offset int, dir string, includeMissing bool) (files entity.Fil
 
 // FilesByUID finds files for the given UIDs.
 func FilesByUID(u []string, limit int, offset int) (files entity.Files, err error) {
-	if err = Db().Where("(photo_uid IN (?) AND file_primary = 1) OR file_uid IN (?)", u, u).Preload("Photo").Limit(limit).Offset(offset).Find(&files).Error; err != nil {
+	// A negative limit omits the LIMIT clause, which only some databases accept
+	// in combination with an OFFSET, so it is rejected before running the query.
+	if limit < 0 {
+		return files, fmt.Errorf("invalid limit")
+	}
+
+	if err = Db().Where("(photo_uid IN (?) AND file_primary = TRUE) OR file_uid IN (?)", u, u).Preload("Photo").Limit(limit).Offset(offset).Find(&files).Error; err != nil {
 		return files, err
 	}
 
 	return files, nil
+}
+
+// FilesByPhotoIDs finds the files of the pictures with the given ids, in batches the database accepts,
+// and returns their picture id, root, and name.
+func FilesByPhotoIDs(ids []uint) (files entity.Files, err error) {
+	unique := make([]uint, 0, len(ids))
+	seen := make(map[uint]bool, len(ids))
+
+	for _, id := range ids {
+		if id > 0 && !seen[id] {
+			seen[id] = true
+			unique = append(unique, id)
+		}
+	}
+
+	batchSize := BatchSize()
+
+	for i := 0; i < len(unique); i += batchSize {
+		var batch entity.Files
+
+		if err = Db().Select("photo_id, file_root, file_name").
+			Where("photo_id IN (?)", unique[i:min(i+batchSize, len(unique))]).
+			Find(&batch).Error; err != nil {
+			return files, err
+		}
+
+		files = append(files, batch...)
+	}
+
+	return files, nil
+}
+
+// OriginalsByPhotoID finds the original files of a picture that are not sidecars or missing.
+func OriginalsByPhotoID(photoID uint) (files entity.Files, err error) {
+	if photoID == 0 {
+		return files, nil
+	}
+
+	err = Db().Where("photo_id = ? AND file_root = ? AND file_sidecar = FALSE AND file_missing = FALSE", photoID, entity.RootOriginals).
+		Find(&files).Error
+
+	return files, err
 }
 
 // FileByPhotoUID finds a file for the given photo UID.
@@ -71,7 +124,7 @@ func FileByPhotoUID(photoUID string) (*entity.File, error) {
 		return &f, fmt.Errorf("photo uid required")
 	}
 
-	err := Db().Where("photo_uid = ? AND file_primary = 1", photoUID).Preload("Photo").First(&f).Error
+	err := Db().Where("photo_uid = ? AND file_primary = TRUE", photoUID).Preload("Photo").First(&f).Error
 
 	return &f, err
 }
@@ -84,9 +137,27 @@ func VideoByPhotoUID(photoUID string) (*entity.File, error) {
 		return &f, fmt.Errorf("photo uid required")
 	}
 
-	err := Db().Where("photo_uid = ? AND file_missing = 0", photoUID).
-		Where("file_video = 1 OR file_duration > 0 OR file_frames > 0 OR file_type = ?", fs.ImageGif).
+	err := Db().Where("photo_uid = ? AND file_missing = FALSE", photoUID).
+		Where("file_video = TRUE OR file_duration > 0 OR file_frames > 0 OR file_type = ?", fs.ImageGif).
 		Order("file_error ASC, file_video DESC, file_duration DESC, file_frames DESC").
+		Preload("Photo").First(&f).Error
+
+	return &f, err
+}
+
+// DocumentByPhotoUID finds the PDF document file for the given photo UID. A
+// document photo's primary file is its rendered cover image, so the original
+// PDF must be looked up among the related files by type.
+func DocumentByPhotoUID(photoUID string) (*entity.File, error) {
+	f := entity.File{}
+
+	if photoUID == "" {
+		return &f, fmt.Errorf("photo uid required")
+	}
+
+	err := Db().Where("photo_uid = ? AND file_missing = FALSE", photoUID).
+		Where("file_type = ?", fs.DocumentPDF).
+		Order("file_error ASC").
 		Preload("Photo").First(&f).Error
 
 	return &f, err
@@ -124,10 +195,11 @@ func RenameFile(srcRoot, srcName, destRoot, destName string) error {
 		return fmt.Errorf("cannot rename %s/%s to %s/%s", srcRoot, srcName, destRoot, destName)
 	}
 
-	return Db().Exec("UPDATE files SET file_root = ?, file_name = ?, file_missing = 0, deleted_at = NULL WHERE file_root = ? AND file_name = ?", destRoot, destName, srcRoot, srcName).Error
+	return Db().Exec("UPDATE files SET file_root = ?, file_name = ?, file_missing = FALSE, deleted_at = NULL WHERE file_root = ? AND file_name = ?", destRoot, destName, srcRoot, srcName).Error
 }
 
-// SetPhotoPrimary sets a new primary image file for a photo.
+// SetPhotoPrimary sets a new primary image file for a photo, or returns an error if the
+// file does not belong to it.
 func SetPhotoPrimary(photoUID, fileUID string) (err error) {
 	if photoUID == "" {
 		return fmt.Errorf("photo uid is missing")
@@ -136,9 +208,15 @@ func SetPhotoPrimary(photoUID, fileUID string) (err error) {
 	var files []string
 
 	if fileUID != "" {
-		// Do nothing.
-	} else if err = Db().Model(entity.File{}).
-		Where("photo_uid = ? AND file_missing = 0 AND file_type IN (?)", photoUID, media.PreviewExpr).
+		var count int64
+
+		if err = Db().Model(&entity.File{}).Where("photo_uid = ? AND file_uid = ?", photoUID, fileUID).Count(&count).Error; err != nil {
+			return err
+		} else if count == 0 {
+			return fmt.Errorf("cannot find file %s of %s", clean.Log(fileUID), clean.Log(photoUID))
+		}
+	} else if err = Db().Model(&entity.File{}).
+		Where("photo_uid = ? AND file_missing = FALSE AND file_type IN (?)", photoUID, media.PreviewExpr).
 		Order("file_width DESC, file_hdr DESC").Limit(1).Pluck("file_uid", &files).Error; err != nil {
 		return err
 	} else if len(files) == 0 {
@@ -151,13 +229,13 @@ func SetPhotoPrimary(photoUID, fileUID string) (err error) {
 		return fmt.Errorf("file uid is missing")
 	}
 
-	if err = Db().Model(entity.File{}).
+	if err = Db().Model(&entity.File{}).
 		Where("photo_uid = ? AND file_uid <> ?", photoUID, fileUID).
-		UpdateColumn("file_primary", 0).Error; err != nil {
+		UpdateColumn("file_primary", false).Error; err != nil {
 		return err
 	} else if err = Db().
-		Model(entity.File{}).Where("photo_uid = ? AND file_uid = ?", photoUID, fileUID).
-		UpdateColumn("file_primary", 1).Error; err != nil {
+		Model(&entity.File{}).Where("photo_uid = ? AND file_uid = ?", photoUID, fileUID).
+		UpdateColumn("file_primary", true).Error; err != nil {
 		return err
 	} else {
 		entity.File{PhotoUID: photoUID}.RegenerateIndex()
@@ -168,7 +246,7 @@ func SetPhotoPrimary(photoUID, fileUID string) (err error) {
 
 // SetFileError updates the file error column.
 func SetFileError(fileUID, errorString string) {
-	if err := Db().Model(entity.File{}).Where("file_uid = ?", fileUID).UpdateColumn("file_error", errorString).Error; err != nil {
+	if err := Db().Model(&entity.File{}).Where("file_uid = ?", fileUID).UpdateColumn("file_error", errorString).Error; err != nil {
 		log.Errorf("files: %s (set error)", err.Error())
 	}
 }
@@ -200,7 +278,7 @@ func IndexedFiles() (result FileMap, err error) {
 	// Query indexed files.
 	var files []File
 
-	if err = UnscopedDb().Raw("SELECT file_root, file_name, mod_time FROM files WHERE file_missing = 0 AND deleted_at IS NULL").Scan(&files).Error; err != nil {
+	if err = UnscopedDb().Raw("SELECT file_root, file_name, mod_time FROM files WHERE file_missing = FALSE AND deleted_at IS NULL").Scan(&files).Error; err != nil {
 		return result, err
 	}
 

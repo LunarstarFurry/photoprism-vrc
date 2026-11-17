@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
+	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -39,6 +40,45 @@ func TestAddVideoCacheHeader(t *testing.T) {
 	})
 }
 
+// TestCoverThumbName pins the name the cover-file flag is keyed under. The flag and the cached
+// cover files share one key space per namespace and uid, so a size of this name would have the two
+// resolve to the same entry.
+func TestCoverThumbName(t *testing.T) {
+	_, ok := thumb.Sizes[thumb.Name(coverThumbName)]
+	assert.False(t, ok, "no thumbnail size may be named %s", coverThumbName)
+}
+
+func TestCachedCoverHasThumb(t *testing.T) {
+	t.Run("Cached", func(t *testing.T) {
+		cache := get.CoverCache()
+		cache.Flush()
+		calls := 0
+		hasThumb := func(string) bool {
+			calls++
+			return true
+		}
+		assert.True(t, CachedCoverHasThumb(albumCover, "as6sg6bxpogaaba7", hasThumb))
+		assert.True(t, CachedCoverHasThumb(albumCover, "as6sg6bxpogaaba7", hasThumb))
+		assert.Equal(t, 1, calls)
+	})
+	t.Run("NoThumbIsNotCached", func(t *testing.T) {
+		// An unknown UID must not create a cache entry, so only a positive result is cached.
+		cache := get.CoverCache()
+		cache.Flush()
+		assert.False(t, CachedCoverHasThumb(labelCover, "ls6sg6b1wowuy3c2", func(string) bool { return false }))
+		_, hit := cache.Get(CacheKey(labelCover, "ls6sg6b1wowuy3c2", coverThumbName))
+		assert.False(t, hit)
+		assert.True(t, CachedCoverHasThumb(labelCover, "ls6sg6b1wowuy3c2", func(string) bool { return true }))
+	})
+	t.Run("Invalidated", func(t *testing.T) {
+		cache := get.CoverCache()
+		cache.Flush()
+		assert.True(t, CachedCoverHasThumb(labelCover, "ls6sg6b1wowuy3c2", func(string) bool { return true }))
+		RemoveFromLabelCoverCache("ls6sg6b1wowuy3c2")
+		assert.False(t, CachedCoverHasThumb(labelCover, "ls6sg6b1wowuy3c2", func(string) bool { return false }))
+	})
+}
+
 func TestRemoveFromFolderCache(t *testing.T) {
 	cache := get.FolderCache()
 	cache.Flush()
@@ -59,7 +99,7 @@ func TestRemoveFromAlbumCoverCache(t *testing.T) {
 	cache.Flush()
 
 	var album entity.Album
-	if err := query.UnscopedDb().Where("album_type = ? AND thumb_src = ?", entity.AlbumManual, entity.SrcAuto).First(&album).Error; err != nil {
+	if err := query.Db().Where("album_type = ? AND thumb_src = ?", entity.AlbumManual, entity.SrcAuto).First(&album).Error; err != nil {
 		t.Skipf("no auto-managed manual album available: %v", err)
 	}
 
@@ -67,7 +107,7 @@ func TestRemoveFromAlbumCoverCache(t *testing.T) {
 
 	for thumbName := range thumb.Sizes {
 		key := CacheKey(albumCover, uid, string(thumbName))
-		cache.SetDefault(key, ThumbCache{FileName: "cached-file", ShareName: "share"})
+		cache.SetDefault(key, ThumbCache{FileName: "cached-file"})
 	}
 
 	conf := get.Config()
@@ -116,12 +156,29 @@ func TestRemoveFromAlbumCoverCacheInvalidUID(t *testing.T) {
 
 	uid := "" // empty string fails rnd.IsAlnum
 	key := CacheKey(albumCover, uid, thumb.Tile500.String())
-	cache.SetDefault(key, ThumbCache{FileName: "file", ShareName: "share"})
+	cache.SetDefault(key, ThumbCache{FileName: "file"})
 
 	RemoveFromAlbumCoverCache(uid)
 
 	_, ok := cache.Get(key)
 	assert.True(t, ok)
+}
+
+func TestRemoveFromAlbumCoverCacheUnknownAlbum(t *testing.T) {
+	hook := photoLabelErrorLog(t)
+	uid := rnd.GenerateUID(entity.AlbumUID)
+
+	RemoveFromAlbumCoverCache(uid)
+
+	var errs []string
+
+	for _, entry := range hook.AllEntries() {
+		if entry.Level <= logrus.ErrorLevel {
+			errs = append(errs, entry.Message)
+		}
+	}
+
+	assert.Equal(t, []string{"covers: album not found (find album " + uid + ")"}, errs)
 }
 
 func TestRemoveFromLabelCoverCache(t *testing.T) {
@@ -132,7 +189,7 @@ func TestRemoveFromLabelCoverCache(t *testing.T) {
 
 	for thumbName := range thumb.Sizes {
 		key := CacheKey(labelCover, uid, string(thumbName))
-		cache.SetDefault(key, ThumbCache{FileName: "cached-file", ShareName: "share"})
+		cache.SetDefault(key, ThumbCache{FileName: "cached-file"})
 	}
 
 	RemoveFromLabelCoverCache(uid)
@@ -150,7 +207,7 @@ func TestRemoveFromLabelCoverCacheInvalidUID(t *testing.T) {
 
 	uid := ""
 	key := CacheKey(labelCover, uid, thumb.Tile500.String())
-	cache.SetDefault(key, ThumbCache{FileName: "file", ShareName: "share"})
+	cache.SetDefault(key, ThumbCache{FileName: "file"})
 
 	RemoveFromLabelCoverCache(uid)
 

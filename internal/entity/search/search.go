@@ -1,7 +1,7 @@
 /*
 Package search provides search queries to find photos, albums, labels, and subjects.
 
-Copyright (c) 2018 - 2025 PhotoPrism UG. All rights reserved.
+Copyright (c) 2018 - 2026 PhotoPrism UG. All rights reserved.
 
 	This program is free software: you can redistribute it and/or modify
 	it under Version 3 of the GNU Affero General Public License (the "AGPL"):
@@ -14,7 +14,7 @@ Copyright (c) 2018 - 2025 PhotoPrism UG. All rights reserved.
 
 	The AGPL is supplemented by our Trademark and Brand Guidelines,
 	which describe how our Brand Assets may be used:
-	<https://www.photoprism.app/trademark>
+	<https://www.photoprism.app/trademark/>
 
 Feel free to send an email to hello@photoprism.app if you have questions,
 want to support our work, or just want to say hello.
@@ -25,7 +25,7 @@ Additional information can be found in our Developer Guide:
 package search
 
 import (
-	"github.com/jinzhu/gorm"
+	"gorm.io/gorm"
 
 	"github.com/photoprism/photoprism/internal/entity"
 	"github.com/photoprism/photoprism/internal/event"
@@ -39,11 +39,6 @@ const MaxResults = 100000
 // Radius is about 1 km.
 const Radius = 0.009
 
-// Query searches given an originals path and a db instance.
-type Query struct {
-	db *gorm.DB
-}
-
 // Count represents the total number of search results.
 type Count struct {
 	Total int
@@ -54,9 +49,9 @@ func Db() *gorm.DB {
 	return entity.Db()
 }
 
-// UnscopedDb returns an unscoped database connection instance.
+// UnscopedDb returns an unscoped database session.
 func UnscopedDb() *gorm.DB {
-	return entity.Db().Unscoped()
+	return entity.UnscopedDb()
 }
 
 // Log logs the error if any and keeps quiet otherwise.

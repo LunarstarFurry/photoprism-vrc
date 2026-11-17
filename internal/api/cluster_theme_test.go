@@ -10,7 +10,9 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
+	"github.com/photoprism/photoprism/internal/config"
 	"github.com/photoprism/photoprism/internal/entity"
 	"github.com/photoprism/photoprism/internal/service/cluster"
 	reg "github.com/photoprism/photoprism/internal/service/cluster/registry"
@@ -19,6 +21,7 @@ import (
 	"github.com/photoprism/photoprism/pkg/rnd"
 )
 
+// TestClusterGetTheme checks theme responses and node theme metadata.
 func TestClusterGetTheme(t *testing.T) {
 	t.Run("FeatureDisabled", func(t *testing.T) {
 		app, router, conf := NewApiTest()
@@ -61,6 +64,8 @@ func TestClusterGetTheme(t *testing.T) {
 		// Visible files
 		assert.NoError(t, os.WriteFile(filepath.Join(tempTheme, "app.js"), []byte("console.log('ok')\n"), fs.ModeFile))
 		assert.NoError(t, os.WriteFile(filepath.Join(tempTheme, "style.css"), []byte("body{}\n"), fs.ModeFile))
+		assert.NoError(t, os.WriteFile(filepath.Join(tempTheme, "~font.css"), []byte("body{}\n"), fs.ModeFile))
+		assert.NoError(t, os.WriteFile(filepath.Join(tempTheme, "$logo.svg"), []byte("<svg/>\n"), fs.ModeFile))
 		assert.NoError(t, os.WriteFile(filepath.Join(tempTheme, fs.VersionTxtFile), []byte(" 1.0.0\n"), fs.ModeFile))
 		assert.NoError(t, os.WriteFile(filepath.Join(tempTheme, "sub", "visible.txt"), []byte("ok\n"), fs.ModeFile))
 		// Hidden file
@@ -93,6 +98,8 @@ func TestClusterGetTheme(t *testing.T) {
 
 		// Included
 		assert.Contains(t, names, "style.css")
+		assert.Contains(t, names, "~font.css")
+		assert.Contains(t, names, "$logo.svg")
 		// Subdirectories are not included for security reasons
 		assert.NotContains(t, names, "sub/visible.txt")
 
@@ -147,6 +154,39 @@ func TestClusterGetTheme(t *testing.T) {
 		assert.Equal(t, http.StatusOK, w.Code)
 		assert.Equal(t, header.ContentTypeZip, w.Header().Get(header.ContentType))
 	})
+	t.Run("CIDRList", func(t *testing.T) {
+		app, router, conf := NewApiTest()
+		enablePortalAPIs(t, conf)
+		prevClusterCIDR := conf.Options().ClusterCIDR
+		conf.SetAuthMode(config.AuthModePasswd)
+		t.Cleanup(func() {
+			conf.Options().ClusterCIDR = prevClusterCIDR
+			conf.SetAuthMode(config.AuthModePublic)
+		})
+		ClusterGetTheme(router)
+
+		tempTheme := t.TempDir()
+		conf.SetThemePath(tempTheme)
+		assert.NoError(t, os.WriteFile(filepath.Join(tempTheme, "app.js"), []byte("console.log('ok')\n"), fs.ModeFile))
+
+		// request returns the status of an unauthenticated theme download from the specified address.
+		request := func(remoteAddr string) int {
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/cluster/theme", nil)
+			req.RemoteAddr = remoteAddr
+			w := httptest.NewRecorder()
+			app.ServeHTTP(w, req)
+			return w.Code
+		}
+
+		conf.Options().ClusterCIDR = "fd00:10::/64, 10.0.0.0/8"
+		assert.Equal(t, http.StatusOK, request("10.1.2.3:12345"))
+		assert.Equal(t, http.StatusOK, request("[fd00:10::5]:12345"))
+		assert.Equal(t, http.StatusUnauthorized, request("192.0.2.1:12345"))
+
+		// An invalid list grants nothing.
+		conf.Options().ClusterCIDR = "10.0.0.0/8,garbage"
+		assert.Equal(t, http.StatusUnauthorized, request("10.1.2.3:12345"))
+	})
 	t.Run("UpdateThemeVersion", func(t *testing.T) {
 		app, _, conf := NewApiTest()
 		_ = app // unused
@@ -155,8 +195,20 @@ func TestClusterGetTheme(t *testing.T) {
 		regy, err := reg.NewClientRegistryWithConfig(conf)
 		assert.NoError(t, err)
 
-		node := &reg.Node{Node: cluster.Node{Name: "pp-node-01", Role: cluster.RoleInstance, UUID: rnd.UUIDv7()}}
-		assert.NoError(t, regy.Put(node))
+		name := "pp-node-theme-" + rnd.Base36(10)
+		var existing int64
+		require.NoError(t, entity.Db().Model(&entity.Client{}).Where("client_name = ?", name).Count(&existing).Error)
+		require.Zero(t, existing)
+		node := &reg.Node{Node: cluster.Node{Name: name, Role: cluster.RoleInstance, UUID: rnd.UUIDv7()}}
+		require.NoError(t, regy.Put(node))
+		require.NotEmpty(t, node.ClientID)
+		t.Cleanup(func() {
+			require.NoError(t, entity.UnscopedDb().Unscoped().Delete(&entity.Client{}, "client_uid = ?", node.ClientID).Error)
+			var remaining int64
+			require.NoError(t, entity.UnscopedDb().Unscoped().Model(&entity.Client{}).
+				Where("client_uid = ?", node.ClientID).Count(&remaining).Error)
+			require.Zero(t, remaining)
+		})
 
 		client := entity.FindClientByUID(node.ClientID)
 		sess := entity.NewSession(-1, -1)

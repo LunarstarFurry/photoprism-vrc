@@ -32,9 +32,11 @@ var CorsExt = map[string]bool{
 	".woff":  true,
 	".woff2": true,
 	".css":   true,
-	".js":    true, // Required for the MapLibre GL RTL text plugin.
+	".js":    true, // Required for the frontend's module scripts, chunks, and workers served from a CDN.
+	".mjs":   true, // Required for the MapLibre worker and its shared module, which a CDN-hosted bundle loads cross-origin.
 	".json":  true, // Required for static frontend configuration files.
 	".svg":   true, // Required for SVG icons that depend on additional styles or fonts.
+	".avif":  true, // Required for the globe star map, which WebGL can only upload as a CORS-enabled image.
 }
 
 // AllowCORS checks if CORS headers can be safely used based on a request's file path.

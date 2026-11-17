@@ -13,6 +13,7 @@ const (
 	ExtJpeg     = ".jpg"
 	ExtPng      = ".png"
 	ExtDng      = ".dng"
+	ExtInsp     = ".insp"
 	ExtThm      = ".thm"
 	ExtH264     = ".h264"
 	ExtAvc      = ".avc"
@@ -45,6 +46,8 @@ const (
 	ExtEvc      = ".evc"
 	ExtEvc1     = ".evc1"
 	ExtMp4      = ".mp4"
+	ExtInsv     = ".insv"
+	ExtLrv      = ".lrv"
 	ExtMov      = ".mov"
 	ExtQT       = ".qt"
 	ExtYml      = ".yml"
@@ -64,7 +67,11 @@ const (
 	ExtPb       = ".pb"
 	ExtProto    = ".proto"
 	ExtZip      = ".zip"
+	ExtTmp      = ".tmp"
 )
+
+// ExtRcloneLink is the storage-driver link representation reserved at transfer boundaries.
+const ExtRcloneLink = ".rclonelink"
 
 // Ext returns all extension of a file name including the dots.
 func Ext(name string) string {

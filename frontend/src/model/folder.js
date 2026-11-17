@@ -38,13 +38,21 @@ export class Folder extends RestModel {
   classes(selected) {
     let classes = ["is-folder", "uid-" + this.UID];
 
-    if (this.Favorite) classes.push("is-favorite");
-    if (this.Private) classes.push("is-private");
-    if (selected) classes.push("is-selected");
+    if (this.Favorite) {
+      classes.push("is-favorite");
+    }
+    if (this.Private) {
+      classes.push("is-private");
+    }
+    if (selected) {
+      classes.push("is-selected");
+    }
 
     return classes;
   }
 
+  // baseName returns the folder name without its path and without bidi and other control characters,
+  // shortened to the optional length.
   baseName(truncate) {
     let result = this.Path;
     const slash = result.lastIndexOf("/");
@@ -52,6 +60,8 @@ export class Folder extends RestModel {
     if (slash >= 0) {
       result = this.Path.substring(slash + 1);
     }
+
+    result = $util.stripBidiControls(result);
 
     if (truncate) {
       result = $util.truncate(result, truncate, "…");

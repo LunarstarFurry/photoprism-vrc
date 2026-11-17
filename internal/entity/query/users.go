@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"github.com/photoprism/photoprism/internal/entity"
+	"github.com/photoprism/photoprism/pkg/clean"
 	"github.com/photoprism/photoprism/pkg/rnd"
 	"github.com/photoprism/photoprism/pkg/txt"
 )
@@ -19,18 +20,18 @@ func RegisteredUsers() (result entity.Users) {
 
 // CountUsers returns the number of users based on the specified filter options.
 func CountUsers(registered, active bool, includeRoles, excludeRoles []string) (count int) {
-	if !Db().HasTable("auth_users") {
+	if !Db().Migrator().HasTable("auth_users") {
 		return 0
 	}
 
-	stmt := Db().Model(entity.Users{})
+	stmt := Db().Model(&entity.Users{})
 
 	if registered {
 		stmt = stmt.Where("id > 0")
 	}
 
 	if active {
-		stmt = stmt.Where("(can_login > 0 OR webdav > 0) AND user_name <> ''")
+		stmt = stmt.Where("(can_login = TRUE OR webdav = TRUE) AND user_name <> ''")
 	}
 
 	if len(includeRoles) > 0 {
@@ -39,11 +40,13 @@ func CountUsers(registered, active bool, includeRoles, excludeRoles []string) (c
 		stmt = stmt.Where("user_role NOT IN (?)", excludeRoles)
 	}
 
-	if err := stmt.Count(&count).Error; err != nil {
+	var n int64
+
+	if err := stmt.Count(&n).Error; err != nil {
 		log.Errorf("users: %s (count)", err)
 	}
 
-	return count
+	return int(n)
 }
 
 // Users finds user accounts based on the specified parameters.
@@ -54,15 +57,17 @@ func Users(limit, offset int, sortOrder, search string, deleted bool) (result en
 	search = strings.TrimSpace(search)
 
 	// Filter user accounts to be returned.
-	if search == "all" {
+	switch id := txt.Int(search); {
+	case search == "all":
 		// Don't filter.
-	} else if id := txt.Int(search); id != 0 {
+	case id != 0:
 		stmt = stmt.Where("id = ?", id)
-	} else if rnd.IsUID(search, entity.UserUID) {
+	case rnd.IsUID(search, entity.UserUID):
 		stmt = stmt.Where("user_uid = ?", search)
-	} else if search != "" {
-		stmt = stmt.Where("user_name LIKE ? OR user_email LIKE ? OR display_name LIKE ?", search+"%", search+"%", search+"%")
-	} else {
+	case search != "":
+		like := clean.SqlLike(search) + "%"
+		stmt = stmt.Where(clean.SqlLikeAny(DbDialect(), false, "user_name", "user_email", "display_name"), like, like, like)
+	default:
 		stmt = stmt.Where("id > 0")
 	}
 

@@ -3,7 +3,6 @@ package commands
 import (
 	"github.com/sirupsen/logrus"
 
-	"github.com/manifoldco/promptui"
 	"github.com/urfave/cli/v2"
 
 	"github.com/photoprism/photoprism/internal/config"
@@ -11,7 +10,7 @@ import (
 )
 
 // AuthResetDescription explains the effect of the auth reset command.
-const AuthResetDescription = "This command recreates the auth_sessions database table so that it is compatible with the current version. As a result, all users and clients must re-authenticate. Note that any client access tokens and app passwords that users may have created are also deleted and must be recreated."
+const AuthResetDescription = "This command recreates the auth_sessions, auth_grants, and auth_codes database tables so that they are compatible with the current version. As a result, all users and clients must re-authenticate. Note that any client access tokens and app passwords that users may have created are also deleted and must be recreated, and connected apps must be connected again."
 
 // AuthResetCommand configures the command name, flags, and action.
 var AuthResetCommand = &cli.Command{
@@ -24,11 +23,7 @@ var AuthResetCommand = &cli.Command{
 			Aliases: []string{"t"},
 			Usage:   "shows trace logs for debugging",
 		},
-		&cli.BoolFlag{
-			Name:    "yes",
-			Aliases: []string{"y"},
-			Usage:   "runs the command non-interactively",
-		},
+		YesFlag(),
 	},
 	Action: authResetAction,
 }
@@ -36,35 +31,27 @@ var AuthResetCommand = &cli.Command{
 // authResetAction removes all sessions and resets the related database table to a clean state.
 func authResetAction(ctx *cli.Context) error {
 	return CallWithDependencies(ctx, func(conf *config.Config) error {
-		confirmed := RunNonInteractively(ctx.Bool("yes"))
-
-		// Show prompt?
-		if !confirmed {
-			actionPrompt := promptui.Prompt{
-				Label:     "Remove all sessions and reset the database table to a clean state?",
-				IsConfirm: true,
-			}
-
-			if _, err := actionPrompt.Run(); err != nil {
-				return nil
-			}
+		if proceed, err := ConfirmAction(ctx.Bool("yes"), "Remove all sessions, access tokens, and app passwords?"); err != nil {
+			return err
+		} else if !proceed {
+			log.Infof("no sessions were removed")
+			return nil
 		}
 
 		if ctx.Bool("trace") {
 			log.SetLevel(logrus.TraceLevel)
-			log.Infoln("clear: enabled trace mode")
+			log.Infoln("reset: enabled trace mode")
 		}
 
 		db := conf.Db()
 
-		// Drop existing sessions table.
-		if err := db.DropTableIfExists(entity.Session{}).Error; err != nil {
-			return err
-		}
-
-		// Re-create auth_sessions.
-		if err := db.CreateTable(entity.Session{}).Error; err != nil {
-			return err
+		// Drop and re-create the tables with sessions, app grants, and pending authorization codes.
+		if err := db.Migrator().DropTable(&entity.Session{}); err != nil {
+			return cli.Exit(err, 1)
+		} else if err = entity.CreateTable(db, &entity.Session{}); err != nil {
+			return cli.Exit(err, 1)
+		} else if err = ResetAppGrants(db); err != nil {
+			return cli.Exit(err, 1)
 		}
 
 		log.Infof("all sessions have been removed")

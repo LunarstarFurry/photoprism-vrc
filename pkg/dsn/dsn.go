@@ -2,7 +2,7 @@
 Package dsn provides helpers for parsing database data source names, masking
 credentials, and sharing driver-specific defaults used throughout PhotoPrism.
 
-Copyright (c) 2018 - 2025 PhotoPrism UG. All rights reserved.
+Copyright (c) 2018 - 2026 PhotoPrism UG. All rights reserved.
 
 	This program is free software: you can redistribute it and/or modify
 	it under Version 3 of the GNU Affero General Public License (the "AGPL"):
@@ -15,7 +15,7 @@ Copyright (c) 2018 - 2025 PhotoPrism UG. All rights reserved.
 
 	The AGPL is supplemented by our Trademark and Brand Guidelines,
 	which describe how our Brand Assets may be used:
-	<https://www.photoprism.app/trademark>
+	<https://www.photoprism.app/trademark/>
 
 Feel free to send an email to hello@photoprism.app if you have questions,
 want to support our work, or just want to say hello.
@@ -26,11 +26,15 @@ Additional information can be found in our Developer Guide:
 package dsn
 
 import (
+	"fmt"
 	"net"
 	"regexp"
 	"strconv"
 	"strings"
 	"unicode"
+
+	"github.com/photoprism/photoprism/pkg/http/dns"
+	"github.com/photoprism/photoprism/pkg/txt"
 )
 
 // dsnPattern is a regular expression matching a database DSN string.
@@ -39,6 +43,12 @@ var dsnPattern = regexp.MustCompile(
 		`(?:(?P<net>[^\(]*)(?:\((?P<server>[^\)]*)\))?)?` +
 		`\/(?P<name>.*?)` +
 		`(?:\?(?P<params>[^\?]*))?$`)
+
+// dsnKeyValuePattern matches a DSN in the key/value form of PostgreSQL, which starts with a key.
+var dsnKeyValuePattern = regexp.MustCompile(`^[\s\v]*[A-Za-z_]+[\s\v]*=`)
+
+// dsnKeyValuePasswordPattern matches the password and sslpassword values of a key/value DSN.
+var dsnKeyValuePasswordPattern = regexp.MustCompile(`(?i)(^|[\s\v']|")((?:ssl)?password[\s\v]*=[\s\v]*)('(?:[^'\\]|\\.)*'|"[^"]*"|(?:\\.|[^\s\v\\])*)`)
 
 // dsnPostgresPasswordPattern is a regular expression matching a password in a PostgreSQL-style database DSN string.
 var dsnPostgresPasswordPattern = regexp.MustCompile(`(?i)(password\s*=\s*)("[^"]*"|'[^']*'|\S+)`)
@@ -60,18 +70,47 @@ func (d *DSN) String() string {
 	return d.DSN
 }
 
-// MaskPassword hides the password portion of a DSN while leaving the rest untouched for logging/reporting.
-func (d *DSN) MaskPassword() (s string) {
-	if d.DSN == "" || d.Password == "" {
-		return d.DSN
+// MySQL returns a MySQL/MariaDB DSN built from the user, password, network, server, name, and parameters,
+// using "tcp" if no network is set.
+func (d *DSN) MySQL() string {
+	network := d.Net
+
+	if network == "" {
+		network = "tcp"
 	}
 
+	s := fmt.Sprintf("%s:%s@%s(%s)/%s", d.User, d.Password, network, d.Server, d.Name)
+
+	if d.Params != "" {
+		s += "?" + d.Params
+	}
+
+	return s
+}
+
+// MaskPassword hides the password portion of a DSN while leaving the rest untouched for logging/reporting.
+func (d *DSN) MaskPassword() (s string) {
 	s = d.DSN
+
+	// PostgreSQL connection strings can also pass the password as a parameter, so every password value
+	// is masked whether or not it was parsed.
+	switch {
+	case s == "":
+		return s
+	case isPostgresURI(s):
+		return maskPostgresURI(s)
+	case dsnKeyValuePattern.MatchString(s):
+		s = dsnKeyValuePasswordPattern.ReplaceAllStringFunc(s, maskKeyValuePassword)
+	}
+
+	if d.Password == "" {
+		return s
+	}
 
 	// Mask password in regular DSN.
 	needle := ":" + d.Password + "@"
 	if strings.Contains(s, needle) {
-		return strings.Replace(s, needle, ":***@", 1)
+		return strings.Replace(s, needle, ":"+txt.Masked+"@", 1)
 	}
 
 	// Mask password in PostgreSQL-style DSN.
@@ -92,11 +131,11 @@ func (d *DSN) MaskPassword() (s string) {
 
 			switch {
 			case strings.HasPrefix(value, `"`) && strings.HasSuffix(value, `"`):
-				return prefix + `"` + "***" + `"`
+				return prefix + `"` + txt.Masked + `"`
 			case strings.HasPrefix(value, `'`) && strings.HasSuffix(value, `'`):
-				return prefix + `'` + "***" + `'`
+				return prefix + `'` + txt.Masked + `'`
 			default:
-				return prefix + "***"
+				return prefix + txt.Masked
 			}
 		})
 	}
@@ -161,7 +200,7 @@ func (d *DSN) splitHostPort() (host, port string) {
 	host, port, err = net.SplitHostPort(server)
 
 	if err != nil {
-		return server, ""
+		return dns.TrimBrackets(server), ""
 	}
 
 	return host, port
@@ -169,7 +208,7 @@ func (d *DSN) splitHostPort() (host, port string) {
 
 // parse parses a data source name string.
 func (d *DSN) parse() {
-	if d.parsePostgres() {
+	if d.parsePostgresURI() || d.parsePostgres() {
 		return
 	}
 
@@ -207,7 +246,7 @@ func (d *DSN) parse() {
 // parsePostgres extracts connection settings from PostgreSQL key/value style DSNs and
 // returns true on success.
 func (d *DSN) parsePostgres() bool {
-	if !strings.Contains(d.DSN, "password=") || !strings.Contains(d.DSN, "user=") {
+	if strings.Contains(d.DSN, "://") || !strings.Contains(d.DSN, "dbname=") && !strings.Contains(d.DSN, "database=") {
 		return false
 	}
 
@@ -259,7 +298,7 @@ func (d *DSN) parsePostgres() bool {
 
 	switch {
 	case host != "" && port != "":
-		d.Server = host + ":" + port
+		d.Server = net.JoinHostPort(dns.TrimBrackets(host), port)
 	case host != "":
 		d.Server = host
 	case port != "":
@@ -365,24 +404,17 @@ func (d *DSN) splitKeyValue(input string) ([]string, bool) {
 	return tokens, true
 }
 
-// detectDriver infers the driver name from DSN contents when it is not explicitly specified.
+// detectDriver infers the driver name from DSN contents. Explicit driver names
+// flow through ParseDriver so both helpers share an alias set; unknown but
+// non-empty names are kept (lowercased) rather than misclassified by the
+// DSN-string heuristics below.
 func (d *DSN) detectDriver() {
-	driver := strings.ToLower(d.Driver)
-
-	switch driver {
-	case "postgres", "postgresql":
-		d.Driver = DriverPostgres
-		return
-	case "mysql", "mariadb":
-		d.Driver = DriverMySQL
-		return
-	case "sqlite", "sqlite3", "file":
-		d.Driver = DriverSQLite3
-		return
-	}
-
-	if driver != "" {
-		d.Driver = driver
+	if d.Driver != "" {
+		if normalized := ParseDriver(d.Driver); normalized != "" {
+			d.Driver = normalized
+			return
+		}
+		d.Driver = strings.ToLower(d.Driver)
 		return
 	}
 

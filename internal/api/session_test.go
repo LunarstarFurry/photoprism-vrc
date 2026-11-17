@@ -1,16 +1,26 @@
 package api
 
 import (
+	"math"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/tidwall/gjson"
+	"golang.org/x/time/rate"
 
 	"github.com/photoprism/photoprism/internal/config"
+	"github.com/photoprism/photoprism/internal/entity"
 	"github.com/photoprism/photoprism/internal/form"
 	"github.com/photoprism/photoprism/internal/photoprism/get"
+	"github.com/photoprism/photoprism/internal/server/limiter"
+	"github.com/photoprism/photoprism/pkg/authn"
+	"github.com/photoprism/photoprism/pkg/dsn"
+	"github.com/photoprism/photoprism/pkg/http/header"
 	"github.com/photoprism/photoprism/pkg/i18n"
 	"github.com/photoprism/photoprism/pkg/rnd"
 )
@@ -20,6 +30,85 @@ func TestSession(t *testing.T) {
 		sess := get.Session().Public()
 		assert.Equal(t, sess, Session("1.2.3.4", ""))
 		assert.Equal(t, sess, Session("1.2.3.4", "1234ffc9b86a8fda0d908ebee84a43930cb8d1e3507f4aa0"))
+	})
+}
+
+// TestLookupSession checks that a missing session is returned with the reason.
+func TestLookupSession(t *testing.T) {
+	conf := get.Config()
+	origAuthMode, origLimit := conf.AuthMode(), limiter.Auth
+	conf.SetAuthMode(config.AuthModePasswd)
+	t.Cleanup(func() {
+		conf.SetAuthMode(origAuthMode)
+		limiter.Auth = origLimit
+	})
+
+	t.Run("Success", func(t *testing.T) {
+		limiter.Auth = limiter.NewLimit(rate.Every(24*time.Hour), 3)
+		sess, err := entity.AddClientSession("lookup-session", conf.SessionMaxAge(), "*", authn.GrantClientCredentials, nil)
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = sess.Delete() })
+
+		found, err := LookupSession("198.51.100.51", sess.AuthToken())
+		require.NoError(t, err)
+		require.NotNil(t, found)
+		assert.Equal(t, sess.ID, found.ID)
+		assert.False(t, limiter.Auth.Reject("198.51.100.51"))
+	})
+	t.Run("TokenRequired", func(t *testing.T) {
+		sess, err := LookupSession("198.51.100.52", "")
+		assert.Nil(t, sess)
+		assert.ErrorIs(t, err, authn.ErrTokenRequired)
+	})
+	t.Run("InvalidFormat", func(t *testing.T) {
+		limiter.Auth = limiter.NewLimit(rate.Every(24*time.Hour), 3)
+		sess, err := LookupSession("198.51.100.53", "not-a-session-token")
+		assert.Nil(t, sess)
+		assert.ErrorIs(t, err, authn.ErrInvalidToken)
+		assert.Equal(t, 3.0, math.Round(limiter.Auth.IP("198.51.100.53").Tokens()), "not counted")
+	})
+	t.Run("NotFound", func(t *testing.T) {
+		limiter.Auth = limiter.NewLimit(rate.Every(24*time.Hour), 3)
+		for range 3 {
+			sess, err := LookupSession("198.51.100.54", rnd.AuthToken())
+			assert.Nil(t, sess)
+			assert.ErrorIs(t, err, authn.ErrInvalidToken)
+		}
+		assert.True(t, limiter.Auth.Reject("198.51.100.54"))
+	})
+	t.Run("DatabaseError", func(t *testing.T) {
+		limiter.Auth = limiter.NewLimit(rate.Every(24*time.Hour), 3)
+		tempConn := &entity.DbConn{Driver: dsn.DriverSQLite3, Dsn: filepath.Join(t.TempDir(), "lookup-session-error.db")}
+		entity.SetDbProvider(tempConn)
+		t.Cleanup(func() {
+			entity.SetDbProvider(conf)
+			tempConn.Close()
+		})
+
+		for range 4 {
+			sess, err := LookupSession("198.51.100.56", rnd.AuthToken())
+			assert.Nil(t, sess)
+			assert.ErrorIs(t, err, authn.ErrInvalidToken)
+		}
+
+		assert.False(t, limiter.Auth.Reject("198.51.100.56"), "not counted")
+	})
+	t.Run("RateLimited", func(t *testing.T) {
+		limiter.Auth = limiter.NewLimit(rate.Every(24*time.Hour), 3)
+		for range 3 {
+			limiter.Auth.Reserve("198.51.100.55")
+		}
+		sess, err := LookupSession("198.51.100.55", rnd.AuthToken())
+		assert.Nil(t, sess)
+		assert.ErrorIs(t, err, authn.ErrRateLimitExceeded)
+		assert.Greater(t, limiter.Auth.IP("198.51.100.55").Tokens(), -0.5, "not counted over the limit")
+	})
+	t.Run("Public", func(t *testing.T) {
+		conf.SetAuthMode(config.AuthModePublic)
+		t.Cleanup(func() { conf.SetAuthMode(config.AuthModePasswd) })
+		sess, err := LookupSession("198.51.100.56", "")
+		assert.NoError(t, err)
+		assert.Equal(t, get.Session().Public(), sess)
 	})
 }
 
@@ -62,8 +151,22 @@ func TestGetSessionResponse(t *testing.T) {
 		assert.Equal(t, sess.GetData(), result["data"])
 		assert.Equal(t, conf, result["config"])
 	})
+	t.Run("RedactsGroups", func(t *testing.T) {
+		sess := get.Session().Public()
+		sess.SetData(sess.GetData().SetGroups([]string{"media-acme-admin"}))
+		defer func() { sess.SetData(sess.GetData().SetGroups(nil)) }()
+		conf := get.Config().ClientSession(sess)
+
+		result := GetSessionResponse(sess.AuthToken(), sess, conf)
+
+		if data, ok := result["data"].(*entity.SessionData); assert.True(t, ok) {
+			assert.Nil(t, data.Groups, "session responses must not disclose the login-time group set")
+		}
+		assert.NotEmpty(t, sess.GetData().Groups, "the stored session data keeps the groups")
+	})
 }
 
+// TestCreateSession checks login, share redemption, and rejection paths.
 func TestCreateSession(t *testing.T) {
 	t.Run("Success", func(t *testing.T) {
 		app, router, conf := NewApiTest()
@@ -99,15 +202,27 @@ func TestCreateSession(t *testing.T) {
 		r := PerformRequestWithBody(app, http.MethodPost, "/api/v1/session", body)
 		assert.Equal(t, http.StatusRequestEntityTooLarge, r.Code)
 	})
-	t.Run("PublicInvalidToken", func(t *testing.T) {
+	t.Run("CredentialsInvalidToken", func(t *testing.T) {
 		app, router, conf := NewApiTest()
 		conf.SetAuthMode(config.AuthModePasswd)
 		defer conf.SetAuthMode(config.AuthModePublic)
+		installAuthBudget(t, 10)
 
 		CreateSession(router)
 
 		r := PerformRequestWithBody(app, http.MethodPost, "/api/v1/session", `{"username": "admin", "password": "photoprism", "token": "xxx"}`)
-		assert.Equal(t, http.StatusNotFound, r.Code)
+		require.Equal(t, http.StatusOK, r.Code)
+
+		authToken := gjson.Get(r.Body.String(), "access_token").String()
+		require.True(t, rnd.IsAuthToken(authToken))
+		t.Cleanup(func() {
+			if sess, err := entity.FindSession(rnd.SessionID(authToken)); err == nil {
+				_ = sess.Delete()
+			}
+		})
+
+		// The invalid token counts as a failed login request.
+		assert.InDelta(t, 9, limiter.Login.IP(header.UnknownIP).Tokens(), 0.01)
 	})
 	t.Run("AdminInvalidToken", func(t *testing.T) {
 		app, router, conf := NewApiTest()
@@ -133,11 +248,41 @@ func TestCreateSession(t *testing.T) {
 		app, router, conf := NewApiTest()
 		conf.SetAuthMode(config.AuthModePasswd)
 		defer conf.SetAuthMode(config.AuthModePublic)
+		alice := entity.UserFixtures.Pointer("alice")
+		shareUID := "as6sg6bxpogaaba8"
+		prior := entity.FindUserShare(entity.UserShare{UserUID: alice.UserUID, ShareUID: shareUID})
+		var link entity.Link
+		if err := entity.Db().Where("link_token = ?", "1jxf3jfn2k").First(&link).Error; err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			if prior == nil {
+				assert.NoError(t, entity.UnscopedDb().Delete(&entity.UserShare{}, "user_uid = ? AND share_uid = ?", alice.UserUID, shareUID).Error)
+			} else {
+				assert.NoError(t, entity.UnscopedDb().Save(prior).Error)
+			}
+			alice.RefreshShares()
+			assert.NoError(t, entity.UnscopedDb().Model(&entity.Link{}).Where("link_uid = ?", link.LinkUID).
+				UpdateColumn("link_views", link.LinkViews).Error)
+			var restored entity.Link
+			assert.NoError(t, entity.Db().Where("link_uid = ?", link.LinkUID).First(&restored).Error)
+			assert.Equal(t, link.LinkViews, restored.LinkViews)
+		})
+		if prior != nil {
+			if err := entity.UnscopedDb().Delete(prior).Error; err != nil {
+				t.Fatal(err)
+			}
+			alice.RefreshShares()
+		}
 
 		authToken := AuthenticateUser(app, router, "alice", "Alice123!")
 
 		r := AuthenticatedRequestWithBody(app, http.MethodPost, "/api/v1/session", `{"token": "1jxf3jfn2k"}`, authToken)
 		assert.Equal(t, http.StatusOK, r.Code)
+		share := entity.FindUserShare(entity.UserShare{UserUID: alice.UserUID, ShareUID: shareUID})
+		if assert.NotNil(t, share) {
+			assert.Equal(t, link.LinkUID, share.LinkUID)
+		}
 	})
 	t.Run("PublicValidToken", func(t *testing.T) {
 		app, router, _ := NewApiTest()
@@ -176,6 +321,7 @@ func TestCreateSession(t *testing.T) {
 
 		val := gjson.Get(r.Body.String(), "error")
 		assert.Equal(t, i18n.Msg(i18n.ErrInvalidCredentials), val.String())
+		assert.Equal(t, i18n.Source(i18n.ErrInvalidCredentials), gjson.Get(r.Body.String(), "messageId").String())
 		assert.Equal(t, http.StatusUnauthorized, r.Code)
 	})
 	t.Run("AliceSuccess", func(t *testing.T) {
@@ -216,6 +362,7 @@ func TestCreateSession(t *testing.T) {
 		r := PerformRequestWithBody(app, http.MethodPost, "/api/v1/session", `{"username": "bob", "password": "helloworld"}`)
 		val := gjson.Get(r.Body.String(), "error")
 		assert.Equal(t, i18n.Msg(i18n.ErrInvalidCredentials), val.String())
+		assert.Equal(t, i18n.Source(i18n.ErrInvalidCredentials), gjson.Get(r.Body.String(), "messageId").String())
 		assert.Equal(t, http.StatusUnauthorized, r.Code)
 	})
 	t.Run("TwoFaPasscodeRequired", func(t *testing.T) {
@@ -231,6 +378,11 @@ func TestCreateSession(t *testing.T) {
 		assert.Equal(t, "", userEmail.String())
 		assert.Equal(t, "", userName.String())
 		assert.Equal(t, http.StatusUnauthorized, r.Code)
+		// Code 32 is a continuation request, not an error: the text is in "message", not "error".
+		assert.Equal(t, int64(32), gjson.Get(r.Body.String(), "code").Int())
+		assert.Equal(t, i18n.Msg(i18n.ErrPasscodeRequired), gjson.Get(r.Body.String(), "message").String())
+		assert.Empty(t, gjson.Get(r.Body.String(), "error").String())
+		assert.Equal(t, i18n.Source(i18n.ErrPasscodeRequired), gjson.Get(r.Body.String(), "messageId").String())
 	})
 	t.Run("TwoFaInvalidPasscode", func(t *testing.T) {
 		app, router, conf := NewApiTest()
@@ -246,6 +398,8 @@ func TestCreateSession(t *testing.T) {
 		assert.Equal(t, "", userEmail.String())
 		assert.Equal(t, "", userName.String())
 		assert.Equal(t, http.StatusUnauthorized, r.Code)
+		// The wrong passcode carries messageId so the Web UI can render it in the user's language.
+		assert.Equal(t, i18n.Source(i18n.ErrInvalidPasscode), gjson.Get(r.Body.String(), "messageId").String())
 	})
 	t.Run("TwoFaUseRecoveryCode", func(t *testing.T) {
 		app, router, conf := NewApiTest()
@@ -290,6 +444,7 @@ func TestGetSession(t *testing.T) {
 		id := gjson.Get(r.Body.String(), "session_id").String()
 		assert.Equal(t, rnd.SessionID(authToken), id)
 		assert.Equal(t, http.StatusOK, r.Code)
+		assert.Equal(t, header.CacheControlNoStore, r.Header().Get(header.CacheControl), "session responses must not be cached")
 	})
 	t.Run("AdminAuthenticatedRequestWithID", func(t *testing.T) {
 		app, router, conf := NewApiTest()
@@ -439,5 +594,122 @@ func TestDeleteSession(t *testing.T) {
 
 		r := AuthenticatedRequest(app, http.MethodDelete, "/api/v1/session/"+rnd.SessionID(deleteToken), authToken)
 		assert.Equal(t, http.StatusForbidden, r.Code)
+	})
+}
+
+// TestCreateSession_NotASCIIUsername checks that an account stored with a non-ASCII name signs in under
+// that name and keeps it.
+func TestCreateSession_NotASCIIUsername(t *testing.T) {
+	app, router, conf := NewApiTest()
+	conf.SetAuthMode(config.AuthModePasswd)
+	t.Cleanup(func() { conf.SetAuthMode(config.AuthModePublic) })
+
+	const password = "Session-Josè-123"
+
+	m := entity.NewUser()
+	m.UserName = "session-josé"
+	m.UserRole = "admin"
+	m.AuthProvider = authn.ProviderLocal.String()
+	m.CanLogin = true
+
+	require.NoError(t, entity.Db().Create(m).Error)
+	t.Cleanup(func() {
+		assert.NoError(t, entity.UnscopedDb().Delete(&entity.Session{}, "user_uid = ?", m.UserUID).Error)
+		assert.NoError(t, entity.UnscopedDb().Delete(&entity.Password{}, "uid = ?", m.UserUID).Error)
+		assert.NoError(t, entity.UnscopedDb().Delete(&entity.UserDetails{}, "user_uid = ?", m.UserUID).Error)
+		assert.NoError(t, entity.UnscopedDb().Delete(&entity.UserSettings{}, "user_uid = ?", m.UserUID).Error)
+		assert.NoError(t, entity.UnscopedDb().Delete(&entity.User{}, "user_uid = ?", m.UserUID).Error)
+	})
+	require.NoError(t, m.SetPassword(password))
+
+	CreateSession(router)
+
+	login := func(name string) int {
+		r := PerformRequestWithBody(app, http.MethodPost, "/api/v1/session", form.AsJson(form.Login{Username: name, Password: password}))
+
+		if r.Code == http.StatusOK {
+			assert.Equal(t, "session-josé", gjson.Get(r.Body.String(), "user.Name").String())
+		}
+
+		return r.Code
+	}
+
+	assert.Equal(t, http.StatusOK, login("Session-José"))
+	assert.Equal(t, "session-josé", entity.FindUserByUID(m.UserUID).UserName)
+
+	// MariaDB compares names that differ only by accents as equal.
+	if !entity.IsDialect(dsn.DriverMySQL) {
+		assert.Equal(t, http.StatusUnauthorized, login("session-jose"))
+	}
+}
+
+// TestCreateSession_ExactName checks that each account signs in under its own name with its own password,
+// beside an account whose name the database compares as equal and beside a deleted account of the same name.
+func TestCreateSession_ExactName(t *testing.T) {
+	app, router, conf := NewApiTest()
+	conf.SetAuthMode(config.AuthModePasswd)
+	t.Cleanup(func() { conf.SetAuthMode(config.AuthModePublic) })
+
+	newUser := func(t *testing.T, name, password string, deleted bool) *entity.User {
+		t.Helper()
+
+		m := entity.NewUser()
+		m.UserName = name
+		m.UserRole = "admin"
+		m.AuthProvider = authn.ProviderLocal.String()
+		m.CanLogin = true
+
+		require.NoError(t, entity.Db().Create(m).Error)
+		t.Cleanup(func() {
+			assert.NoError(t, entity.UnscopedDb().Delete(&entity.Session{}, "user_uid = ?", m.UserUID).Error)
+			assert.NoError(t, entity.UnscopedDb().Delete(&entity.Password{}, "uid = ?", m.UserUID).Error)
+			assert.NoError(t, entity.UnscopedDb().Delete(&entity.UserDetails{}, "user_uid = ?", m.UserUID).Error)
+			assert.NoError(t, entity.UnscopedDb().Delete(&entity.UserSettings{}, "user_uid = ?", m.UserUID).Error)
+			assert.NoError(t, entity.UnscopedDb().Delete(&entity.User{}, "user_uid = ?", m.UserUID).Error)
+		})
+		require.NoError(t, m.SetPassword(password))
+
+		if deleted {
+			require.NoError(t, m.Delete())
+		}
+
+		return m
+	}
+
+	CreateSession(router)
+
+	login := func(name, password string) (int, string) {
+		r := PerformRequestWithBody(app, http.MethodPost, "/api/v1/session", form.AsJson(form.Login{Username: name, Password: password}))
+		return r.Code, gjson.Get(r.Body.String(), "user.UID").String()
+	}
+
+	t.Run("OtherName", func(t *testing.T) {
+		other := newUser(t, "signin-josé", "Other-Password-1", false)
+		m := newUser(t, "signin-jose", "Exact-Password-1", false)
+
+		code, uid := login("signin-jose", "Exact-Password-1")
+		assert.Equal(t, http.StatusOK, code)
+		assert.Equal(t, m.UserUID, uid)
+
+		code, uid = login("signin-josé", "Other-Password-1")
+		assert.Equal(t, http.StatusOK, code)
+		assert.Equal(t, other.UserUID, uid)
+
+		code, _ = login("signin-jose", "Other-Password-1")
+		assert.Equal(t, http.StatusUnauthorized, code)
+
+		code, _ = login("signin-josé", "Exact-Password-1")
+		assert.Equal(t, http.StatusUnauthorized, code)
+	})
+	t.Run("DeletedLowerID", func(t *testing.T) {
+		newUser(t, "signin-dup", "Deleted-Password-1", true)
+		m := newUser(t, "signin-dup", "Active-Password-1", false)
+
+		code, uid := login("signin-dup", "Active-Password-1")
+		assert.Equal(t, http.StatusOK, code)
+		assert.Equal(t, m.UserUID, uid)
+
+		code, _ = login("signin-dup", "Deleted-Password-1")
+		assert.Equal(t, http.StatusUnauthorized, code)
 	})
 }

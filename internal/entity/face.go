@@ -5,36 +5,48 @@ import (
 	"encoding/base32"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"gorm.io/gorm"
+
 	"github.com/photoprism/photoprism/internal/ai/face"
+	"github.com/photoprism/photoprism/pkg/clean"
+	"github.com/photoprism/photoprism/pkg/dsn"
 	"github.com/photoprism/photoprism/pkg/rnd"
 )
 
 var faceMutex = sync.Mutex{}
+
+// UpdateFaces reports whether a matching pass changed a cluster, so callers know to refresh.
 var UpdateFaces = atomic.Bool{}
 
 // Face represents the face of a Subject.
 type Face struct {
-	ID              string          `gorm:"type:VARBINARY(64);primary_key;auto_increment:false;" json:"ID" yaml:"ID"`
-	FaceSrc         string          `gorm:"type:VARBINARY(8);" json:"Src" yaml:"Src,omitempty"`
-	FaceKind        int             `json:"Kind" yaml:"Kind,omitempty"`
+	ID              string          `gorm:"type:bytes;size:64;primaryKey;autoIncrement:false;" json:"ID" yaml:"ID"`
+	FaceSrc         string          `gorm:"type:bytes;size:8;" json:"Src" yaml:"Src,omitempty"`
+	FaceKind        int             `gorm:"size:32" json:"Kind" yaml:"Kind,omitempty"`
 	FaceHidden      bool            `json:"Hidden" yaml:"Hidden,omitempty"`
-	SubjUID         string          `gorm:"type:VARBINARY(42);index;default:'';" json:"SubjUID" yaml:"SubjUID,omitempty"`
-	Samples         int             `json:"Samples" yaml:"Samples,omitempty"`
+	SubjUID         string          `gorm:"type:bytes;size:42;index;default:'';" json:"SubjUID" yaml:"SubjUID,omitempty"`
+	Samples         int             `gorm:"size:32" json:"Samples" yaml:"Samples,omitempty"`
 	SampleRadius    float64         `json:"SampleRadius" yaml:"SampleRadius,omitempty"`
-	Collisions      int             `json:"Collisions" yaml:"Collisions,omitempty"`
+	Collisions      int             `gorm:"size:32" json:"Collisions" yaml:"Collisions,omitempty"`
 	CollisionRadius float64         `json:"CollisionRadius" yaml:"CollisionRadius,omitempty"`
-	MergeRetry      uint8           `gorm:"type:TINYINT(3);default:0" json:"-" yaml:"-"`
-	MergeNotes      string          `gorm:"type:VARCHAR(255);default:'';" json:"-" yaml:"-"`
-	EmbeddingJSON   json.RawMessage `gorm:"type:MEDIUMBLOB;" json:"-" yaml:"EmbeddingJSON,omitempty"`
+	MergeRetry      uint8           `gorm:"type:TINYINT(3);size:3;default:0" json:"-" yaml:"-"`
+	MergeNotes      string          `gorm:"size:255;default:'';" json:"-" yaml:"-"`
+	EmbedModel      string          `gorm:"column:embed_model;type:bytes;size:32;index;default:'';" json:"-" yaml:"EmbedModel,omitempty"`
+	EmbeddingJSON   json.RawMessage `gorm:"type:bytes;size:16777215;" json:"-" yaml:"EmbeddingJSON,omitempty"`
 	embedding       face.Embedding  `gorm:"-" yaml:"-"`
-	MatchedAt       *time.Time      `json:"MatchedAt" yaml:"MatchedAt,omitempty"`
-	CreatedAt       time.Time       `json:"CreatedAt" yaml:"CreatedAt,omitempty"`
-	UpdatedAt       time.Time       `json:"UpdatedAt" yaml:"UpdatedAt,omitempty"`
+	// reopened records that this cluster changed after a run read it, so a caller about to stamp
+	// it as matched can tell it apart from one that merely started out unmatched - which is the
+	// only state the timestamp itself can report, since both are NULL.
+	reopened  bool       `gorm:"-" yaml:"-"`
+	MatchedAt *time.Time `json:"MatchedAt" yaml:"MatchedAt,omitempty"`
+	CreatedAt time.Time  `json:"CreatedAt" yaml:"CreatedAt,omitempty"`
+	UpdatedAt time.Time  `json:"UpdatedAt" yaml:"UpdatedAt,omitempty"`
 }
 
 // Faceless can be used as argument to match unmatched face markers.
@@ -45,14 +57,14 @@ func (Face) TableName() string {
 	return "faces"
 }
 
-// NewFace returns a new face.
-func NewFace(subjUID, faceSrc string, embeddings face.Embeddings) *Face {
+// NewFace returns a new face for embeddings produced by the specified model.
+func NewFace(subjUID, faceSrc string, embeddings face.Embeddings, model face.ModelName) *Face {
 	result := &Face{
 		SubjUID: subjUID,
 		FaceSrc: faceSrc,
 	}
 
-	if err := result.SetEmbeddings(embeddings); err != nil {
+	if err := result.SetEmbeddings(embeddings, model); err != nil {
 		log.Errorf("face: failed setting embeddings (%s)", err)
 	}
 
@@ -73,25 +85,65 @@ func (m *Face) MatchId(f Face) string {
 }
 
 // SkipMatching checks whether the face should be skipped when matching.
+// Only ResolveCollision still raises the kind, to AmbiguousFace.
 func (m *Face) SkipMatching() bool {
-	return m.FaceKind > 1 || m.Embedding().SkipMatching()
+	return m.FaceKind > 1
 }
 
-// SetEmbeddings assigns face embeddings.
-func (m *Face) SetEmbeddings(embeddings face.Embeddings) (err error) {
+// SetEmbeddings assigns face embeddings produced by the specified model. The model is
+// recorded as passed, so a cluster built from stored vectors keeps their provenance
+// instead of adopting whichever model happens to be configured now.
+func (m *Face) SetEmbeddings(embeddings face.Embeddings, model face.ModelName) (err error) {
 	if len(embeddings) == 0 {
 		return fmt.Errorf("invalid embedding")
 	}
 
+	// Comparing this cluster with anything the configured model produces would mix two
+	// embedding spaces, so it is refused where the row is built rather than where it is read.
+	if !face.ModelsComparable(model, face.EmbeddingModelName()) {
+		return fmt.Errorf("embedding model %s cannot be compared with %s", clean.Log(model), clean.Log(face.EmbeddingModelName()))
+	}
+
 	m.embedding, m.SampleRadius, m.Samples = face.EmbeddingsMidpoint(embeddings)
 
-	if len(m.embedding) != len(face.NullEmbedding) {
-		return fmt.Errorf("embedding has invalid number of values")
+	// The expected length depends on the configured model, so vectors generated by a
+	// different one are rejected rather than mixed into an incompatible vector space.
+	// Optimize and merge runs hit this for every legacy cluster after a model switch,
+	// so the message has to name the way out.
+	if dims := face.ExpectedDims(); len(m.embedding) != dims {
+		if current := face.EmbeddingModelName(); current != "" {
+			return fmt.Errorf("embedding has %d values, expected %d for model %s, run photoprism faces migrate to regenerate", len(m.embedding), dims, clean.Log(current))
+		}
+
+		return fmt.Errorf("embedding has %d values, expected %d", len(m.embedding), dims)
+	}
+
+	m.EmbedModel = model
+
+	// A midpoint with no magnitude describes no face and sits one unit from every unit vector, so
+	// a cluster built from it would accept whatever a model reaching past 1 compares with it.
+	// Refused here as well as in Match, so such a row cannot be stored in the first place - which
+	// is also what keeps the recorded kind and the migration predicate in agreement.
+	if m.embedding.Zero() {
+		return fmt.Errorf("embedding has no magnitude")
+	}
+
+	// Classified from the midpoint that is stored, not from the inputs it was computed over: two
+	// opposite vectors are each regular while their mean is not a face. Recorded rather than left
+	// at zero because the "face:N" search filter reads the number, and raised rather than assigned
+	// so a cluster already reported as ambiguous is not downgraded.
+	if k := int(m.embedding.Kind()); k > m.FaceKind {
+		m.FaceKind = k
 	}
 
 	// Limit sample radius to reduce false positives.
-	if m.SampleRadius > face.ClusterRadius {
-		m.SampleRadius = face.ClusterRadius
+	m.SampleRadius = face.ClampSampleRadius(m.SampleRadius)
+
+	// One embedding has no extent, and neither do copies of one crop: the honest value is the
+	// numeric tolerance, not the width of a cluster nothing measured. A centroid and a radius are
+	// what merging produces, so a singleton carries neither until it becomes part of one.
+	if m.SampleRadius <= 0 {
+		m.SampleRadius = face.Epsilon
 	}
 
 	m.EmbeddingJSON, err = json.Marshal(m.embedding)
@@ -103,16 +155,24 @@ func (m *Face) SetEmbeddings(embeddings face.Embeddings) (err error) {
 	//nolint:gosec // G401: Stable identifier hash; not used for security decisions.
 	s := sha1.Sum(m.EmbeddingJSON)
 
-	// Update Face ID, Kind, and reset match timestamp,
+	// Update Face ID and reset match timestamp,
 	m.ID = base32.StdEncoding.EncodeToString(s[:])
 
-	if k := int(m.embedding.Kind()); k > m.FaceKind {
-		m.FaceKind = k
-	}
-
-	m.MatchedAt = nil
+	m.reopen()
 
 	return nil
+}
+
+// Reopened reports whether this cluster changed after the run read it, and therefore has to be
+// compared against the markers again rather than stamped as matched.
+func (m *Face) Reopened() bool {
+	return m != nil && m.reopened
+}
+
+// reopen clears the match timestamp and records that this cluster needs comparing again.
+func (m *Face) reopen() {
+	m.MatchedAt = nil
+	m.reopened = true
 }
 
 // Matched updates the match timestamp.
@@ -134,35 +194,53 @@ func (m *Face) Embedding() face.Embedding {
 	return m.embedding
 }
 
-// Match tests if embeddings match this face.
-func (m *Face) Match(embeddings face.Embeddings) (match bool, dist float64) {
+// SameEmbeddingModel reports whether the stored embedding can be compared with newly
+// generated vectors. Legacy rows without provenance are compatible with FaceNet only.
+func (m *Face) SameEmbeddingModel() bool {
+	return face.ModelsComparable(m.EmbedModel, face.EmbeddingModelName())
+}
+
+// AcceptDist returns the distance below which an embedding joins this cluster.
+// The stored radius is clamped on read as well as on write, so a changed cluster
+// radius applies to existing rows before a match run rewrites their statistics.
+func (m *Face) AcceptDist() float64 {
+	return face.AcceptDist(m.SampleRadius)
+}
+
+// Match tests if embeddings produced by the specified model match this face.
+func (m *Face) Match(embeddings face.Embeddings, model face.ModelName) (match bool, dist float64) {
 	dist = -1
 
 	if embeddings.Empty() {
-		// Np embeddings, no match.
+		// No embeddings, no match.
+		return false, dist
+	}
+
+	// Two models can produce vectors of the same length that mean entirely different
+	// things, so provenance decides comparability before any distance is calculated.
+	// Both sides are checked: the argument carries its own model, not this cluster's.
+	if !m.SameEmbeddingModel() || !face.SameEmbeddingSpace(m.EmbedModel, model) {
 		return false, dist
 	}
 
 	faceEmbedding := m.Embedding()
 
-	if len(faceEmbedding) == 0 {
-		// Should never happen.
+	// A cluster with no magnitude is 1 away from every unit embedding, so it accepts whatever a
+	// model reaching past 1 compares with it. Refused here as well as where vectors are written,
+	// because a row may predate that check.
+	if len(faceEmbedding) == 0 || faceEmbedding.Zero() {
 		return false, dist
 	}
 
 	// Calculate the smallest distance to embeddings.
-	for _, e := range embeddings {
-		if d := e.Dist(faceEmbedding); d < dist || dist < 0 {
-			dist = d
-		}
-	}
+	dist = embeddings.Dist(faceEmbedding)
 
 	// Any reasons embeddings do not match this face?
 	switch {
 	case dist < 0:
 		// Should never happen.
 		return false, dist
-	case dist > (m.SampleRadius + face.MatchDist):
+	case dist > m.AcceptDist():
 		// Too far.
 		return false, dist
 	case m.CollisionRadius > face.CollisionDist && dist > m.CollisionRadius:
@@ -174,8 +252,43 @@ func (m *Face) Match(embeddings face.Embeddings) (match bool, dist float64) {
 	return true, dist
 }
 
+// Mergeable reports whether one midpoint can stand for this cluster and the given one, and returns
+// the distance between them.
+//
+// Bounded by what a cluster may ever accept - the widest radius one may hold plus MatchDist - rather
+// than by Match, which reads this cluster's own extent and so answers differently depending on which
+// of the two is asked. The bound is a constant for that reason, so the verdict stays symmetric.
+func (m *Face) Mergeable(f *Face) (mergeable bool, dist float64) {
+	dist = -1
+
+	// An id on both sides, or the verdict would depend on the direction asked.
+	if m == nil || f == nil || m.ID == "" || f.ID == "" || m.ID == f.ID {
+		return false, dist
+	}
+
+	// Averaging vectors from two models yields a midpoint that describes neither.
+	if !face.SameEmbeddingSpace(m.EmbedModel, f.EmbedModel) {
+		return false, dist
+	}
+
+	a, b := m.Embedding(), f.Embedding()
+
+	// Refused as in Match: such a midpoint is one unit from every unit vector.
+	if len(a) == 0 || len(b) == 0 || a.Zero() || b.Zero() {
+		return false, dist
+	}
+
+	dist = a.Dist(b)
+
+	// Two faces of one person sit further apart than the link distance far more often than not, so
+	// bounding the merge there left hand-labeled clusters waiting indefinitely. The centroid this
+	// builds is still measured from its members and clamped where it is stored, so a merged cluster
+	// cannot reach past what an automatic one of the same width already reaches.
+	return dist >= 0 && dist <= face.AcceptDist(face.ClusterRadius), dist
+}
+
 // ResolveCollision resolves a collision with a different subject's face.
-func (m *Face) ResolveCollision(embeddings face.Embeddings) (resolved bool, err error) {
+func (m *Face) ResolveCollision(embeddings face.Embeddings, model face.ModelName) (resolved bool, err error) {
 	if m.SubjUID == "" {
 		// Ignore reports for anonymous faces.
 		return false, nil
@@ -185,35 +298,84 @@ func (m *Face) ResolveCollision(embeddings face.Embeddings) (resolved bool, err 
 		return false, fmt.Errorf("embedding must not be empty")
 	}
 
-	if match, dist := m.Match(embeddings); !match {
+	match, dist := m.Match(embeddings, model)
+	radius := dist - face.Epsilon
+
+	if !match {
 		// Embeddings don't match this face. Ignore.
 		return false, nil
 	} else if dist < 0 {
 		// Should never happen.
 		return false, fmt.Errorf("collision distance must be positive")
-	} else if dist < 0.02 {
+	} else if dist < face.AmbiguityDist() {
 		log.Warnf("faces: %s has ambiguous subject %s with a similar face at dist %f with source %s", m.ID, SubjNames.Log(m.SubjUID), dist, SrcString(m.FaceSrc))
 
+		updatedAt := Now()
+		res := UnscopedDb().Model(&Face{}).Where("id = ? AND subj_uid = ?", m.ID, m.SubjUID).
+			UpdateColumns(Values{"collisions": gorm.Expr("collisions + 1"), "collision_radius": dist,
+				"face_kind": int(face.AmbiguousFace), "updated_at": updatedAt, "matched_at": updatedAt})
+
+		if res.Error != nil {
+			return true, res.Error
+		} else if res.RowsAffected == 0 {
+			m.refreshCollision()
+			return false, nil
+		}
+
 		m.FaceKind = int(face.AmbiguousFace)
-		m.UpdatedAt = Now()
+		m.UpdatedAt = updatedAt
 		m.MatchedAt = &m.UpdatedAt
 		m.Collisions++
 		m.CollisionRadius = dist
 		UpdateFaces.Store(true)
-		return true, m.Updates(Values{"collisions": m.Collisions, "collision_radius": m.CollisionRadius,
-			"face_kind": m.FaceKind, "updated_at": m.UpdatedAt, "matched_at": m.MatchedAt})
-	} else {
-		m.MatchedAt = nil
+
+		return true, nil
+	} else if radius <= face.CollisionDist {
+		// A radius at or below CollisionDist cannot narrow the cluster, so it is recorded at most
+		// once, without reopening the cluster or revising what it holds. The stored row decides, so
+		// a copy loaded before a concurrent narrowing cannot widen the cluster.
+		if m.CollisionNoted(dist) {
+			return false, nil
+		}
+
+		res := UnscopedDb().Model(&Face{}).Where("id = ? AND subj_uid = ?", m.ID, m.SubjUID).
+			Where("COALESCE(collision_radius, 0) <= ? AND (COALESCE(collision_radius, 0) <= 0 OR collision_radius > ?)", face.CollisionDist, radius).
+			UpdateColumns(Values{"collisions": gorm.Expr("collisions + 1"), "collision_radius": radius})
+
+		if res.Error != nil {
+			return false, res.Error
+		} else if res.RowsAffected == 0 {
+			m.refreshCollision()
+			return false, nil
+		}
+
 		m.Collisions++
-		m.CollisionRadius = dist - face.Epsilon
+		m.CollisionRadius = radius
 		UpdateFaces.Store(true)
+
+		return true, nil
 	}
 
-	err = m.Updates(Values{"collisions": m.Collisions, "collision_radius": m.CollisionRadius, "matched_at": m.MatchedAt})
+	// The stored row decides, so a copy loaded before a concurrent narrowing or a change of person
+	// cannot widen the cluster or narrow it against its own person.
+	res := UnscopedDb().Model(&Face{}).Where("id = ? AND subj_uid = ?", m.ID, m.SubjUID).
+		Where("COALESCE(collision_radius, 0) <= ? OR collision_radius > ?", face.CollisionDist, radius).
+		UpdateColumns(Values{"collisions": gorm.Expr("collisions + 1"), "collision_radius": radius, "matched_at": nil, "updated_at": Now()})
 
-	if err != nil {
-		return true, err
+	if res.Error != nil {
+		return true, res.Error
+	} else if res.RowsAffected == 0 {
+		m.refreshCollision()
+		return false, nil
 	}
+
+	// Reopened rather than merely cleared: this narrows the cluster mid-run, and the markers
+	// ReviseMatches drops below have nothing to be rematched against if the run then stamps
+	// it as matched on its way out.
+	m.reopen()
+	m.Collisions++
+	m.CollisionRadius = radius
+	UpdateFaces.Store(true)
 
 	if revised, err := m.ReviseMatches(); err != nil {
 		return true, err
@@ -224,7 +386,112 @@ func (m *Face) ResolveCollision(embeddings face.Embeddings) (resolved bool, err 
 	return true, nil
 }
 
-// ReviseMatches updates marker matches after face parameters have been changed.
+// refreshCollision reads the stored person and collision fields into this copy, so the checks that
+// follow a write conditioned on them decide on the stored row.
+func (m *Face) refreshCollision() {
+	if stored := FindFace(m.ID); stored != nil {
+		m.SubjUID = stored.SubjUID
+		m.Collisions = stored.Collisions
+		m.CollisionRadius = stored.CollisionRadius
+		m.FaceKind = stored.FaceKind
+	}
+}
+
+// CollisionNoted reports whether a collision at dist, whose radius could not narrow this cluster and
+// which is not close enough to make it ambiguous, would change nothing: a radius at or below it is
+// recorded already, or the cluster is narrowed further out, which such a radius must not widen.
+func (m *Face) CollisionNoted(dist float64) bool {
+	radius := dist - face.Epsilon
+
+	if dist < face.AmbiguityDist() || radius > face.CollisionDist {
+		return false
+	}
+
+	return m.CollisionRadius > face.CollisionDist || m.CollisionRadius > 0 && m.CollisionRadius <= radius
+}
+
+// InheritCollision narrows this cluster to the tightest collision bound its sources recorded.
+//
+// NewFace sets none, so a merged row would otherwise start unbounded and re-earn its narrowing.
+// Only ever tightens, since FirstOrCreateFace may return a row already carrying one.
+func (m *Face) InheritCollision(from Faces) error {
+	radius, collisions := from.CollisionBound(m.SampleRadius)
+
+	if radius == 0 || m.CollisionRadius > face.CollisionDist && m.CollisionRadius <= radius {
+		return nil
+	}
+
+	m.Collisions, m.CollisionRadius = collisions, radius
+
+	return m.Updates(Values{"collisions": m.Collisions, "collision_radius": m.CollisionRadius})
+}
+
+// ClearCollision discards a recorded collision, so the cluster matches at its full accept distance.
+//
+// A collision records that two subjects competed for the same embeddings. Once an operator states
+// they are one person the premise is gone, and the narrowing gates the cluster against faces it
+// should hold; a later pass re-derives a collision that is still real.
+func (m *Face) ClearCollision() error {
+	if m.ID == "" {
+		return fmt.Errorf("invalid face id")
+	} else if !m.HasCollision() {
+		return nil
+	}
+
+	m.Collisions = 0
+	m.CollisionRadius = 0
+
+	// Reopened so the markers this cluster refused while narrowed are compared against it again;
+	// leaving the stamp would keep them out until something else reopened it.
+	m.reopen()
+	UpdateFaces.Store(true)
+
+	values := Values{"collisions": m.Collisions, "collision_radius": m.CollisionRadius, "matched_at": m.MatchedAt}
+
+	// Only ResolveCollision raises the kind, so a cluster carrying the ambiguous kind was marked by
+	// that path and returns to the regular one every cluster is created with. Any other kind is
+	// left alone.
+	if m.FaceKind == int(face.AmbiguousFace) {
+		m.FaceKind = int(face.RegularFace)
+		values["face_kind"] = m.FaceKind
+	}
+
+	return m.Updates(values)
+}
+
+// HasCollision reports whether a narrowing collision is recorded for this cluster.
+func (m *Face) HasCollision() bool {
+	return m != nil && (m.Collisions > 0 || m.CollisionRadius > 0 || m.FaceKind == int(face.AmbiguousFace))
+}
+
+// ClearSubjectCollisions discards the collisions recorded for a subject's clusters and reports how
+// many were cleared. Used where two subjects turn out to be one person, since every collision
+// between their clusters was recorded against an identity that no longer exists.
+func ClearSubjectCollisions(subjUID string) (cleared int, err error) {
+	if subjUID == "" {
+		return 0, fmt.Errorf("subject has no uid")
+	}
+
+	var faces Faces
+
+	if err = UnscopedDb().Where("subj_uid = ?", subjUID).
+		Where("collisions > 0 OR collision_radius > 0 OR face_kind = ?", int(face.AmbiguousFace)).
+		Find(&faces).Error; err != nil {
+		return 0, err
+	}
+
+	for i := range faces {
+		if clearErr := faces[i].ClearCollision(); clearErr != nil {
+			return cleared, clearErr
+		}
+
+		cleared++
+	}
+
+	return cleared, nil
+}
+
+// ReviseMatches releases the markers this cluster no longer matches after its parameters changed.
 func (m *Face) ReviseMatches() (revised Markers, err error) {
 	if m.ID == "" {
 		return revised, fmt.Errorf("empty face id")
@@ -232,36 +499,122 @@ func (m *Face) ReviseMatches() (revised Markers, err error) {
 
 	var matches Markers
 
-	if err := Db().Where("face_id = ?", m.ID).Where("marker_type = ?", MarkerFace).
+	if err = Db().Where("face_id = ?", m.ID).Where("marker_type = ?", MarkerFace).
 		Find(&matches).Error; err != nil {
 		log.Debugf("faces: found no matching markers for conflict resolution (%s)", err)
 		return revised, err
-	} else {
-		for _, marker := range matches {
-			if ok, _ := m.Match(marker.Embeddings()); !ok {
-				if updated, err := marker.ClearFace(); err != nil {
-					log.Debugf("faces: failed to remove match with marker (%s)", err) // Conflict resolution
-					return revised, err
-				} else if updated {
-					revised = append(revised, marker)
-				}
-			}
+	}
+
+	uids := make([]string, 0, len(matches))
+	updatedAt := Now()
+
+	for _, marker := range matches {
+		// A marker from another embedding space cannot be compared with this cluster,
+		// so its assignment is left alone rather than dropped on a comparison that
+		// never ran.
+		if !face.SameEmbeddingSpace(marker.EmbedModel, m.EmbedModel) {
+			continue
+		} else if ok, _ := m.Match(marker.Embeddings(), marker.EmbedModel); ok {
+			continue
 		}
+
+		marker.FaceID = ""
+		marker.FaceDist = -1.0
+		marker.MatchedAt = nil
+		marker.UpdatedAt = updatedAt
+
+		if marker.SubjSrc == SrcAuto {
+			marker.SubjUID = ""
+		}
+
+		uids = append(uids, marker.MarkerUID)
+		revised = append(revised, marker)
+	}
+
+	if released, err := m.releaseMarkers(uids, updatedAt); err != nil {
+		log.Debugf("faces: failed to remove match with marker (%s)", err) // Conflict resolution
+		return nil, err
+	} else if released < len(uids) {
+		log.Debugf("faces: %d of %d markers were reassigned before release from %s", len(uids)-released, len(uids), m.ID)
 	}
 
 	return revised, nil
 }
 
+// releaseMarkers detaches the specified markers from this cluster in batches, flags their photos,
+// and returns how many it released. Their match stamp is cleared, so the next run compares them
+// against every cluster: the cluster narrowed underneath them, and nothing has compared them since.
+func (m *Face) releaseMarkers(uids []string, updatedAt time.Time) (released int, err error) {
+	if len(uids) == 0 {
+		return 0, nil
+	}
+
+	UpdateFaces.Store(true)
+
+	for batch := range slices.Chunk(uids, BatchSize()) {
+		res := UnscopedDb().Model(&Marker{}).Where("marker_uid IN (?) AND face_id = ?", batch, m.ID).
+			UpdateColumns(Values{
+				"face_id":    "",
+				"face_dist":  -1.0,
+				"subj_uid":   gorm.Expr("CASE WHEN subj_src = ? THEN ? ELSE subj_uid END", SrcAuto, ""),
+				"matched_at": nil,
+				"updated_at": updatedAt,
+			})
+
+		if res.Error != nil {
+			return released, res.Error
+		}
+
+		released += int(res.RowsAffected)
+
+		if err = refreshMarkerPhotos(batch); err != nil {
+			return released, err
+		}
+	}
+
+	return released, nil
+}
+
+// whereSameEmbeddingSpace restricts a statement to vectors from the specified model's
+// embedding space. An empty name selects the legacy rows that predate the provenance
+// column, which is deliberate: the model here is a stored cluster's own, never an
+// unknown configuration.
+func whereSameEmbeddingSpace(stmt *gorm.DB, model face.ModelName) *gorm.DB {
+	switch model {
+	case "", face.ModelFaceNet:
+		// A vector with no recorded model is FaceNet's, so the two are one space in both
+		// directions - which is what face.SameEmbeddingSpace reports and ReviseMatches applies
+		// to these same rows. Selecting only the blank ones would leave a legacy cluster unable
+		// to attract the markers a loaded embedder has since stamped.
+		return stmt.Where("embed_model IN (?)", []string{face.ModelFaceNet, ""})
+	default:
+		return stmt.Where("embed_model = ?", model)
+	}
+}
+
 // MatchMarkers finds and references matching markers.
+//
+// Only the detection floor admits a marker, not the clustering one: the second pass marks faces
+// a crowd photograph would lose rather than naming people from them. A marker already in a
+// cluster is exempt, or the merge path would strand it on one about to be purged.
 func (m *Face) MatchMarkers(faceIds []string) error {
 	if len(faceIds) == 0 {
 		return nil
 	}
 
+	// One embedding may not adopt markers, for the reason it is not offered to the matcher either:
+	// it is a labeled example, and one photograph is not evidence enough to name others from. Gated
+	// here as well, since this runs once when a cluster is created and the matcher never sees it
+	// again.
+	if m.Samples < 2 {
+		return nil
+	}
+
 	var markers Markers
 
-	err := Db().
-		Where("marker_invalid = 0 AND marker_type = ? AND face_id IN (?)", MarkerFace, faceIds).
+	err := whereSameEmbeddingSpace(Db().
+		Where("marker_invalid = FALSE AND marker_type = ? AND face_id IN (?)", MarkerFace, faceIds).
+		Where("face_id <> '' OR size >= ?", face.SizeThreshold), m.EmbedModel).
 		Find(&markers).Error
 
 	if err != nil {
@@ -277,7 +630,7 @@ func (m *Face) MatchMarkers(faceIds []string) error {
 			log.Infof("faces: matching %d of %d markers", i, resultLen)
 			start = time.Now()
 		}
-		if ok, dist := m.Match(marker.Embeddings()); !ok {
+		if ok, dist := m.Match(marker.Embeddings(), marker.EmbedModel); !ok {
 			// Ignore.
 		} else if _, err = marker.SetFace(m, dist); err != nil {
 			return err
@@ -287,31 +640,50 @@ func (m *Face) MatchMarkers(faceIds []string) error {
 	return nil
 }
 
-// UpdateMatchStats persists sample statistics derived from recent matches.
-func (m *Face) UpdateMatchStats(samples int, maxDistance float64) error {
-	if m.ID == "" || samples <= 0 {
+// UpdateMatchStats widens the extent a cluster reaches after a match run, and never narrows it.
+//
+// A run visits only the markers that were unmatched when it started, so one face arriving near the
+// centroid would otherwise shrink the radius and refuse the members beyond it. It leaves Samples
+// alone: that counts the embeddings the centroid was averaged from, which matching does not change.
+func (m *Face) UpdateMatchStats(matched int, maxDistance float64) error {
+	if m.ID == "" || matched <= 0 {
 		return nil
 	}
 
-	radius := maxDistance + face.Epsilon
+	// The epsilon slack is applied before clamping so it can never lift the stored
+	// radius above the configured maximum.
+	radius := face.ClampSampleRadius(max(maxDistance+face.Epsilon, m.SampleRadius))
 
-	if radius > face.ClusterRadius {
-		radius = face.ClusterRadius
-	}
-
-	if radius < 0 {
-		radius = 0
-	}
-
-	if m.Samples == samples && m.SampleRadius == radius {
+	if m.SampleRadius == radius {
 		return nil
 	}
 
-	m.Samples = samples
 	m.SampleRadius = radius
 	UpdateFaces.Store(true)
 
-	return m.Updates(Values{"samples": m.Samples, "sample_radius": m.SampleRadius})
+	return m.Updates(Values{"sample_radius": m.SampleRadius})
+}
+
+// SetSampleRadius replaces the extent with one measured over the cluster's members, which is what
+// makes a smaller value trustworthy where UpdateMatchStats can only widen.
+//
+// Samples is not touched. The centroid is read rather than recomputed - a cluster's id is its hash -
+// so the number of embeddings averaged into it is unchanged however far its members now reach.
+func (m *Face) SetSampleRadius(radius float64) error {
+	if m.ID == "" || radius <= 0 {
+		return nil
+	}
+
+	radius = face.ClampSampleRadius(radius)
+
+	if m.SampleRadius == radius {
+		return nil
+	}
+
+	m.SampleRadius = radius
+	UpdateFaces.Store(true)
+
+	return m.Updates(Values{"sample_radius": m.SampleRadius})
 }
 
 // SetSubjectUID updates the face's subject uid and related markers.
@@ -330,12 +702,54 @@ func (m *Face) SetSubjectUID(subjUid string) (err error) {
 		Where("face_id = ?", m.ID).
 		Where("subj_src = ?", SrcAuto).
 		Where("subj_uid <> ?", m.SubjUID).
-		Where("marker_invalid = 0").
+		Where("marker_invalid = FALSE").
 		UpdateColumns(Values{"subj_uid": m.SubjUID, "marker_review": false}).Error; err != nil {
 		return err
 	}
 
 	return m.RefreshPhotos()
+}
+
+// ClaimSubject names this cluster after subjUID while it is still unnamed, and relinks its automatic
+// markers while the stored cluster carries that person. It reports whether it does; a person named
+// on the cluster after this copy was loaded is kept, and the copy takes it over.
+func (m *Face) ClaimSubject(subjUID string) (carries bool, err error) {
+	if m.ID == "" {
+		return false, fmt.Errorf("empty face id")
+	} else if subjUID == "" {
+		return false, fmt.Errorf("empty subject uid")
+	}
+
+	if res := UnscopedDb().Model(&Face{}).Where("id = ? AND COALESCE(subj_uid, '') = ''", m.ID).
+		UpdateColumns(Values{"subj_uid": subjUID, "updated_at": Now()}); res.Error != nil {
+		return false, res.Error
+	} else if res.RowsAffected == 0 {
+		var stored []string
+
+		if err = UnscopedDb().Model(&Face{}).Where("id = ?", m.ID).Pluck("COALESCE(subj_uid, '')", &stored).Error; err != nil {
+			return false, err
+		} else if len(stored) == 0 {
+			return false, nil
+		} else if stored[0] != subjUID {
+			m.SubjUID = stored[0]
+			return false, nil
+		}
+	}
+
+	m.SubjUID = subjUID
+	UpdateFaces.Store(true)
+
+	if err = UnscopedDb().Model(&Marker{}).
+		Where("face_id = ?", m.ID).
+		Where("subj_src = ?", SrcAuto).
+		Where("subj_uid <> ?", subjUID).
+		Where("marker_invalid = FALSE").
+		Where(fmt.Sprintf("EXISTS (SELECT 1 FROM %s f WHERE f.id = ? AND f.subj_uid = ?)", Face{}.TableName()), m.ID, subjUID).
+		UpdateColumns(Values{"subj_uid": subjUID, "marker_review": false}).Error; err != nil {
+		return true, err
+	}
+
+	return true, m.RefreshPhotos()
 }
 
 // RefreshPhotos flags related photos for metadata maintenance.
@@ -348,7 +762,7 @@ func (m *Face) RefreshPhotos() error {
 
 	var err error
 	switch DbDialect() {
-	case MySQL:
+	case dsn.DialectMySQL:
 		update := fmt.Sprintf(`UPDATE photos p JOIN files f ON f.photo_id = p.id JOIN %s m ON m.file_uid = f.file_uid
 			SET p.checked_at = NULL WHERE m.face_id = ?`, Marker{}.TableName())
 		err = UnscopedDb().Exec(update, m.ID).Error
@@ -479,13 +893,15 @@ func ValidFaceCount(fileUid string) (c int) {
 		return
 	}
 
-	if err := Db().Model(Marker{}).
+	var count int64
+
+	if err := Db().Model(&Marker{}).
 		Where("file_uid = ? AND marker_type = ?", fileUid, MarkerFace).
-		Where("marker_invalid = 0").
-		Count(&c).Error; err != nil {
+		Where("marker_invalid = FALSE").
+		Count(&count).Error; err != nil {
 		log.Errorf("file: %s (count faces)", err)
 		return 0
 	} else {
-		return c
+		return int(count)
 	}
 }

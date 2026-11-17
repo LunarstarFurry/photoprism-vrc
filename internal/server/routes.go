@@ -47,9 +47,15 @@ func registerRoutes(router *gin.Engine, conf *config.Config) {
 
 	// OAuth2 Client Endpoints.
 	api.OAuthAuthorize(APIv1)
+	api.OAuthConsent(APIv1)
+	api.OAuthConsentApprove(APIv1)
+	api.OAuthConsentDeny(APIv1)
+	api.FindUserGrants(APIv1)
+	api.DeleteUserGrant(APIv1)
 	api.OAuthUserinfo(APIv1)
 	api.OAuthToken(APIv1)
 	api.OAuthRevoke(APIv1)
+	api.OAuthLogout(APIv1)
 
 	// OIDC Client Endpoints.
 	api.OIDCLogin(APIv1)
@@ -105,6 +111,7 @@ func registerRoutes(router *gin.Engine, conf *config.Config) {
 
 	// Photo Search and Organization.
 	api.SearchPhotos(APIv1)
+	api.SearchPhotosView(APIv1)
 	api.SearchGeo(APIv1)
 	api.GetPlacesReverse(APIv1)
 	api.GetPlacesSearch(APIv1)
@@ -124,6 +131,7 @@ func registerRoutes(router *gin.Engine, conf *config.Config) {
 	api.UpdatePhotoLabel(APIv1)
 	api.GetMomentsTime(APIv1)
 	api.GetFile(APIv1)
+	api.GetFileBytes(APIv1)
 	api.DeleteFile(APIv1)
 	api.ChangeFileOrientation(APIv1)
 	api.CreateMarker(APIv1)
@@ -187,6 +195,14 @@ func registerRoutes(router *gin.Engine, conf *config.Config) {
 	api.GetFace(APIv1)
 	api.UpdateFace(APIv1)
 
+	// Cameras.
+	api.SearchCameras(APIv1)
+	api.UpdateCamera(APIv1)
+
+	// Lenses.
+	api.SearchLenses(APIv1)
+	api.UpdateLens(APIv1)
+
 	// Batch Operations.
 	api.BatchAlbumsDelete(APIv1)
 	api.BatchLabelsDelete(APIv1)
@@ -207,6 +223,11 @@ func registerRoutes(router *gin.Engine, conf *config.Config) {
 	api.ClusterSummary(APIv1)
 	api.ClusterMetrics(APIv1)
 	api.ClusterHealth(APIv1)
+
+	// Model Context Protocol (MCP). Can be disabled via --disable-mcp /
+	// PHOTOPRISM_DISABLE_MCP if the endpoint is not needed or should not
+	// be exposed (e.g. for security reasons).
+	api.ServeMCP(APIv1)
 
 	// Technical Endpoints.
 	api.GetSvg(APIv1)

@@ -7,6 +7,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
+	"github.com/photoprism/photoprism/pkg/dsn"
+
 	"github.com/photoprism/photoprism/internal/config"
 	"github.com/photoprism/photoprism/internal/service/cluster"
 )
@@ -79,10 +81,30 @@ func TestGenerateCredentials_CustomPrefix(t *testing.T) {
 }
 
 func TestBuildDSN(t *testing.T) {
-	d := BuildDSN("mysql", "mariadb", 3306, "user", "pass", "dbname")
-	assert.Contains(t, d, "user:pass@tcp(mariadb:3306)/dbname")
-	assert.Contains(t, d, "charset=utf8mb4")
-	assert.Contains(t, d, "parseTime=true")
+	t.Run("Hostname", func(t *testing.T) {
+		d := BuildDSN("mysql", "mariadb", 3306, "user", "pass", "dbname")
+		assert.Contains(t, d, "user:pass@tcp(mariadb:3306)/dbname")
+		assert.Contains(t, d, "charset=utf8mb4")
+		assert.Contains(t, d, "parseTime=true")
+	})
+	t.Run("Hosts", func(t *testing.T) {
+		for host, want := range map[string]string{
+			"mariadb":    "mariadb",
+			"10.0.0.5":   "10.0.0.5",
+			"fd00::10":   "fd00::10",
+			"[fd00::10]": "fd00::10",
+		} {
+			d := BuildDSN("mysql", host, 3306, "user", "pass", "dbname")
+			parsed := dsn.Parse(d)
+			assert.Equal(t, want, parsed.Host(), host)
+			assert.Equal(t, 3306, parsed.Port(), host)
+			assert.Equal(t, "dbname", parsed.Name, host)
+		}
+	})
+	t.Run("UnsupportedDriver", func(t *testing.T) {
+		d := BuildDSN("other", "fd00::10", 3306, "user", "pass", "dbname")
+		assert.Contains(t, d, "user:pass@tcp([fd00::10]:3306)/dbname")
+	})
 }
 
 func TestHmacBase32_LowercaseDeterministic(t *testing.T) {
@@ -103,7 +125,7 @@ func TestEnsureCredentials_SqliteRejected(t *testing.T) {
 	ctx := context.Background()
 	c := config.NewConfig(config.CliTestContext())
 	origDriver := DatabaseDriver
-	DatabaseDriver = config.SQLite3
+	DatabaseDriver = dsn.DriverSQLite3
 	t.Cleanup(func() { DatabaseDriver = origDriver })
 
 	_, _, err := EnsureCredentials(ctx, c, "11111111-1111-4111-8111-111111111111", "pp-node-01", false)

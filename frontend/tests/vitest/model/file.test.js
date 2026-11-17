@@ -3,6 +3,12 @@ import "../fixtures";
 import File from "model/file";
 
 describe("model/file", () => {
+  it("should remove bidi controls from the base name", () => {
+    const file = new File({ UID: "fbidi1", Name: "2026/photo\u202Eabc.jpg" });
+    expect(file.baseName()).toBe("photoabc.jpg");
+    expect(new File({ UID: "fbidi2", Name: "2026/صورة 日本.jpg" }).baseName()).toBe("صورة 日本.jpg");
+  });
+
   it("should return classes", () => {
     const values = {
       InstanceID: 5,
@@ -31,6 +37,7 @@ describe("model/file", () => {
     const result = file.getDefaults();
     expect(result.UID).toBe("");
     expect(result.Size).toBe(0);
+    expect(result.Chroma).toBe(-1);
   });
 
   it("should get file base name", () => {
@@ -269,6 +276,25 @@ describe("model/file", () => {
     };
     const file = new File(values);
     expect(file.isAnimated()).toBe(true);
+    expect(typeof file.isAnimated()).toBe("boolean");
+  });
+
+  // A10 contract: isAnimated() must return a Boolean for every input shape,
+  // so a future binding to a Vuetify Boolean prop never short-circuits to 0.
+  it("isAnimated returns Boolean false for an image with no frames or duration", () => {
+    const file = new File({ MediaType: "image", Frames: 0, Duration: 0 });
+    const result = file.isAnimated();
+    expect(typeof result).toBe("boolean");
+    expect(result).toBe(false);
+  });
+  it("isAnimated returns Boolean false for non-image media types", () => {
+    expect(new File({ MediaType: "video", Duration: 5000 }).isAnimated()).toBe(false);
+    expect(new File({ MediaType: "", Duration: 5000 }).isAnimated()).toBe(false);
+    expect(typeof new File({ MediaType: "video" }).isAnimated()).toBe("boolean");
+  });
+  it("isAnimated returns Boolean true for a multi-frame image", () => {
+    const file = new File({ MediaType: "image", Frames: 5, Duration: 0 });
+    expect(file.isAnimated()).toBe(true);
   });
 
   it("should get type info", () => {
@@ -340,6 +366,25 @@ describe("model/file", () => {
     };
     const file5 = new File(values5);
     expect(file5.typeInfo()).toBe("SVG");
+  });
+
+  it.each([
+    ["insv", "video", "Insta360 Video"],
+    ["lrv", "video", "Insta360 Proxy Video"],
+    ["insp", "image", "Insta360 Panoramic Image"],
+    ["thm", "image", "Thumbnail Image"],
+    ["dv", "video", "DV Video"],
+    ["mp4", "video", "MPEG-4 Multimedia Container Video"],
+    ["avc", "video", "Advanced Video Coding (AVC) / H.264 Video"],
+    ["dng", "raw", "Adobe Digital Negative Raw"],
+  ])("should append the media type to the %s format in type info", (fileType, mediaType, expected) => {
+    const file = new File({ UID: "ABC123", Hash: "54ghtfd", Name: `1/2/IMG123.${fileType}`, FileType: fileType, MediaType: mediaType });
+    expect(file.typeInfo()).toBe(expected);
+  });
+
+  it("should not repeat the sidecar media type", () => {
+    const xmp = new File({ UID: "ABC123", Hash: "54ghtfd", Name: "1/2/IMG123.xmp", FileType: "xmp", MediaType: "sidecar", Sidecar: true });
+    expect(xmp.typeInfo()).toBe("Sidecar Adobe XMP");
   });
 
   it("should get size info", () => {

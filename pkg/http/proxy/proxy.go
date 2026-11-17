@@ -1,7 +1,7 @@
 /*
 Package proxy provides shared defaults and helpers for path-based HTTP proxy routing.
 
-Copyright (c) 2018 - 2025 PhotoPrism UG. All rights reserved.
+Copyright (c) 2018 - 2026 PhotoPrism UG. All rights reserved.
 
 	This program is free software: you can redistribute it and/or modify
 	it under Version 3 of the GNU Affero General Public License (the "AGPL"):
@@ -14,7 +14,7 @@ Copyright (c) 2018 - 2025 PhotoPrism UG. All rights reserved.
 
 	The AGPL is supplemented by our Trademark and Brand Guidelines,
 	which describe how our Brand Assets may be used:
-	<https://www.photoprism.app/trademark>
+	<https://www.photoprism.app/trademark/>
 
 Feel free to send an email to hello@photoprism.app if you have questions,
 want to support our work, or just want to say hello.
@@ -27,12 +27,14 @@ package proxy
 import (
 	"fmt"
 	"net"
+	"net/netip"
 	"net/url"
 	"path"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/photoprism/photoprism/pkg/http/dns"
 	"github.com/photoprism/photoprism/pkg/http/header"
 )
 
@@ -182,7 +184,16 @@ func NormalizeProxyURI(raw string) (pathPrefix, originScheme, originHost string,
 		}
 		originHost = net.JoinHostPort(host, port)
 	} else {
-		originHost = host
+		originHost = dns.BracketHost(host)
+	}
+
+	// Store an IP address in canonical form, so it matches the Host header a client sends.
+	if addr, parseErr := netip.ParseAddr(host); parseErr == nil {
+		if port != "" {
+			originHost = net.JoinHostPort(addr.WithZone("").Unmap().String(), port)
+		} else {
+			originHost = dns.BracketHost(addr.WithZone("").Unmap().String())
+		}
 	}
 
 	pathValue := strings.TrimSpace(u.EscapedPath())

@@ -123,10 +123,10 @@
 
             <div class="meta" @click.stop.prevent="">
               <div v-if="canManage" class="meta-title inline-edit clickable" @click.stop.prevent="edit(m)">
-                {{ m.Name }}
+                <bdi>{{ $util.balanceBidi(m.Name) }}</bdi>
               </div>
               <div v-else class="meta-title">
-                {{ m.Name }}
+                <bdi>{{ $util.balanceBidi(m.Name) }}</bdi>
               </div>
 
               <div v-if="m.About" class="meta-about text-truncate" :title="$gettext('About')">
@@ -153,13 +153,19 @@
 <script>
 import Subject from "model/subject";
 import RestModel from "model/rest";
+import typeaheadCache from "common/typeahead-cache";
 import { MaxItems } from "common/clipboard";
 import $notify from "common/notify";
 import { ClickLong, ClickShort, Input, InputInvalid } from "common/input";
 import { getAppStorage } from "common/storage";
+import { ACTION_CREATED, ACTION_UPDATED, ACTION_DELETED } from "common/event";
 import PLoading from "component/loading.vue";
 
 const appStorage = getAppStorage();
+
+// Maximum number of affected entities reloaded in place per event;
+// larger batches set the dirty flag and are refetched lazily instead.
+const maxLiveRefetch = 50;
 
 export default {
   name: "PPageSubjects",
@@ -199,7 +205,6 @@ export default {
       filter: { q, hidden, order },
       lastFilter: {},
       routeName: routeName,
-      titleRule: (v) => v.length <= this.$config.get("clip") || this.$gettext("Name too long"),
       input: new Input(),
       lastId: "",
       merge: {
@@ -219,6 +224,14 @@ export default {
     },
   },
   watch: {
+    // Events received while the tab was hidden only set the dirty flag. Switching
+    // tabs leaves the filter unchanged, so search() below returns early without
+    // refreshing; a list that went stale while hidden is refreshed here instead.
+    active(value) {
+      if (value && this.dirty) {
+        this.refresh();
+      }
+    },
     $route() {
       // Tab inactive?
       if (!this.active) {
@@ -250,6 +263,22 @@ export default {
     }
   },
   methods: {
+    // notifyResultCount announces how many rows the last search returned, and says nothing for the
+    // tab the user is not looking at. Both tabs are mounted eagerly and search when they are created,
+    // so the hidden one would otherwise report "No people found" over the list that is on screen.
+    notifyResultCount() {
+      if (!this.active) {
+        return;
+      }
+
+      if (!this.results.length) {
+        this.$notify.warn(this.$gettext("No people found"));
+      } else if (this.results.length === 1) {
+        this.$notify.info(this.$gettext("One person found"));
+      } else {
+        this.$notify.info(this.$gettext("%{n} people found", { n: this.results.length }));
+      }
+    },
     edit(subject) {
       if (!subject) {
         return;
@@ -262,29 +291,49 @@ export default {
       this.dialog.edit = true;
     },
     onSave(m) {
-      if (!this.canManage || !m.Name || m.Name.trim() === "") {
-        // Refuse to save empty name.
+      if (this.busy || !this.canManage || !m.Name || m.Name.trim() === "") {
+        // Refuse to save an empty name or re-enter while a save is in flight.
         return;
       }
 
-      const existing = this.$config.getPerson(m.Name);
-      if (!existing || existing.UID === m.UID) {
-        this.busy = true;
-        m.update()
-          .then((m) => {
-            this.$notify.success(this.$gettext("Changes successfully saved"));
-            this.dialog.edit = false;
-          })
-          .finally(() => {
+      // Mark busy before the async lookup so the dialog cannot be re-submitted
+      // while the people cache resolves (cold cache / mid-flight eviction).
+      this.busy = true;
+
+      // Look up an existing person with the same name through the shared people
+      // cache to detect a merge (a different subject already owns the name).
+      const name = m.Name.toLowerCase();
+      typeaheadCache
+        .getPeople()
+        .then((people) => {
+          const existing = people.find((p) => p.Name && p.Name.toLowerCase() === name) || null;
+          if (!existing || existing.UID === m.UID) {
+            m.update()
+              .then(() => {
+                // Seed the shared people cache with the renamed person so
+                // suggestion consumers reflect it without waiting for the WS
+                // event. This rename seed lives here, not in Subject.update(),
+                // because update() also backs hide()/show() — seeding there
+                // would re-add hidden people to the suggestion list. m.UID and
+                // m.Name are populated (the merge check above already uses them).
+                typeaheadCache.upsertPerson({ UID: m.UID, Name: m.Name });
+                this.$notify.success(this.$gettext("Changes successfully saved"));
+              })
+              .finally(() => {
+                this.busy = false;
+                this.dialog.edit = false;
+              });
+          } else {
             this.busy = false;
+            this.merge.subj1 = m;
+            this.merge.subj2 = existing;
             this.dialog.edit = false;
-          });
-      } else {
-        this.merge.subj1 = m;
-        this.merge.subj2 = existing;
-        this.dialog.edit = false;
-        this.merge.visible = true;
-      }
+            this.merge.visible = true;
+          }
+        })
+        .catch(() => {
+          this.busy = false;
+        });
     },
     onCancelMerge() {
       this.merge.visible = false;
@@ -525,7 +574,7 @@ export default {
           if (this.scrollDisabled) {
             this.setOffset(resp.offset);
             if (this.results.length > 1) {
-              this.$notify.info(this.$gettextInterpolate(this.$gettext("All %{n} people loaded"), { n: this.results.length }));
+              this.$notify.info(this.$gettext("All %{n} people loaded", { n: this.results.length }));
             }
           } else {
             this.setOffset(resp.offset + resp.limit);
@@ -688,15 +737,8 @@ export default {
           this.scrollDisabled = resp.count < resp.limit;
 
           if (this.scrollDisabled) {
-            if (!this.results.length) {
-              this.$notify.warn(this.$gettext("No people found"));
-            } else if (this.results.length === 1) {
-              this.$notify.info(this.$gettext("One person found"));
-            } else {
-              this.$notify.info(this.$gettextInterpolate(this.$gettext("%{n} people found"), { n: this.results.length }));
-            }
+            this.notifyResultCount();
           } else {
-            // this.$notify.info(this.$gettext('More than 20 people found'));
             this.$nextTick(() => {
               if (this.$root.$el.clientHeight <= window.document.documentElement.clientHeight + 300) {
                 this.loadMore();
@@ -713,6 +755,63 @@ export default {
           this.listen = true;
         });
     },
+    // refetchResults reloads the affected entries through the scoped
+    // search API and patches the loaded results in place, so a single
+    // edit costs one uid-filtered query instead of re-running the full
+    // result query. Larger batches fall back to the dirty flag and are
+    // refetched lazily on the next return-to-view.
+    refetchResults(uids) {
+      const affected = uids.filter((uid) => this.results.some((m) => m.UID === uid));
+
+      if (affected.length === 0) {
+        return;
+      }
+
+      if (affected.length > maxLiveRefetch) {
+        this.dirty = true;
+        return;
+      }
+
+      // Carries the list's own visibility, or the refetch answers a narrower question than the list
+      // asked: with hidden people shown, a uid-scoped search without it drops the row being patched.
+      Subject.search({ uid: affected.join("|"), count: affected.length, hidden: this.filter.hidden })
+        .then((resp) => {
+          const found = new Set();
+
+          resp.models.forEach((values) => {
+            found.add(values.UID);
+
+            const model = this.results.find((m) => m.UID === values.UID);
+
+            if (model) {
+              for (let key in values) {
+                // Null is a value here, not a missing field: a cleared column arrives as one, and
+                // the loaded model has to take it for the list to match the row.
+                if (key !== "UID" && values.hasOwnProperty(key) && (values[key] === null || typeof values[key] !== "object")) {
+                  model[key] = values[key];
+                }
+              }
+            }
+          });
+
+          // Rows the scoped search no longer returns are not visible to
+          // this session anymore — drop them like a full refresh would.
+          affected
+            .filter((uid) => !found.has(uid))
+            .forEach((uid) => {
+              const index = this.results.findIndex((m) => m.UID === uid);
+
+              if (index >= 0) {
+                this.results.splice(index, 1);
+              }
+
+              this.removeSelection(uid);
+            });
+        })
+        .catch(() => {
+          this.dirty = true;
+        });
+    },
     onUpdate(ev, data) {
       if (!this.listen) {
         return;
@@ -725,21 +824,14 @@ export default {
       const type = ev.split(".")[1];
 
       switch (type) {
-        case "updated":
-          for (let i = 0; i < data.entities.length; i++) {
-            const values = data.entities[i];
-            const model = this.results.find((m) => m.UID === values.UID);
+        case ACTION_UPDATED:
+          // subjects.updated is a lightweight UID-only signal that carries
+          // no entity fields; affected entries are reloaded through the
+          // scoped search API and patched in place.
+          this.refetchResults(data.entities);
 
-            if (model) {
-              for (let key in values) {
-                if (values.hasOwnProperty(key) && values[key] != null && typeof values[key] !== "object") {
-                  model[key] = values[key];
-                }
-              }
-            }
-          }
           break;
-        case "deleted":
+        case ACTION_DELETED:
           this.dirty = true;
 
           for (let i = 0; i < data.entities.length; i++) {
@@ -754,7 +846,7 @@ export default {
           }
 
           break;
-        case "created":
+        case ACTION_CREATED:
           this.dirty = true;
           break;
         default:

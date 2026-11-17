@@ -50,7 +50,7 @@ func TestUpdate(t *testing.T) {
 	})
 	t.Run("NotUpdated", func(t *testing.T) {
 		uid := rnd.GenerateUID(PhotoUID)
-		m := &Photo{ID: missingPhotoID(), PhotoUID: uid, UpdatedAt: time.Now(), CreatedAt: Now(), PhotoTitle: "Foo"}
+		m := &Photo{ID: missingPhotoID(), PhotoUID: uid, UpdatedAt: Now().Add(-time.Hour), CreatedAt: Now(), PhotoTitle: "Foo"}
 		updatedAt := m.UpdatedAt
 
 		err := Update(m, "ID", "PhotoUID")
@@ -100,5 +100,34 @@ func TestUpdate(t *testing.T) {
 			assert.ErrorContains(t, err, "record not found")
 			assert.Greater(t, m.UpdatedAt.UTC(), updatedAt.UTC())
 		}
+	})
+}
+
+func TestIsNewRecord(t *testing.T) {
+	t.Run("ZeroKey", func(t *testing.T) {
+		assert.True(t, isNewRecord(Db(), &Photo{}))
+		assert.True(t, isNewRecord(Db(), &Album{AlbumUID: rnd.GenerateUID(AlbumUID)}))
+	})
+	t.Run("Key", func(t *testing.T) {
+		assert.False(t, isNewRecord(Db(), &Photo{ID: 1}))
+		assert.False(t, isNewRecord(Db(), &Client{ClientUID: rnd.GenerateUID(ClientUID)}))
+	})
+	t.Run("CompositeKey", func(t *testing.T) {
+		assert.False(t, isNewRecord(Db(), &PhotoLabel{PhotoID: 1, LabelID: 2}))
+		assert.True(t, isNewRecord(Db(), &PhotoLabel{LabelID: 2}))
+	})
+	t.Run("NoModel", func(t *testing.T) {
+		assert.True(t, isNewRecord(Db(), "photo"))
+	})
+}
+
+func TestColumnValues(t *testing.T) {
+	t.Run("Columns", func(t *testing.T) {
+		values := columnValues(Db(), &Photo{}, Values{"PhotoTitle": "Title", "TakenAt": time.Time{}, "Details": &Details{}, "PhotoDescription": "Text"})
+		assert.Equal(t, Values{"photo_title": "Title", "taken_at": time.Time{}}, values)
+	})
+	t.Run("NoModel", func(t *testing.T) {
+		values := Values{"PhotoTitle": "Title"}
+		assert.Equal(t, values, columnValues(Db(), "photo", values))
 	})
 }

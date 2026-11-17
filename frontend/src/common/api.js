@@ -1,6 +1,6 @@
 /*
 
-Copyright (c) 2018 - 2025 PhotoPrism UG. All rights reserved.
+Copyright (c) 2018 - 2026 PhotoPrism UG. All rights reserved.
 
     This program is free software: you can redistribute it and/or modify
     it under Version 3 of the GNU Affero General Public License (the "AGPL"):
@@ -13,7 +13,7 @@ Copyright (c) 2018 - 2025 PhotoPrism UG. All rights reserved.
 
     The AGPL is supplemented by our Trademark and Brand Guidelines,
     which describe how our Brand Assets may be used:
-    <https://www.photoprism.app/trademark>
+    <https://www.photoprism.app/trademark/>
 
 Feel free to send an email to hello@photoprism.app if you have questions,
 want to support our work, or just want to say hello.
@@ -25,7 +25,7 @@ Additional information can be found in our Developer Guide:
 
 import Axios from "axios";
 import $notify from "common/notify";
-import { $gettext } from "common/gettext";
+import { $gettext, Tp } from "common/gettext";
 import $event from "common/event";
 import { getAppStorage } from "common/storage";
 
@@ -43,6 +43,46 @@ const testConfig = {
 };
 
 const c = window.__CONFIG__ ? window.__CONFIG__ : testConfig;
+
+// requestErrorSummary describes a failed request by its method, path and error message, without its data,
+// headers, or query string.
+export function requestErrorSummary(error) {
+  const method = error?.config?.method ? String(error.config.method).toUpperCase() : "";
+  const path = typeof error?.config?.url === "string" ? error.config.url.split("?")[0] : "";
+  const message = error?.message ? error.message : "Request failed";
+
+  return ["api:", method, path, "›", message].filter((v) => v).join(" ");
+}
+
+// redactRequestError removes the request body and auth headers from a failed request outside debug and trace mode,
+// so that later logging, e.g. of a rejected promise, shows neither.
+export function redactRequestError(error) {
+  if (c.debug || c.trace || !error?.config) {
+    return error;
+  }
+
+  delete error.config.data;
+
+  const headers = error.config.headers;
+
+  if (headers) {
+    for (const name of ["X-Auth-Token", "Authorization"]) {
+      if (typeof headers.delete === "function") {
+        headers.delete(name);
+      } else {
+        delete headers[name];
+      }
+    }
+  }
+
+  return error;
+}
+
+// requestErrorDetails returns a request error for logging: the error itself in debug or trace mode, and its summary
+// otherwise. Other errors carry no request details and are returned as they are.
+export function requestErrorDetails(error) {
+  return c.debug || c.trace || !error?.config ? error : requestErrorSummary(error);
+}
 
 const $api = Axios.create({
   baseURL: c.apiUri,
@@ -89,14 +129,18 @@ $api.interceptors.response.use(
   function (error) {
     $notify.ajaxEnd();
 
+    // Take the error details for logging first, then remove the request body and auth headers outside debug mode.
+    const summary = requestErrorDetails(error);
+    redactRequestError(error);
+
     // Skip error handling if request was canceled.
     if (Axios.isCancel(error)) {
       return Promise.reject(error);
     }
 
-    // Log error for debugging.
+    // Log a summary of the error, and the request details only in debug mode.
     if (console && console.log && error) {
-      console.log(error);
+      console.log(summary);
     }
 
     // Default error message.
@@ -111,7 +155,10 @@ $api.interceptors.response.use(
         code = data.code;
       }
 
-      if (data.message) {
+      if (data.messageId) {
+        // Render the backend message in the current UI locale from its source id and params.
+        errorMessage = Tp(data.messageId, data.messageParams);
+      } else if (data.message) {
         errorMessage = data.message;
       } else if (data.error) {
         errorMessage = data.error;

@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"github.com/photoprism/photoprism/internal/entity/legacy"
+	"github.com/photoprism/photoprism/pkg/clean"
 	"github.com/photoprism/photoprism/pkg/rnd"
 	"github.com/photoprism/photoprism/pkg/txt"
 )
@@ -26,6 +27,10 @@ func FindLegacyUser(find User) *legacy.User {
 		return nil
 	}
 
+	if found, err := DbHasTable(Db(), m.TableName()); err != nil || !found {
+		return nil
+	}
+
 	// Find matching record.
 	if err := stmt.First(m).Error; err != nil {
 		return nil
@@ -38,6 +43,10 @@ func FindLegacyUser(find User) *legacy.User {
 func FindLegacyUsers(search string) legacy.Users {
 	result := legacy.Users{}
 
+	if found, err := DbHasTable(Db(), legacy.User{}.TableName()); err != nil || !found {
+		return result
+	}
+
 	stmt := Db()
 
 	search = strings.TrimSpace(search)
@@ -49,7 +58,8 @@ func FindLegacyUsers(search string) legacy.Users {
 	} else if rnd.IsUID(search, UserUID) {
 		stmt = stmt.Where("user_uid = ?", search)
 	} else if search != "" {
-		stmt = stmt.Where("user_name LIKE ? OR primary_email LIKE ? OR full_name LIKE ?", search+"%", search+"%", search+"%")
+		like := clean.SqlLike(search) + "%"
+		stmt = stmt.Where(clean.SqlLikeAny(DbDialect(), false, "user_name", "primary_email", "full_name"), like, like, like)
 	} else {
 		stmt = stmt.Where("id > 0")
 	}

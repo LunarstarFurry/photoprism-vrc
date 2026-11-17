@@ -1,12 +1,15 @@
 package query
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/photoprism/photoprism/internal/entity"
+	"github.com/photoprism/photoprism/pkg/rnd"
 )
 
 func TestFilesByPath(t *testing.T) {
@@ -108,11 +111,22 @@ func TestFilesByUID(t *testing.T) {
 		}
 		assert.Equal(t, 0, len(files))
 	})
-	//TODO fails on mariadb
-	t.Run("Error", func(t *testing.T) {
-		files, err := FilesByUID([]string{"fs6sg6bw45bnlxxx"}, -100, 0)
-
+	t.Run("InvalidLimit", func(t *testing.T) {
+		_, err := FilesByUID([]string{"fs6sg6bw45bnlxxx"}, -100, 0)
 		assert.Error(t, err)
+	})
+
+	t.Run("Negative limit with offset", func(t *testing.T) {
+		_, err := FilesByUID([]string{"fs6sg6bw45bnlqdw"}, -100, 100)
+		assert.Error(t, err)
+	})
+
+	t.Run("offset and limit", func(t *testing.T) {
+		files, err := FilesByUID([]string{"fs6sg6bw45bnlxxx"}, 10, 100)
+
+		if err != nil {
+			t.Fatal(err)
+		}
 		assert.Equal(t, 0, len(files))
 	})
 }
@@ -148,6 +162,28 @@ func TestVideoByPhotoUID(t *testing.T) {
 
 		assert.Error(t, err, "record not found")
 		t.Log(file)
+	})
+}
+
+func TestDocumentByPhotoUID(t *testing.T) {
+	t.Run("FileFound", func(t *testing.T) {
+		file, err := DocumentByPhotoUID("ps6sg6byk7wrbk48")
+
+		if err != nil {
+			t.Fatal(err)
+		}
+		assert.Equal(t, "pdf", file.FileType)
+		assert.Equal(t, "education/university/BSc-Thesis.pdf", file.FileName)
+	})
+	t.Run("NoFileFound", func(t *testing.T) {
+		_, err := DocumentByPhotoUID("111")
+
+		assert.Error(t, err)
+	})
+	t.Run("EmptyUID", func(t *testing.T) {
+		_, err := DocumentByPhotoUID("")
+
+		assert.Error(t, err)
 	})
 }
 
@@ -191,14 +227,32 @@ func TestFileByHash(t *testing.T) {
 }
 
 func TestSetPhotoPrimary(t *testing.T) {
+	// primaryFiles returns the UIDs of a photo's primary files.
+	primaryFiles := func(t *testing.T, photoUid string) (uids []string) {
+		require.NoError(t, Db().Model(&entity.File{}).Where("photo_uid = ? AND file_primary = TRUE", photoUid).Pluck("file_uid", &uids).Error)
+		return uids
+	}
 	t.Run("Success", func(t *testing.T) {
 		assert.Equal(t, false, entity.FileFixturesExampleXMP.FilePrimary)
+		t.Cleanup(func() { assert.NoError(t, SetPhotoPrimary("ps6sg6be2lvl0yh0", "fs6sg6bw15bnlqdw")) })
+
+		require.NoError(t, SetPhotoPrimary("ps6sg6be2lvl0yh0", "fs6sg6bwhhbnlqdn"))
+		assert.Equal(t, []string{"fs6sg6bwhhbnlqdn"}, primaryFiles(t, "ps6sg6be2lvl0yh0"))
+	})
+	t.Run("OtherPhoto", func(t *testing.T) {
+		before := primaryFiles(t, "ps6sg6be2lvl0yh7")
+		require.NotEmpty(t, before)
 
 		err := SetPhotoPrimary("ps6sg6be2lvl0yh7", "fs6sg6bwhhbnlqdn")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "cannot find file")
+		assert.Equal(t, before, primaryFiles(t, "ps6sg6be2lvl0yh7"))
+	})
+	t.Run("UnknownFile", func(t *testing.T) {
+		before := primaryFiles(t, "ps6sg6be2lvl0yh7")
 
-		if err != nil {
-			t.Fatal(err)
-		}
+		require.Error(t, SetPhotoPrimary("ps6sg6be2lvl0yh7", "fs6sg6bw45bn9999"))
+		assert.Equal(t, before, primaryFiles(t, "ps6sg6be2lvl0yh7"))
 	})
 	t.Run("NoFileUid", func(t *testing.T) {
 		err := SetPhotoPrimary("ps6sg6be2lvl0yh7", "")
@@ -229,8 +283,8 @@ func TestSetFileError(t *testing.T) {
 
 	SetFileError("fs6sg6bwhhbnlqdn", "errorFromTest")
 
-	//TODO How to assert
-	//assert.Equal(t, true, entity.FileFixturesExampleXMP.FilePrimary)
+	// TODO How to assert
+	// assert.Equal(t, true, entity.FileFixturesExampleXMP.FilePrimary)
 }
 
 func TestRenameFile(t *testing.T) {
@@ -249,8 +303,8 @@ func TestRenameFile(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		//TODO how to assert?
-		//assert.Equal(t, "", entity.FileFixturesExampleXMP.FileName)
+		// TODO how to assert?
+		// assert.Equal(t, "", entity.FileFixturesExampleXMP.FileName)
 	})
 
 }
@@ -283,4 +337,112 @@ func TestOrphanFiles(t *testing.T) {
 	}
 
 	assert.IsType(t, entity.Files{}, files)
+}
+
+// TestFilesByPath_OmitsMarkers pins that the folder listing carries no markers. Its response is
+// cached across sessions under a key that names none of them, so a marker list resolved for
+// whoever asked first must not be what the next session reads.
+func TestFilesByPath_OmitsMarkers(t *testing.T) {
+	files, err := FilesByPath(100, 0, entity.RootOriginals, "1990/04", false)
+	require.NoError(t, err)
+	require.NotEmpty(t, files, "the fixture has to hold files for this to mean anything")
+
+	for i := range files {
+		assert.True(t, files[i].OmitMarkers, files[i].FileUID)
+		assert.Empty(t, *files[i].Markers())
+	}
+
+	// The key stays, carrying an empty list: a non-nil pointer is never omitted, and an absent
+	// field would be a wider response change than this needs to be.
+	b, err := json.Marshal(files)
+	require.NoError(t, err)
+
+	var res []struct {
+		Markers []map[string]any
+	}
+
+	require.NoError(t, json.Unmarshal(b, &res))
+
+	for i := range res {
+		assert.Empty(t, res[i].Markers)
+	}
+}
+
+func TestFilesByPhotoIDs(t *testing.T) {
+	t.Run("Success", func(t *testing.T) {
+		photo := entity.PhotoFixtures.Get("19800101_000002_D640C559")
+
+		files, err := FilesByPhotoIDs([]uint{photo.ID})
+
+		require.NoError(t, err)
+		require.NotEmpty(t, files)
+
+		for _, f := range files {
+			assert.Equal(t, photo.ID, f.PhotoID)
+		}
+	})
+	t.Run("Duplicates", func(t *testing.T) {
+		photo := entity.PhotoFixtures.Get("19800101_000002_D640C559")
+
+		once, err := FilesByPhotoIDs([]uint{photo.ID})
+		require.NoError(t, err)
+
+		twice, err := FilesByPhotoIDs([]uint{photo.ID, 0, photo.ID})
+		require.NoError(t, err)
+
+		assert.Len(t, twice, len(once))
+		assert.NotEmpty(t, twice[0].FileName)
+	})
+	t.Run("None", func(t *testing.T) {
+		files, err := FilesByPhotoIDs(nil)
+
+		require.NoError(t, err)
+		assert.Empty(t, files)
+	})
+}
+
+// TestOriginalsByPhotoID verifies that only the originals of a picture are returned, with all columns.
+func TestOriginalsByPhotoID(t *testing.T) {
+	t.Run("Success", func(t *testing.T) {
+		photo := entity.PhotoFixtures.Get("19800101_000002_D640C559")
+
+		files, err := OriginalsByPhotoID(photo.ID)
+
+		require.NoError(t, err)
+		require.NotEmpty(t, files)
+
+		for _, f := range files {
+			assert.Equal(t, photo.ID, f.PhotoID)
+			assert.Equal(t, entity.RootOriginals, f.FileRoot)
+			assert.False(t, f.FileSidecar)
+			assert.False(t, f.FileMissing)
+			assert.NotEmpty(t, f.FileUID)
+		}
+	})
+	t.Run("NotFound", func(t *testing.T) {
+		files, err := OriginalsByPhotoID(0)
+
+		require.NoError(t, err)
+		assert.Empty(t, files)
+	})
+}
+
+func TestFiles_DirContainment(t *testing.T) {
+	base := "zz-like-" + rnd.Base36(6)
+	inDir := likeTestPhoto(t, base+"_a%", "in-dir")
+	sibling := likeTestPhoto(t, base+"Xa%Y", "sibling")
+	likeTestPhoto(t, base+"_aZ", "sibling-z")
+	likeTestPhoto(t, base+"_A%", "sibling-case")
+
+	files, err := Files(1000, 0, base+"_a%", true)
+	require.NoError(t, err)
+
+	var uids []string
+
+	for _, f := range files {
+		uids = append(uids, f.PhotoUID)
+	}
+
+	assert.Equal(t, []string{inDir.PhotoUID}, uids)
+	assert.NotContains(t, uids, sibling.PhotoUID)
 }

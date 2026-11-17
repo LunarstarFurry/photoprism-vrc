@@ -1,16 +1,19 @@
 package api
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
 
 	"github.com/photoprism/photoprism/internal/auth/acl"
+	"github.com/photoprism/photoprism/internal/auth/oauth"
 	"github.com/photoprism/photoprism/internal/entity"
 	"github.com/photoprism/photoprism/internal/event"
 	"github.com/photoprism/photoprism/internal/form"
 	"github.com/photoprism/photoprism/internal/photoprism/get"
+	"github.com/photoprism/photoprism/internal/server/limiter"
 	"github.com/photoprism/photoprism/pkg/authn"
 	"github.com/photoprism/photoprism/pkg/clean"
 	"github.com/photoprism/photoprism/pkg/http/header"
@@ -19,16 +22,36 @@ import (
 	"github.com/photoprism/photoprism/pkg/rnd"
 )
 
+// revokeSession resolves the session a revoke request carries in its header, unless its client is disabled,
+// without charging the authentication failure budget. The handler owns that accounting, because a header
+// that does not resolve is not a failed authentication on its own: the request may still prove possession
+// with the token it submits, and then it is not charged at all. It returns the error if the session cannot be read.
+func revokeSession(authToken string) (*entity.Session, error) {
+	if !rnd.IsAuthAny(authToken) {
+		return nil, nil
+	}
+
+	sess, err := entity.FindSession(rnd.SessionID(authToken))
+
+	if err != nil && !entity.SessionNotFound(err) {
+		return nil, err
+	} else if err != nil || sess.ClientDisabled() {
+		return nil, nil
+	}
+
+	return sess, nil
+}
+
 // OAuthRevoke revokes an access token or session. A client may only revoke its own tokens.
 //
 //	@Summary	revoke an OAuth2 access token or session
 //	@Id			OAuthRevoke
 //	@Tags		Authentication
-//	@Accept		json
+//	@Accept		json,x-www-form-urlencoded,mpfd
 //	@Produce	json
-//	@Param		request				body		form.OAuthRevokeToken	true	"revoke request"
-//	@Success	200					{object}	gin.H
-//	@Failure	400,401,403,404,429	{object}	i18n.Response
+//	@Param		request						body		form.OAuthRevokeToken	true	"revoke request"
+//	@Success	200							{object}	gin.H
+//	@Failure	400,401,403,404,413,429,500	{object}	i18n.Response
 //	@Router		/api/v1/oauth/revoke [post]
 func OAuthRevoke(router *gin.RouterGroup) {
 	router.POST("/oauth/revoke", func(c *gin.Context) {
@@ -48,8 +71,17 @@ func OAuthRevoke(router *gin.RouterGroup) {
 
 		// Abort if running in public mode.
 		if get.Config().Public() {
-			event.AuditErr([]string{clientIp, "oauth2", actor, action, authn.ErrDisabledInPublicMode.Error()})
+			event.AuditErr([]string{clientIp, "oauth2", "%s", action, authn.ErrDisabledInPublicMode.Error()}, actor)
 			Abort(c, http.StatusForbidden, i18n.ErrForbidden)
+			return
+		}
+
+		// Abort if the client has exhausted its authentication failure budget, before the
+		// session lookup and the body are read. Reject only reads the budget; the charging
+		// rule is set up below.
+		if limiter.Auth.Reject(clientIp) {
+			event.AuditDebug([]string{clientIp, "oauth2", "%s", "%s", status.RateLimited}, actor, action)
+			limiter.AbortJSON(c)
 			return
 		}
 
@@ -65,35 +97,139 @@ func OAuthRevoke(router *gin.RouterGroup) {
 		// Get token and session from request header.
 		if authToken = AuthToken(c); authToken == "" {
 			role = acl.RoleNone
-		} else if s = Session(clientIp, authToken); s != nil {
+		} else if s, err = revokeSession(authToken); err != nil {
+			event.AuditErr([]string{clientIp, "oauth2", "%s", "%s", status.Error(err)}, actor, action)
+			AbortUnexpectedError(c)
+			return
+		} else if s != nil {
 			// Set log role and actor based on the session referenced in request header.
 			sUserUID = s.UserUID
 			if s.IsClient() {
 				role = s.GetClientRole()
-				actor = fmt.Sprintf("client %s", clean.Log(s.GetClientInfo()))
+				actor = fmt.Sprintf("client %s", clean.LogQuote(s.GetClientInfo()))
 			} else if username := s.GetUserName(); username != "" {
 				role = s.GetUserRole()
-				actor = fmt.Sprintf("user %s", clean.Log(username))
+				actor = fmt.Sprintf("user %s", clean.LogQuote(username))
 			} else {
 				role = s.GetUserRole()
 				actor = fmt.Sprintf("unknown %s", s.GetUserRole().String())
 			}
 		}
 
+		// Count this request against the authentication failure budget at most once, and only
+		// while it has proved possession of nothing. The header lookup above does not charge,
+		// so every charge on this route is made here; and once a session resolves, a refusal
+		// below is an authorization outcome, which this budget does not meter.
+		charged := false
+		proven := s != nil
+
+		charge := func() {
+			if charged || proven {
+				return
+			}
+
+			charged = true
+			limiter.Auth.Reserve(clientIp)
+		}
+
+		LimitRequestBodyBytes(c, MaxOAuthRequestBytes)
+
 		// Get the auth token to be revoked from the submitted form values or the request header.
-		if err = c.ShouldBind(&frm); err != nil && authToken == "" {
-			event.AuditWarn([]string{clientIp, "oauth2", actor, action, status.Error(err)})
+		err = BindOAuthRequest(c, &frm)
+		fromHeader := false
+
+		switch {
+		case IsRequestBodyTooLarge(err):
+			charge()
+			event.AuditWarn([]string{clientIp, "oauth2", "%s", action, "request too large", status.Error(err)}, actor)
+			AbortRequestTooLarge(c, i18n.ErrBadRequest)
+			return
+		case errors.Is(err, ErrUnsupportedContentType):
+			// A body that cannot be decoded is an error, not an absent body: the
+			// fallback below applies to a request that carries no body at all.
+			charge()
+			event.AuditWarn([]string{clientIp, "oauth2", "%s", action, status.Error(err)}, actor)
 			AbortBadRequest(c, err)
 			return
-		} else if frm.Empty() {
+		case err != nil && authToken == "":
+			charge()
+			event.AuditWarn([]string{clientIp, "oauth2", "%s", action, status.Error(err)}, actor)
+			AbortBadRequest(c, err)
+			return
+		case frm.Empty():
 			frm.Token = authToken
 			frm.TokenTypeHint = form.AccessToken
+			fromHeader = true
+		}
+
+		// Answer an invalid or unknown token with success, as RFC 7009 requires, unless it is the
+		// header token the request authenticates with.
+		invalidToken := func() {
+			if fromHeader {
+				AbortInvalidCredentials(c)
+			} else {
+				c.JSON(http.StatusOK, gin.H{"status": StatusSuccess})
+			}
 		}
 
 		// Validate revocation form values.
 		if err = frm.Validate(); err != nil {
-			event.AuditWarn([]string{clientIp, "oauth2", actor, action, status.Error(err)})
-			AbortInvalidCredentials(c)
+			charge()
+			event.AuditWarn([]string{clientIp, "oauth2", "%s", action, status.Error(err)}, actor)
+
+			if errors.Is(err, authn.ErrInvalidToken) {
+				invalidToken()
+			} else {
+				AbortBadRequest(c, err)
+			}
+
+			return
+		}
+
+		// Revoke the grant of a refresh token. Like an unknown token, a refresh token that is not current is
+		// answered with success, so the response does not reveal whether it was valid (RFC 7009).
+		if frm.TokenTypeHint == form.RefreshToken {
+			// Refuse an address over the authorization failure limit before the grant of a valid token is looked up.
+			if oauth.VerifyRefreshToken(frm.Token) == nil && limiter.Authorize.Reject(clientIp) {
+				// A header token that resolved to no session counts as a failed credential.
+				if rnd.IsAuthAny(authToken) {
+					charge()
+				}
+
+				event.AuditDebug([]string{clientIp, "oauth2", "%s", "%s", status.RateLimited}, actor, action)
+				limiter.AbortJSON(c)
+				return
+			}
+
+			grant, revokeErr := oauth.RevokeRefreshToken(frm.Token, c.PostForm("client_id"))
+
+			switch {
+			case revokeErr != nil && !errors.Is(revokeErr, oauth.ErrInvalidGrant):
+				event.AuditErr([]string{clientIp, "oauth2", "%s", "%s", "revoke grant", status.Error(revokeErr)}, actor, action)
+				AbortUnexpectedError(c)
+				return
+			case grant == nil:
+				oauthChargeMissingGrant(clientIp, revokeErr)
+
+				// A header token that resolved to no session counts as a failed credential.
+				if rnd.IsAuthAny(authToken) {
+					charge()
+				}
+
+				// A refresh token that fails verification is logged at debug level, other refusals as a warning.
+				switch {
+				case errors.Is(revokeErr, oauth.ErrGrantNotFound):
+					event.AuditWarn([]string{clientIp, "oauth2", "%s", "%s", status.Error(revokeErr)}, actor, action)
+				case revokeErr != nil:
+					event.AuditDebug([]string{clientIp, "oauth2", "%s", "%s", status.Error(revokeErr)}, actor, action)
+				default:
+					event.AuditWarn([]string{clientIp, "oauth2", "%s", "%s", "refresh token not current or client mismatch", status.Denied}, actor, action)
+				}
+			default:
+				event.AuditInfo([]string{clientIp, "oauth2", "client %s", "user %s", "%s", "revoke grant %s", status.Deleted}, clean.Log(grant.ClientID), clean.Log(grant.UserName), action, clean.Log(grant.GrantUID))
+			}
+
+			c.JSON(http.StatusOK, gin.H{"status": StatusSuccess})
 			return
 		}
 
@@ -101,31 +237,49 @@ func OAuthRevoke(router *gin.RouterGroup) {
 		switch frm.TokenTypeHint {
 		case form.RefID:
 			if s == nil || sUserUID == "" || role == acl.RoleNone {
+				charge()
+				event.AuditWarn([]string{clientIp, "oauth2", "%s", action, "ref id requires a session", status.Denied}, actor)
 				c.AbortWithStatusJSON(http.StatusForbidden, i18n.NewResponse(http.StatusForbidden, i18n.ErrForbidden))
 				return
-			} else if sess = entity.FindSessionByRefID(frm.Token); sess == nil {
-				AbortInvalidCredentials(c)
+			} else if sess, err = entity.LookupSessionByRefID(frm.Token); err != nil {
+				event.AuditErr([]string{clientIp, "oauth2", "%s", "%s", status.Error(err)}, actor, action)
+				AbortUnexpectedError(c)
+				return
+			} else if sess == nil {
+				charge()
+				event.AuditWarn([]string{clientIp, "oauth2", "%s", action, "ref id not found", status.Denied}, actor)
+				invalidToken()
 				return
 			}
 		case form.SessionID:
 			if s == nil || sUserUID == "" || role == acl.RoleNone {
+				charge()
+				event.AuditWarn([]string{clientIp, "oauth2", "%s", action, "session id requires a session", status.Denied}, actor)
 				c.AbortWithStatusJSON(http.StatusForbidden, i18n.NewResponse(http.StatusForbidden, i18n.ErrForbidden))
 				return
 			}
 
-			sess, err = entity.FindSession(frm.Token)
+			sess, err = entity.FindAnySession(frm.Token)
 		case form.AccessToken:
-			sess, err = entity.FindSession(rnd.SessionID(frm.Token))
+			sess, err = entity.FindAnySession(rnd.SessionID(frm.Token))
+		}
+
+		// A session that resolved from a submitted secret proves the caller holds it, so the
+		// refusals below are authorization outcomes rather than failed authentications. A ref
+		// id is an identifier rather than a secret, so it proves nothing on its own; that path
+		// is reached only with a session the request header already proved.
+		if err == nil && sess != nil && frm.TokenTypeHint != form.RefID {
+			proven = true
 		}
 
 		// If not already set, get the log role and actor from the session to be revoked.
 		if sess != nil && role == acl.RoleNone {
 			if sess.IsClient() {
 				role = sess.GetClientRole()
-				actor = fmt.Sprintf("client %s", clean.Log(sess.GetClientInfo()))
+				actor = fmt.Sprintf("client %s", clean.LogQuote(sess.GetClientInfo()))
 			} else if username := sess.GetUserName(); username != "" {
-				role = s.GetUserRole()
-				actor = fmt.Sprintf("user %s", clean.Log(username))
+				role = sess.GetUserRole()
+				actor = fmt.Sprintf("user %s", clean.LogQuote(username))
 			} else {
 				role = sess.GetUserRole()
 				actor = fmt.Sprintf("unknown %s", sess.GetUserRole().String())
@@ -134,33 +288,42 @@ func OAuthRevoke(router *gin.RouterGroup) {
 
 		// Check revocation request and abort if invalid.
 		switch {
+		case err != nil && !entity.SessionNotFound(err):
+			event.AuditErr([]string{clientIp, "oauth2", "%s", "%s", status.Error(err)}, actor, action)
+			AbortUnexpectedError(c)
+			return
 		case err != nil:
-			event.AuditErr([]string{clientIp, "oauth2", actor, action, "delete %s as %s", status.Error(err)}, clean.Log(sess.RefID), role.String())
-			AbortInvalidCredentials(c)
+			charge()
+			event.AuditErr([]string{clientIp, "oauth2", "%s", action, "delete %s as %s", status.Error(err)}, actor, clean.Log(sess.RefID), role.String())
+			invalidToken()
 			return
 		case sess == nil:
-			event.AuditErr([]string{clientIp, "oauth2", actor, action, "delete %s as %s", status.Denied}, "", role.String())
-			AbortInvalidCredentials(c)
+			charge()
+			event.AuditErr([]string{clientIp, "oauth2", "%s", action, "delete %s as %s", status.Denied}, actor, "", role.String())
+			invalidToken()
 			return
 		case sess.Abort(c):
-			event.AuditErr([]string{clientIp, "oauth2", actor, action, "delete %s as %s", status.Denied}, clean.Log(sess.RefID), role.String())
+			charge()
+			event.AuditErr([]string{clientIp, "oauth2", "%s", action, "delete %s as %s", status.Denied}, actor, clean.Log(sess.RefID), role.String())
 			return
-		case !sess.IsClient():
-			event.AuditErr([]string{clientIp, "oauth2", actor, action, "delete %s as %s", status.Denied}, clean.Log(sess.RefID), role.String())
+		case !sess.IsClient() && !sess.IsOAuthApp():
+			charge()
+			event.AuditErr([]string{clientIp, "oauth2", "%s", action, "delete %s as %s", status.Denied}, actor, clean.Log(sess.RefID), role.String())
 			c.AbortWithStatusJSON(http.StatusForbidden, i18n.NewResponse(http.StatusForbidden, i18n.ErrForbidden))
 			return
 		case sUserUID != "" && sess.UserUID != sUserUID:
-			event.AuditErr([]string{clientIp, "oauth2", actor, action, "delete %s as %s", authn.ErrUnauthorized.Error()}, clean.Log(sess.RefID), role.String())
-			AbortInvalidCredentials(c)
+			charge()
+			event.AuditErr([]string{clientIp, "oauth2", "%s", action, "delete %s as %s", authn.ErrUnauthorized.Error()}, actor, clean.Log(sess.RefID), role.String())
+			AbortForbidden(c)
 			return
 		default:
-			event.AuditInfo([]string{clientIp, "oauth2", actor, action, "delete %s as %s", status.Granted}, clean.Log(sess.RefID), role.String())
+			event.AuditInfo([]string{clientIp, "oauth2", "%s", action, "delete %s as %s", status.Granted}, actor, clean.Log(sess.RefID), role.String())
 		}
 
 		// Delete session cache and database record.
 		if err = sess.Delete(); err != nil {
 			// Log error.
-			event.AuditErr([]string{clientIp, "oauth2", actor, action, "delete %s as %s", status.Error(err)}, clean.Log(sess.RefID), role.String())
+			event.AuditErr([]string{clientIp, "oauth2", "%s", action, "delete %s as %s", status.Error(err)}, actor, clean.Log(sess.RefID), role.String())
 
 			// Return JSON error.
 			c.AbortWithStatusJSON(http.StatusNotFound, i18n.NewResponse(http.StatusNotFound, i18n.ErrNotFound))
@@ -168,7 +331,7 @@ func OAuthRevoke(router *gin.RouterGroup) {
 		}
 
 		// Log event.
-		event.AuditInfo([]string{clientIp, "oauth2", actor, action, "delete %s as %s", "deleted"}, clean.Log(sess.RefID), role.String())
+		event.AuditInfo([]string{clientIp, "oauth2", "%s", action, "delete %s as %s", "deleted"}, actor, clean.Log(sess.RefID), role.String())
 
 		// Send response.
 		c.JSON(http.StatusOK, DeleteSessionResponse(sess.ID))

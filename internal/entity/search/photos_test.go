@@ -177,6 +177,16 @@ func TestPhotos(t *testing.T) {
 
 		assert.LessOrEqual(t, 2, len(photos))
 	})
+	t.Run("LabelQueryOpenQuote", func(t *testing.T) {
+		// A quote that is not closed extends the value to the end of the query.
+		photos, count, err := Photos(form.SearchPhotos{Query: "label:\"xxx", Count: 10})
+		assert.NoError(t, err)
+		assert.Equal(t, PhotoResults{}, photos)
+		assert.Equal(t, 0, count)
+		photos, _, err = Photos(form.SearchPhotos{Query: "label:\"landscape", Count: 10})
+		assert.NoError(t, err)
+		assert.LessOrEqual(t, 2, len(photos))
+	})
 	t.Run("InvalidLabelQuery", func(t *testing.T) {
 		var frm form.SearchPhotos
 
@@ -2458,5 +2468,36 @@ func TestPhotos(t *testing.T) {
 		}
 
 		assert.True(t, foundRight)
+	})
+	t.Run("form.album as6sg6bipotaajfa", func(t *testing.T) {
+		var f form.SearchPhotos
+
+		f.Album = "as6sg6bipotaajfa"
+
+		photos, _, err := Photos(f)
+
+		if err != nil {
+			t.Fatal(err)
+		}
+		assert.GreaterOrEqual(t, len(photos), 3)
+
+		for _, p := range photos {
+			assert.IsType(t, Photo{}, p)
+			assert.NotEmpty(t, p.ID)
+		}
+	})
+	t.Run("NotNil", func(t *testing.T) {
+		var f form.SearchPhotos
+
+		f.Album = "as6sg6bipotaajfa"
+		f.Count = 100
+		f.Offset = 999999
+
+		photos, _, err := Photos(f)
+
+		if assert.Nil(t, err) {
+			assert.Len(t, photos, 0)
+			assert.NotNil(t, photos)
+		}
 	})
 }

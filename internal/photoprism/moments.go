@@ -94,7 +94,7 @@ func (w *Moments) Start() (err error) {
 			}
 
 			if a := entity.FindFolderAlbum(mom.Path); a != nil {
-				if a.DeletedAt != nil {
+				if a.DeletedAt.Valid {
 					// Nothing to do.
 					log.Tracef("moments: %s was deleted (%s)", clean.Log(a.AlbumTitle), a.AlbumFilter)
 				} else if err := a.UpdateFolder(mom.Path, f.Serialize(), mom.Title()); err != nil {
@@ -160,7 +160,7 @@ func (w *Moments) Start() (err error) {
 					log.Errorf("moments: %s (update slug)", err.Error())
 				}
 
-				if a.DeletedAt != nil {
+				if a.DeletedAt.Valid {
 					// Nothing to do.
 					log.Tracef("moments: %s was deleted (%s)", clean.Log(a.AlbumTitle), a.AlbumFilter)
 				} else {
@@ -231,7 +231,7 @@ func (w *Moments) Start() (err error) {
 					log.Errorf("moments: %s (update slug)", err.Error())
 				}
 
-				if a.DeletedAt != nil || f.Serialize() == a.AlbumFilter {
+				if a.DeletedAt.Valid || f.Serialize() == a.AlbumFilter {
 					log.Tracef("moments: %s already exists (%s)", clean.Log(a.AlbumTitle), a.AlbumFilter)
 					continue
 				}
@@ -253,14 +253,18 @@ func (w *Moments) Start() (err error) {
 		}
 	}
 
-	// UpdateFolderDates updates folder year, month and day based on indexed photo metadata.
-	if queryErr := query.UpdateFolderDates(); queryErr != nil {
+	// UpdateFolderDates updated folder year, month and day based on indexed photo metadata.
+	if updated, queryErr := query.UpdateFolderDates(); queryErr != nil {
 		log.Errorf("moments: %s (update folder dates)", queryErr.Error())
+	} else if updated > 0 {
+		log.Infof("moments: updated %d folder dates", updated)
 	}
 
 	// UpdateAlbumDates updates the year, month and day of the album based on the indexed photo metadata.
-	if queryErr := query.UpdateAlbumDates(); queryErr != nil {
+	if updated, queryErr := query.UpdateAlbumDates(); queryErr != nil {
 		log.Errorf("moments: %s (update album dates)", queryErr.Error())
+	} else if updated > 0 {
+		log.Infof("moments: updated %d album dates", updated)
 	}
 
 	return nil

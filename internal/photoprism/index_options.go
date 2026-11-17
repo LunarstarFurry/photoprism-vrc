@@ -1,26 +1,34 @@
 package photoprism
 
 import (
+	"path/filepath"
+	"strings"
+
 	"github.com/photoprism/photoprism/internal/ai/vision"
 	"github.com/photoprism/photoprism/internal/config"
 	"github.com/photoprism/photoprism/internal/entity"
+	"github.com/photoprism/photoprism/pkg/fs"
 )
 
 // IndexOptions represents file indexing options.
 type IndexOptions struct {
-	UID             string
-	Action          string
-	Path            string
-	Rescan          bool
-	Convert         bool
-	Stack           bool
-	FacesOnly       bool
-	DetectFaces     bool // Detect primary-file faces during indexing.
-	DetectNsfw      bool // Flag sensitive content while importing/updating photos.
-	GenerateLabels  bool // Generate automatic vision labels for newly indexed files.
-	SkipArchived    bool
-	ByteLimit       int64
-	ResolutionLimit int
+	UID              string
+	Action           string
+	Path             string
+	Rescan           bool
+	Convert          bool
+	Stack            bool
+	FacesOnly        bool
+	DetectFaces      bool              // Detect primary-file faces during indexing.
+	DetectNSFWLabels bool              // Allow label-derived NSFW flags for this run.
+	DetectNsfw       bool              // Flag sensitive content while importing/updating photos.
+	GenerateLabels   bool              // Generate automatic vision labels for newly indexed files.
+	ImportFaceTags   bool              // Import face regions and names from XMP metadata.
+	RegenerateFaces  bool              // Replace the detection of existing face markers, see Index.regenerateFaces.
+	FaceRegeneration *FaceRegeneration // Counts the changes RegenerateFaces makes, if set.
+	SkipArchived     bool
+	ByteLimit        int64
+	ResolutionLimit  int
 }
 
 // NewIndexOptions returns new index options instance.
@@ -49,14 +57,31 @@ func NewIndexOptions(path string, rescan, convert, stack, facesOnly, skipArchive
 		}
 
 		result.DetectFaces = c.VisionModelShouldRun(vision.ModelTypeFace, facesRunType)
+		result.DetectNSFWLabels = !facesOnly && c.DetectNSFWLabels()
 		result.DetectNsfw = !facesOnly && c.VisionModelShouldRun(vision.ModelTypeNsfw, vision.RunOnIndex)
 		result.GenerateLabels = !facesOnly && c.VisionModelShouldRun(vision.ModelTypeLabels, vision.RunOnIndex)
+
+		result.ImportFaceTags = c.XMPFaces()
 
 		result.ByteLimit = c.OriginalsLimitBytes()
 		result.ResolutionLimit = c.ResolutionLimit()
 	}
 
 	return result
+}
+
+// ResolveIndexPath resolves the index subpath under originalsPath and returns the
+// absolute directory to scan. Empty, ".", and "/" resolve to the originals root;
+// paths that would escape the originals directory via parent-directory traversal
+// or absolute/volume references are rejected.
+func ResolveIndexPath(originalsPath, subPath string) (string, error) {
+	sub := strings.Trim(filepath.ToSlash(subPath), "/")
+
+	if sub == "" || sub == "." {
+		return filepath.Clean(originalsPath), nil
+	}
+
+	return fs.SafeJoin(originalsPath, sub)
 }
 
 // SkipUnchanged checks if unchanged media files should be skipped.

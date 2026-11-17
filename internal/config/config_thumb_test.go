@@ -50,12 +50,40 @@ func TestConfig_ThumbSizeUncached(t *testing.T) {
 	assert.False(t, c.ThumbUncached())
 }
 
+// TestConfig_ThumbSizeLimit covers cached and on-demand delivery limits.
+func TestConfig_ThumbSizeLimit(t *testing.T) {
+	c := NewMinimalTestConfig(t.TempDir())
+	for _, tc := range []struct {
+		name     string
+		cached   int
+		onDemand int
+		uncached bool
+		want     int
+	}{
+		{"CachedOnly", 1920, 7680, false, 1920},
+		{"OnDemand", 1920, 7680, true, 7680},
+		{"LargerCache", 4096, 1920, true, 4096},
+		{"CustomCached", 2500, 7680, false, 2500},
+		{"Minimum", 1, 1, false, 720},
+		{"Maximum", 30000, 30000, true, 15360},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c.options.ThumbSize = tc.cached
+			c.options.ThumbSizeUncached = tc.onDemand
+			c.options.ThumbUncached = tc.uncached
+			assert.Equal(t, tc.want, c.ThumbSizeLimit())
+		})
+	}
+}
+
 func TestConfig_ThumbSize(t *testing.T) {
 	c := NewConfig(CliTestContext())
 
 	assert.Equal(t, 720, c.ThumbSizePrecached())
 	c.options.ThumbSize = 7681
-	assert.Equal(t, 7680, c.ThumbSizePrecached())
+	assert.Equal(t, 7681, c.ThumbSizePrecached())
+	c.options.ThumbSize = 15361
+	assert.Equal(t, 15360, c.ThumbSizePrecached())
 }
 
 func TestConfig_ThumbSizeUncached2(t *testing.T) {
@@ -63,10 +91,80 @@ func TestConfig_ThumbSizeUncached2(t *testing.T) {
 
 	assert.Equal(t, 720, c.ThumbSizeUncached())
 	c.options.ThumbSizeUncached = 7681
-	assert.Equal(t, 7680, c.ThumbSizeUncached())
+	assert.Equal(t, 7681, c.ThumbSizeUncached())
+	c.options.ThumbSizeUncached = 15361
+	assert.Equal(t, 15360, c.ThumbSizeUncached())
 	c.options.ThumbSizeUncached = 800
 	c.options.ThumbSize = 900
 	assert.Equal(t, int(900), c.ThumbSizeUncached())
+}
+
+// TestConfig_ThumbSizeFace covers the ceiling on the source a face crop may be rendered from. It
+// is a separate limit from the ones the delivery paths obey, so it does not follow thumb-size.
+func TestConfig_ThumbSizeFace(t *testing.T) {
+	c := NewConfig(CliTestContext())
+
+	t.Run("Unset", func(t *testing.T) {
+		assert.Zero(t, c.ThumbSizeFace())
+	})
+	t.Run("Disabled", func(t *testing.T) {
+		c.options.ThumbSizeFace = -1
+		assert.Zero(t, c.ThumbSizeFace())
+	})
+	t.Run("Configured", func(t *testing.T) {
+		c.options.ThumbSizeFace = 4096
+		assert.Equal(t, 4096, c.ThumbSizeFace())
+	})
+	t.Run("BelowTheSmallestRendition", func(t *testing.T) {
+		c.options.ThumbSizeFace = 8
+		assert.Equal(t, 720, c.ThumbSizeFace())
+	})
+	t.Run("AboveTheLargest", func(t *testing.T) {
+		c.options.ThumbSizeFace = 15361
+		assert.Equal(t, 15360, c.ThumbSizeFace())
+	})
+	t.Run("IndependentOfThumbSize", func(t *testing.T) {
+		c.options.ThumbSizeFace = 2560
+		c.options.ThumbSize = 15360
+		assert.Equal(t, 2560, c.ThumbSizeFace())
+	})
+	t.Run("NilConfig", func(t *testing.T) {
+		assert.Zero(t, (*Config)(nil).ThumbSizeFace())
+	})
+
+	c.options.ThumbSizeFace = 0
+	c.options.ThumbSize = 0
+}
+
+func TestInitThumbs_AdvertisesLargeSizes(t *testing.T) {
+	origCached := thumb.SizeCached
+	origOnDemand := thumb.SizeOnDemand
+	defer func() {
+		thumb.SizeCached = origCached
+		thumb.SizeOnDemand = origOnDemand
+		initThumbs()
+	}()
+
+	names := func() []string {
+		out := make([]string, 0, len(Thumbs))
+		for _, s := range Thumbs {
+			out = append(out, s.Size)
+		}
+		return out
+	}
+
+	// A high on-demand limit exposes the 8K and 16K sizes to client apps.
+	thumb.SizeCached = 1920
+	thumb.SizeOnDemand = 15360
+	initThumbs()
+	assert.Contains(t, names(), "fit_15360")
+	assert.Contains(t, names(), "fit_7680")
+
+	// A low limit keeps the large on-demand sizes out of the advertised list.
+	thumb.SizeOnDemand = 2560
+	initThumbs()
+	assert.NotContains(t, names(), "fit_15360")
+	assert.NotContains(t, names(), "fit_7680")
 }
 
 func TestConfig_PngSize(t *testing.T) {

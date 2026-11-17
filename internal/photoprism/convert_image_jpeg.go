@@ -8,6 +8,8 @@ import (
 
 	"github.com/photoprism/photoprism/internal/ffmpeg"
 	"github.com/photoprism/photoprism/internal/ffmpeg/encode"
+	"github.com/photoprism/photoprism/internal/raw"
+	"github.com/photoprism/photoprism/pkg/media/projection"
 )
 
 // JpegConvertCmds returns the supported commands for converting a MediaFile to JPEG, sorted by priority.
@@ -21,10 +23,41 @@ func (w *Convert) JpegConvertCmds(f *MediaFile, jpegName string, xmpName string)
 	// Add suitable conversion commands depending on the file type, codec, runtime environment, and configuration.
 	fileExt := f.Extension()
 	maxSize := strconv.Itoa(w.conf.JpegSize())
+	rawEnabled := w.conf.RawEnabled()
+
+	// Separate square lens videos are combined in canonical _00/_10 order before v360 dewarping.
+	// Only the _00 file owns generated sidecars; the _10 lens and LRV proxy remain related originals.
+	if capture := FindInsta360Capture(f); capture != nil && capture.Left != nil && capture.Left.FileName() == f.FileName() && capture.Dewarpable() && w.conf.FFmpegEnabled() && w.FFmpegAllowed(f) {
+		result = append(result, NewConvertCmd(
+			ffmpeg.DewarpDualFisheyePairToJpegCmd(capture.Left.FileName(), capture.Right.FileName(), jpegName, w.fisheyeFov(f), w.fisheyeRoll(f), &encode.Options{Bin: w.conf.FFmpegBin(), SizeLimit: min(w.conf.JpegSize(), 15360)})).
+			WithImageVerification().
+			WithProjection(projection.Equirectangular),
+		)
+	}
+
+	// Videos that store each lens as a separate stream are combined before dewarping.
+	if f.Insta360DualStream() && w.conf.FFmpegEnabled() && w.FFmpegAllowed(f) {
+		result = append(result, NewConvertCmd(
+			ffmpeg.DewarpDualStreamToJpegCmd(f.FileName(), jpegName, w.fisheyeFov(f), w.fisheyeRoll(f), &encode.Options{Bin: w.conf.FFmpegBin(), SizeLimit: min(w.conf.JpegSize(), 15360)})).
+			WithImageVerification().
+			WithProjection(projection.Equirectangular),
+		)
+	}
+
+	// Dewarp Insta360 dual-fisheye originals (.insp photos and .insv cover frames) to an
+	// equirectangular JPEG, so thumbnails and the sphere viewer show corrected pixels.
+	// Unsupported layouts and failed dewarps fall through to a normal render later in the loop.
+	if f.DualFisheye() && f.DualFisheyeLayout() && !f.Insta360DualStream() && !insta360SkipConvert(f) && w.conf.FFmpegEnabled() && w.FFmpegAllowed(f) {
+		result = append(result, NewConvertCmd(
+			ffmpeg.DewarpDualFisheyeToJpegCmd(f.FileName(), jpegName, w.fisheyeFov(f), w.fisheyeRoll(f), &encode.Options{Bin: w.conf.FFmpegBin(), SizeLimit: min(w.conf.JpegSize(), 15360)})).
+			WithImageVerification().
+			WithProjection(projection.Equirectangular),
+		)
+	}
 
 	// On a Mac, use the Apple Scriptable image processing system to convert images to JPEG,
 	// see https://ss64.com/osx/sips.html.
-	if (f.IsRaw() || f.IsHeif()) && w.conf.SipsEnabled() && w.sipsExclude.Allow(fileExt) {
+	if (f.IsRaw() && rawEnabled || f.IsHeif()) && w.conf.SipsEnabled() && w.sipsExclude.Allow(fileExt) {
 		result = append(result, NewConvertCmd(
 			// #nosec G204 -- arguments are built from validated config and file paths.
 			exec.Command(w.conf.SipsBin(), "-Z", maxSize, "-s", "format", "jpeg", "--out", jpegName, f.FileName())),
@@ -32,7 +65,7 @@ func (w *Convert) JpegConvertCmds(f *MediaFile, jpegName string, xmpName string)
 	}
 
 	// Use FFmpeg to extract video stills from videos, e.g. to use them as cover images.
-	if f.IsAnimated() && !f.IsWebp() && w.conf.FFmpegEnabled() {
+	if f.IsAnimated() && !f.IsWebp() && w.conf.FFmpegEnabled() && w.FFmpegAllowed(f) {
 		result = append(result, NewConvertCmd(
 			ffmpeg.ExtractJpegImageCmd(f.FileName(), jpegName, encode.NewPreviewImageOptions(w.conf.FFmpegBin(), f.Duration()))),
 		)
@@ -47,76 +80,70 @@ func (w *Convert) JpegConvertCmds(f *MediaFile, jpegName string, xmpName string)
 		)
 	}
 
-	// Convert RAW files to JPEG with Darktable and/or RawTherapee.
-	if f.IsRaw() && w.conf.RawEnabled() {
-		if w.conf.DarktableEnabled() && w.darktableExclude.Allow(fileExt) {
-			var args []string
-
-			// Set RAW, XMP, and JPEG filenames.
-			if xmpName != "" {
-				args = []string{f.FileName(), xmpName, jpegName}
-			} else {
-				args = []string{f.FileName(), jpegName}
+	// Convert RAW files to JPEG: Darktable/RawTherapee render when RAW conversion is enabled, while
+	// ExifTool preview extraction also runs when rendering is disabled, so existing previews stay usable.
+	if f.IsRaw() {
+		if rawEnabled {
+			if w.conf.DarktableEnabled() && w.darktableExclude.Allow(fileExt) && raw.DarktableOutputAllowed(jpegName) {
+				cmd, mutex := raw.DarktableCmd(raw.DarktableOptions{
+					Bin:       w.conf.DarktableBin(),
+					RawName:   f.FileName(),
+					XmpName:   xmpName,
+					JpegName:  jpegName,
+					MaxSize:   w.conf.JpegSize(),
+					Presets:   w.conf.RawPresets(),
+					ConfigDir: conf.DarktableConfigPath(),
+					CacheDir:  conf.DarktableCachePath(),
+				})
+				useMutex = mutex
+				result = append(result, NewConvertCmd(cmd))
 			}
 
-			// Set RAW to JPEG conversion options.
-			if w.conf.RawPresets() {
-				useMutex = true // can run one instance only with presets enabled
-				args = append(args, "--width", maxSize, "--height", maxSize, "--hq", "true", "--upscale", "false")
-			} else {
-				useMutex = false // --apply-custom-presets=false disables locking
-				args = append(args, "--apply-custom-presets", "false", "--width", maxSize, "--height", maxSize, "--hq", "true", "--upscale", "false")
+			// Render the RAW with RawTherapee when Darktable is unavailable or fails. For formats in the
+			// discard set (e.g. CR3) the output is rejected on an untrustworthy decode (raw.DecoderErrors)
+			// so the embedded preview wins; other RAW formats (e.g. .raw/.kdc) keep the render because
+			// RawTherapee may be their only working decoder.
+			if w.conf.RawTherapeeEnabled() && w.rawTherapeeExclude.Allow(fileExt) {
+				profile := filepath.Join(conf.AssetsPath(), "profiles", "raw.pp3")
+
+				rtCmd := NewConvertCmd(
+					raw.TherapeeCmd(w.conf.RawTherapeeBin(), f.FileName(), jpegName, profile, int(w.conf.JpegQuality())),
+				)
+
+				if raw.DiscardRenderOnWarning(fileExt) {
+					rtCmd = rtCmd.WithStderrRejection(raw.DecoderErrors...)
+				}
+
+				result = append(result, rtCmd)
 			}
-
-			// Set library, config, and cache location.
-			args = append(args, "--core", "--library", ":memory:")
-
-			if dir := conf.DarktableConfigPath(); dir != "" {
-				args = append(args, "--configdir", dir)
-			}
-
-			if dir := conf.DarktableCachePath(); dir != "" {
-				args = append(args, "--cachedir", dir)
-			}
-
-			result = append(result, NewConvertCmd(
-				// #nosec G204 -- arguments are built from validated config and file paths.
-				exec.Command(w.conf.DarktableBin(), args...)),
-			)
 		}
 
-		if w.conf.RawTherapeeEnabled() && w.rawTherapeeExclude.Allow(fileExt) {
-			jpegQuality := fmt.Sprintf("-j%d", w.conf.JpegQuality())
-			profile := filepath.Join(conf.AssetsPath(), "profiles", "raw.pp3")
+		// Extract the embedded camera preview (largest first): the fallback after the RAW developers,
+		// and the only option when RAW rendering is disabled. Colors stay correct for sensors they
+		// cannot identify (recent Canon CR3 bodies otherwise come out magenta). Skipped if unusable.
+		if w.conf.ExifToolEnabled() && raw.PreviewExtAllowed(fileExt) {
+			// Fisheye DNGs get no source orientation, since their preview may be dewarped afterwards.
+			sourceOrientation := 0
 
-			args := []string{"-o", jpegName, "-p", profile, "-s", "-d", jpegQuality, "-js3", "-b8", "-c", f.FileName()}
+			if !f.FisheyeDng() {
+				sourceOrientation = f.Orientation()
+			}
 
-			result = append(result, NewConvertCmd(
-				// #nosec G204 -- arguments are built from validated config and file paths.
-				exec.Command(w.conf.RawTherapeeBin(), args...)),
-			)
+			result = append(result, NewConvertCmd(raw.ExifToolJpgFromRawCmd(w.conf.ExifToolBin(), f.FileName())).WithImageVerification().WithSourceOrientation(sourceOrientation))
+			result = append(result, NewConvertCmd(raw.ExifToolPreviewImageCmd(w.conf.ExifToolBin(), f.FileName())).WithImageVerification().WithSourceOrientation(sourceOrientation))
 		}
 	}
 
-	// Use ExifTool to extract JPEG thumbnails from Digital Negative (DNG) files.
-	if f.IsDng() && w.conf.ExifToolEnabled() {
-		// Example: exiftool -b -PreviewImage -w IMG_4691.DNG.jpg IMG_4691.DNG
-		result = append(result, NewConvertCmd(
-			// #nosec G204 -- arguments are built from validated config and file paths.
-			exec.Command(w.conf.ExifToolBin(), "-q", "-q", "-b", "-PreviewImage", f.FileName())),
-		)
-	}
-
-	// Use "djxl" to convert JPEG XL images if installed and enabled.
-	if f.IsJpegXL() && w.conf.JpegXLEnabled() {
+	// Use "djxl" to convert JPEG XL images as a fallback when libvips lacks native support.
+	if f.IsJpegXL() && w.conf.JpegXLEnabled() && w.conf.JpegXLDecoderBin() != "" {
 		result = append(result, NewConvertCmd(
 			// #nosec G204 -- arguments are built from validated config and file paths.
 			exec.Command(w.conf.JpegXLDecoderBin(), f.FileName(), jpegName)),
 		)
 	}
 
-	// Use ImageMagick for other media file formats if the type and extension are allowed.
-	if w.conf.ImageMagickEnabled() && w.imageMagickExclude.Allow(fileExt) {
+	// Use ImageMagick for other media file formats if the type, extension, and file names are allowed.
+	if w.conf.ImageMagickEnabled() && w.imageMagickExclude.Allow(fileExt) && magickNames(f.FileName(), jpegName) {
 		resize := fmt.Sprintf("%dx%d>", w.conf.JpegSize(), w.conf.JpegSize())
 		quality := fmt.Sprintf("%d", w.conf.JpegQuality())
 
@@ -147,12 +174,15 @@ func (w *Convert) JpegConvertCmds(f *MediaFile, jpegName string, xmpName string)
 	if (f.IsTiff() || f.IsPsd()) && w.conf.ExifToolEnabled() {
 		result = append(result, NewConvertCmd(
 			// #nosec G204 -- arguments are built from validated config and file paths.
-			exec.Command(w.conf.ExifToolBin(), "-q", "-q", "-b", "-PhotoshopThumbnail", f.FileName())),
+			exec.Command(w.conf.ExifToolBin(), "-q", "-q", "-b", "-PhotoshopThumbnail", f.FileName())).WithImageVerification(),
 		)
 	}
 
 	// No suitable converter found?
 	if len(result) == 0 {
+		if f.IsAnimated() && w.conf.FFmpegEnabled() && !w.FFmpegAllowed(f) {
+			return result, useMutex, fmt.Errorf("format %s is on the FFmpeg exclude list", w.ffmpegExclude.Match(f.MetaData().Codec, f.VideoInfo().VideoCodec, f.FileType().String()))
+		}
 		return result, useMutex, fmt.Errorf("file type %s not supported", f.FileType())
 	}
 

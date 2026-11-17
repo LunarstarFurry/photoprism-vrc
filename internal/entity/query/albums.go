@@ -1,7 +1,11 @@
 package query
 
 import (
+	"errors"
 	"fmt"
+	"time"
+
+	"gorm.io/gorm"
 
 	"github.com/photoprism/photoprism/internal/entity"
 	"github.com/photoprism/photoprism/internal/entity/search"
@@ -10,6 +14,7 @@ import (
 
 	"github.com/photoprism/photoprism/internal/entity/sortby"
 	"github.com/photoprism/photoprism/pkg/clean"
+	"github.com/photoprism/photoprism/pkg/dsn"
 	"github.com/photoprism/photoprism/pkg/media"
 	"github.com/photoprism/photoprism/pkg/rnd"
 )
@@ -30,6 +35,16 @@ func AlbumsByUID(albumUIDs []string, includeDeleted bool) (results entity.Albums
 	return results, err
 }
 
+// AlbumsByType returns albums by AlbumType.
+func AlbumsByType(albumType string, includeDeleted bool) (results entity.Albums, err error) {
+	if includeDeleted {
+		err = UnscopedDb().Where("album_type = ?", albumType).Find(&results).Error
+	} else {
+		err = Db().Where("album_type = ?", albumType).Find(&results).Error
+	}
+	return results, err
+}
+
 // AlbumByUID returns a Album based on the UID.
 func AlbumByUID(albumUID string) (album entity.Album, err error) {
 	if rnd.InvalidUID(albumUID, entity.AlbumUID) {
@@ -39,8 +54,30 @@ func AlbumByUID(albumUID string) (album entity.Album, err error) {
 	return entity.CachedAlbumByUID(albumUID)
 }
 
+// AlbumHasThumb tests if a usable cover file has been assigned to the album with the specified UID.
+// Requires the file to still resolve, so a stale hash falls back to a cover query.
+func AlbumHasThumb(albumUID string) bool {
+	if rnd.InvalidUID(albumUID, entity.AlbumUID) {
+		return false
+	}
+
+	var result []string
+
+	if err := Db().Model(&entity.Album{}).
+		Joins("JOIN files ON files.file_hash = albums.thumb AND files.file_missing = FALSE AND files.file_error = '' AND files.deleted_at IS NULL").
+		Where("albums.album_uid = ?", albumUID).
+		Limit(1).
+		Pluck("albums.thumb", &result).Error; err != nil {
+		return false
+	} else if len(result) == 0 {
+		return false
+	}
+
+	return result[0] != ""
+}
+
 // AlbumCoverByUID returns an album cover file based on the uid.
-func AlbumCoverByUID(uid string, public bool) (file entity.File, err error) {
+func AlbumCoverByUID(uid string, excludePrivate bool) (file entity.File, err error) {
 	if rnd.InvalidUID(uid, entity.AlbumUID) {
 		return file, fmt.Errorf("invalid album uid")
 	}
@@ -59,20 +96,28 @@ func AlbumCoverByUID(uid string, public bool) (file entity.File, err error) {
 
 		f := form.SearchPhotos{Album: a.AlbumUID, Filter: a.AlbumFilter, Order: sortby.Relevance, Count: 1, Offset: 0, Merged: false}
 
-		if err = f.ParseQueryString(); err != nil {
+		if err = f.ParseQueryString(); errors.Is(err, form.ErrNoMatch) {
+			return file, fmt.Errorf("no cover found")
+		} else if err != nil {
 			return file, err
 		}
 
-		// Public private only?
-		if !public {
+		// A cover renders to anyone holding the album's preview token, so it selects through the
+		// share-safe path, which applies its constraints after the stored filter. Private
+		// visibility is not enforced at all when the feature is off, so that case keeps the
+		// unbounded search and matches what an authenticated search returns.
+		searchPhotos := search.SharedPhotos
+
+		if !excludePrivate {
 			f.Public = false
+			searchPhotos = search.Photos
 		}
 
-		if photos, _, err := search.Photos(f); err != nil {
+		if photos, _, err := searchPhotos(f); err != nil {
 			return file, err
 		} else if len(photos) > 0 {
 			for _, photo := range photos {
-				if err := Db().Where("photo_uid = ? AND file_primary = 1", photo.PhotoUID).First(&file).Error; err != nil {
+				if err := Db().Where("photo_uid = ? AND file_primary = TRUE", photo.PhotoUID).First(&file).Error; err != nil {
 					return file, err
 				} else {
 					return file, nil
@@ -95,19 +140,21 @@ func AlbumCoverByUID(uid string, public bool) (file entity.File, err error) {
 	}
 
 	// Build query.
-	stmt := Db().Where("files.file_primary = 1 AND files.file_missing = 0 AND files.file_type IN (?) AND files.deleted_at IS NULL", media.PreviewExpr).
+	stmt := Db().Where("files.file_primary = TRUE AND files.file_missing = FALSE AND files.file_type IN (?) AND files.deleted_at IS NULL", media.PreviewExpr).
 		Joins("JOIN albums a ON a.album_uid = ?", uid).
-		Joins("JOIN photos_albums pa ON pa.album_uid = a.album_uid AND pa.photo_uid = files.photo_uid AND pa.hidden = 0 AND pa.missing = 0").
+		Joins("JOIN photos_albums pa ON pa.album_uid = a.album_uid AND pa.photo_uid = files.photo_uid AND pa.hidden = FALSE AND pa.missing = FALSE").
 		Joins("JOIN photos ON photos.id = files.photo_id AND photos.deleted_at IS NULL")
 
 	// Public pictures only?
-	if public {
-		stmt = stmt.Where("photos.photo_private = 0")
+	if excludePrivate {
+		stmt = stmt.Where("photos.photo_private = FALSE")
 	}
 
-	// Find first picture.
+	// Find first picture; an album without matching pictures has no cover.
 	if err = stmt.Order("photos.photo_quality DESC, photos.taken_at DESC").
-		First(&file).Error; err != nil {
+		First(&file).Error; errors.Is(err, gorm.ErrRecordNotFound) {
+		return file, fmt.Errorf("no cover found")
+	} else if err != nil {
 		return file, err
 	}
 
@@ -115,21 +162,98 @@ func AlbumCoverByUID(uid string, public bool) (file entity.File, err error) {
 }
 
 // UpdateAlbumDates updates the year, month and day of the album based on the indexed photo metadata.
-func UpdateAlbumDates() error {
+func UpdateAlbumDates() (updated int, err error) {
 	mutex.Index.Lock()
 	defer mutex.Index.Unlock()
 
 	switch DbDialect() {
-	case MySQL:
-		return UnscopedDb().Exec(`UPDATE albums INNER JOIN (
+	case dsn.DialectMySQL:
+		result := UnscopedDb().Exec(`UPDATE albums INNER JOIN (
              SELECT photo_path, MAX(taken_at_local) AS taken_max
-			 FROM photos WHERE taken_src = 'meta' AND photos.photo_quality >= 3 AND photos.deleted_at IS NULL
+			 FROM photos WHERE taken_src IN ('meta', 'modified') AND photos.photo_quality >= 3 AND photos.deleted_at IS NULL
 			 GROUP BY photo_path
 	    ) AS p ON albums.album_path = p.photo_path
 		SET albums.album_year = YEAR(taken_max), albums.album_month = MONTH(taken_max), albums.album_day = DAY(taken_max)
-		WHERE albums.album_type = 'folder' AND albums.album_path IS NOT NULL AND p.taken_max IS NOT NULL`).Error
+		WHERE albums.album_type = 'folder' AND albums.album_path IS NOT NULL AND p.taken_max IS NOT NULL
+		AND albums.album_path <> ''
+		AND (album_year = 0 OR album_month = 0 OR album_day = 0
+			OR DATE(p.taken_max) <> COALESCE(STR_TO_DATE(CONCAT(album_year, '-', album_month, '-', album_day), '%Y-%c-%e'), DATE('1000-01-01'))
+		)`)
+		return int(result.RowsAffected), result.Error
+	case dsn.DialectSQLite:
+		// SQLite has potential locking issues if the update is done on all albums at once.
+		var albums entity.Albums
+		if albums, err = AlbumsByType(entity.AlbumFolder, true); err != nil {
+			log.Errorf("albums: get folders (%v)", err)
+			return updated, err
+		}
+
+		var photos map[string]time.Time
+		if photos, err = photoPathMaxDates(); err != nil {
+			return updated, err
+		}
+		pathCount := 0
+		tx := UnscopedDb().Begin()
+		if tx.Error != nil {
+			log.Errorf("albums: begin transaction failed (%v)", tx.Error)
+			return updated, tx.Error
+		}
+		for _, album := range albums {
+			if pathCount == 5000 {
+				log.Debugf("albums: committing")
+				if err = tx.Commit().Error; err != nil {
+					log.Errorf("albums: commit partial changes failed (%v)", err)
+					return updated, err
+				}
+				tx = UnscopedDb().Begin()
+				if tx.Error != nil {
+					log.Errorf("albums: begin transaction failed (%v)", tx.Error)
+					return updated, tx.Error
+				}
+				pathCount = 0
+			}
+			takenMax, ok := photos[album.AlbumPath]
+			// Exclude empty AlbumPath as the originals root path can be incorrectly included,
+			// and there shouldn't be an album of type folder without a path.
+			if ok && album.AlbumPath != "" {
+				var albumDate time.Time
+				var parseErr error
+				if albumDate, parseErr = time.Parse("2006-01-02", fmt.Sprintf("%04d-%02d-%02d", album.AlbumYear, album.AlbumMonth, album.AlbumDay)); parseErr != nil {
+					// Date wasn't valid, so set to 1000-01-01
+					albumDate = time.Date(1000, time.January, 1, 0, 0, 0, 0, time.UTC)
+				}
+				if takenMax != albumDate {
+					result := tx.Exec(`UPDATE albums SET album_year = ?, album_month = ?, album_day = ? WHERE id = ?`, takenMax.Year(), takenMax.Month(), takenMax.Day(), album.ID)
+					if err = result.Error; err != nil {
+						log.Errorf("albums: set album dates on %s (%v)", clean.Log(album.AlbumTitle), err)
+						if errRB := tx.Rollback().Error; errRB != nil {
+							log.Errorf("albums: rollback changes failed (%v)", errRB)
+						}
+						return updated, err
+					} else {
+						updated += int(result.RowsAffected)
+						pathCount++
+					}
+				}
+			}
+		}
+		return updated, tx.Commit().Error
+	case dsn.DialectPostgreSQL:
+		// Dates are compared by their parts in UTC, so an invalid stored date is replaced as on MariaDB.
+		result := UnscopedDb().Exec(`UPDATE albums
+		SET album_year = EXTRACT(YEAR FROM p.taken_max), album_month = EXTRACT(MONTH FROM p.taken_max), album_day = EXTRACT(DAY FROM p.taken_max)
+		FROM (SELECT photo_path, MAX(taken_at_local) AT TIME ZONE 'UTC' AS taken_max
+			FROM photos WHERE taken_src IN ('meta', 'modified') AND photos.photo_quality >= 3 AND photos.deleted_at IS NULL
+			GROUP BY photo_path) AS p
+		WHERE albums.album_path = p.photo_path AND albums.album_type = 'folder' AND albums.album_path IS NOT NULL
+		AND p.taken_max IS NOT NULL AND albums.album_path <> ''
+		AND (album_year = 0 OR album_month = 0 OR album_day = 0
+			OR album_year IS DISTINCT FROM EXTRACT(YEAR FROM p.taken_max) OR album_month IS DISTINCT FROM EXTRACT(MONTH FROM p.taken_max)
+			OR album_day IS DISTINCT FROM EXTRACT(DAY FROM p.taken_max)
+		)`)
+		return int(result.RowsAffected), result.Error
 	default:
-		return nil
+		return updated, err
 	}
 }
 
@@ -138,12 +262,9 @@ func UpdateMissingAlbumEntries() error {
 	mutex.Index.Lock()
 	defer mutex.Index.Unlock()
 
-	switch DbDialect() {
-	default:
-		return UnscopedDb().Exec(`UPDATE photos_albums SET missing = 1
+	return UnscopedDb().Exec(`UPDATE photos_albums SET missing = TRUE
             WHERE photo_uid IN (SELECT photo_uid FROM photos WHERE deleted_at IS NOT NULL OR photo_quality < 0)
             OR photo_uid IN (SELECT pa.photo_uid FROM photos_albums pa LEFT JOIN photos p ON pa.photo_uid = p.photo_uid WHERE p.photo_uid IS NULL)`).Error
-	}
 }
 
 // AlbumEntryFound removes the missing flag from album entries.
@@ -152,10 +273,7 @@ func AlbumEntryFound(uid string) error {
 		return fmt.Errorf("invalid photo uid")
 	}
 
-	switch DbDialect() {
-	default:
-		return UnscopedDb().Exec(`UPDATE photos_albums SET missing = 0 WHERE photo_uid = ?`, uid).Error
-	}
+	return UnscopedDb().Exec(`UPDATE photos_albums SET missing = FALSE WHERE photo_uid = ?`, uid).Error
 }
 
 // AlbumsPhotoUIDs returns up to 100000 photo UIDs that belong to the specified albums.
@@ -193,7 +311,9 @@ func AlbumsPhotoUIDs(albums []string, includeDefault, includePrivate bool) (phot
 			Quality:  1,
 		}
 
-		if err := frm.ParseQueryString(); err != nil {
+		if err := frm.ParseQueryString(); errors.Is(err, form.ErrNoMatch) {
+			continue
+		} else if err != nil {
 			return photos, err
 		}
 

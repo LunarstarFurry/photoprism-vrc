@@ -9,6 +9,20 @@ import (
 	"github.com/photoprism/photoprism/internal/entity/search"
 )
 
+// LocalStringFlag is a string flag that has the name of a config flag but a different meaning, so that
+// its value does not apply to the config (see config.LocalFlag).
+type LocalStringFlag struct {
+	*cli.StringFlag
+}
+
+// LocalFlag marks the flag as a config.LocalFlag.
+func (*LocalStringFlag) LocalFlag() {}
+
+// Unwrap returns the wrapped string flag.
+func (f *LocalStringFlag) Unwrap() cli.Flag {
+	return f.StringFlag
+}
+
 // JsonFlag returns the shared CLI flag definition for JSON output across commands.
 func JsonFlag() *cli.BoolFlag {
 	return &cli.BoolFlag{Name: "json", Aliases: []string{"j"}, Usage: "print machine-readable JSON"}
@@ -25,6 +39,20 @@ func DryRunFlag(usage string) *cli.BoolFlag {
 // YesFlag returns the shared CLI flag definition for non-interactive runs across commands.
 func YesFlag() *cli.BoolFlag {
 	return &cli.BoolFlag{Name: "yes", Aliases: []string{"y"}, Usage: "runs the command non-interactively"}
+}
+
+// ForceFlag returns the shared CLI flag definition for forced runs across commands.
+func ForceFlag(usage string) *cli.BoolFlag {
+	if usage == "" {
+		usage = "performs the action even when it is not recommended"
+	}
+	return &cli.BoolFlag{Name: "force", Aliases: []string{"f"}, Usage: usage}
+}
+
+// DeprecatedForceFlag returns the hidden --force alias of --yes kept by commands that took it for
+// confirmation, since --force means "do more" on other commands.
+func DeprecatedForceFlag() *cli.BoolFlag {
+	return &cli.BoolFlag{Name: "force", Aliases: []string{"f"}, Usage: "runs the command non-interactively *deprecated*, use --yes", Hidden: true}
 }
 
 // SuperAdminFlag returns the shared super admin CLI flag definition.

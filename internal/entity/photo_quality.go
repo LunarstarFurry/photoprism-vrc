@@ -7,6 +7,7 @@ import (
 	"github.com/photoprism/photoprism/pkg/txt"
 )
 
+// NonPhotographicKeywords names the keywords that mark a picture as not a photograph.
 var NonPhotographicKeywords = map[string]bool{
 	"screenshot":  true,
 	"screenshots": true,
@@ -53,7 +54,7 @@ func (m *Photo) QualityScore() (score int) {
 
 // UpdateQuality recomputes the quality score and persists it unless the photo is already deleted/invalid.
 func (m *Photo) UpdateQuality() error {
-	if m.DeletedAt != nil || m.PhotoQuality < 0 {
+	if m.DeletedAt.Valid || m.PhotoQuality < 0 {
 		return nil
 	}
 

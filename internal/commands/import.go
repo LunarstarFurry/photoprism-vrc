@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dustin/go-humanize/english"
 	"github.com/urfave/cli/v2"
 
 	"github.com/photoprism/photoprism/internal/config"
@@ -39,12 +40,12 @@ func importAction(ctx *cli.Context) error {
 	defer cancel()
 
 	if err != nil {
-		return err
+		return cli.Exit(err, 1)
 	}
 
 	// very if copy directory exist and is writable
 	if conf.ReadOnly() {
-		return config.ErrReadOnly
+		return cli.Exit(config.ErrReadOnly, 2)
 	}
 
 	conf.InitDb()
@@ -56,17 +57,17 @@ func importAction(ctx *cli.Context) error {
 	if sourcePath == "" {
 		sourcePath = conf.ImportPath()
 	} else {
-		abs, err := filepath.Abs(sourcePath)
+		abs, pathErr := filepath.Abs(sourcePath)
 
-		if err != nil {
-			return err
+		if pathErr != nil {
+			return cli.Exit(pathErr, 2)
 		}
 
 		sourcePath = abs
 	}
 
-	if sourcePath == conf.OriginalsPath() {
-		return cli.Exit("source path is identical with originals", 2)
+	if err := get.Import().CheckPath(sourcePath); err != nil {
+		return cli.Exit(err, 2)
 	}
 
 	var destFolder string
@@ -74,7 +75,7 @@ func importAction(ctx *cli.Context) error {
 	if ctx.IsSet("dest") {
 		destFolder, err = sanitizeDestinationArg(ctx.String("dest"))
 		if err != nil {
-			return err
+			return cli.Exit(err, 2)
 		}
 	} else {
 		destFolder = conf.ImportDest()
@@ -85,11 +86,11 @@ func importAction(ctx *cli.Context) error {
 	w := get.Import()
 	opt := photoprism.ImportOptionsMove(sourcePath, destFolder)
 
-	w.Start(opt)
+	imported := w.Start(opt)
 
 	elapsed := time.Since(start)
 
-	log.Infof("completed in %s", elapsed)
+	log.Infof("library: imported %s in %s", english.Plural(imported.Processed(), "file", "files"), elapsed)
 
 	return nil
 }

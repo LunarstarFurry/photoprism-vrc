@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	_ "embed"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"path"
@@ -12,6 +13,8 @@ import (
 
 	"github.com/photoprism/photoprism/pkg/clean"
 	"github.com/photoprism/photoprism/pkg/fs"
+	"github.com/photoprism/photoprism/pkg/http/dns"
+	"github.com/photoprism/photoprism/pkg/http/scheme"
 )
 
 //go:embed robots.txt
@@ -92,7 +95,7 @@ func (c *Config) ContentUri() string {
 
 // DownloadUrl returns the download URL based on the SiteUrl and the DownloadUri.
 func (c *Config) DownloadUrl() string {
-	return strings.TrimRight(c.options.SiteUrl, "/") + DownloadUri
+	return strings.TrimRight(c.SiteUrl(), "/") + DownloadUri
 }
 
 // VideoUri returns the video streaming URI.
@@ -114,13 +117,14 @@ func (c *Config) StaticAssetUri(res string) string {
 	return c.StaticUri() + "/" + res
 }
 
-// SiteUrl returns the public server URL (default is "http://localhost:2342/").
+// SiteUrl returns the normalized public base URL (default "http://localhost:2342/").
+// Strips default ports, query strings, and fragments so absolute URLs stay stable.
 func (c *Config) SiteUrl() string {
-	if c.options.SiteUrl == "" {
-		return "http://localhost:2342/"
+	if siteUrl := scheme.NormalizeBaseURL(c.options.SiteUrl); siteUrl != "" {
+		return siteUrl
 	}
 
-	return strings.TrimRight(c.options.SiteUrl, "/") + "/"
+	return "http://localhost:2342/"
 }
 
 // SiteHttps checks if the site URL uses HTTPS.
@@ -141,16 +145,16 @@ func (c *Config) SiteDomain() string {
 	}
 }
 
-// SiteHost returns the public hostname and port number in the format "domain:port".
+// SiteHost returns the public host and port number as in a URL, e.g. "domain:port" or "[2001:db8::1]:8443".
 func (c *Config) SiteHost() string {
 	if u, err := url.Parse(c.SiteUrl()); err != nil {
 		return localhost
 	} else if hostname := u.Hostname(); hostname == "" {
 		return localhost
 	} else if port := u.Port(); port != "" {
-		return fmt.Sprintf("%s:%s", hostname, port)
+		return net.JoinHostPort(hostname, port)
 	} else {
-		return hostname
+		return dns.BracketHost(hostname)
 	}
 }
 
@@ -159,13 +163,37 @@ func (c *Config) SiteAuthor() string {
 	return c.options.SiteAuthor
 }
 
-// SiteTitle returns the main site title (default is application name).
-func (c *Config) SiteTitle() string {
-	if c.options.SiteTitle == "" {
-		return c.Name()
+// SiteName returns a short, distinctive label for this instance, used by the
+// navigation instance switcher and the Portal instance selector. It returns the
+// first configured value among SiteName, AppName, and SiteTitle, or "" when none
+// is set. Unlike SiteTitle and AppName it does not fall back to the product Name,
+// so callers can fall back to the instance's base-path segment for unbranded peers.
+func (c *Config) SiteName() string {
+	for _, name := range []string{c.options.SiteName, c.options.AppName, c.options.SiteTitle} {
+		if s := clean.TypeUnicode(name); s != "" {
+			return s
+		}
 	}
 
-	return c.options.SiteTitle
+	return ""
+}
+
+// SiteTitle returns the main site title (default is application name).
+func (c *Config) SiteTitle() string {
+	if c.options.SiteTitle != "" {
+		return c.options.SiteTitle
+	}
+
+	// With no SiteTitle and no AppName configured, fall back to the distinctive
+	// SiteName (SITE_NAME) before the product Name so an instance branded only via
+	// SITE_NAME shows that name as its title.
+	if c.options.AppName == "" {
+		if name := clean.TypeUnicode(c.options.SiteName); name != "" {
+			return name
+		}
+	}
+
+	return c.Name()
 }
 
 // SiteCaption returns a short site caption.
@@ -200,7 +228,7 @@ func (c *Config) SitePreview() string {
 			return c.options.SitePreview
 
 		} else if fileName := filepath.Join(c.ThemePath(), c.options.SitePreview); fs.FileExistsNotEmpty(fileName) {
-			return strings.TrimRight(c.options.SiteUrl, "/") + path.Join(ThemeUri, c.options.SitePreview)
+			return strings.TrimRight(c.SiteUrl(), "/") + path.Join(ThemeUri, c.options.SitePreview)
 		}
 
 		return c.SiteUrl() + strings.TrimPrefix(c.options.SitePreview, "/")
@@ -233,7 +261,8 @@ func (c *Config) LegalUrl() string {
 // https://developers.google.com/search/docs/crawling-indexing/robots/create-robots-txt
 func (c *Config) RobotsTxt() ([]byte, error) {
 	if c.Demo() && c.Public() {
-		// Allow public demo instances to be indexed.
+		// Allow crawling public demo instances. Only the landing page may be indexed,
+		// see the X-Robots-Tag header set by the server's Security middleware.
 		return fmt.Appendf(nil,
 			"User-agent: *\nDisallow: /\nAllow: %s/\nAllow: %s/\nAllow: .js\nAllow: .css",
 			c.BaseUri(c.FrontendPath()),

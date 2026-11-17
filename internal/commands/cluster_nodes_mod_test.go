@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/urfave/cli/v2"
 
 	"github.com/photoprism/photoprism/internal/config"
@@ -23,6 +24,8 @@ func TestClusterNodesMod_LegacyAliasAppToInstance(t *testing.T) {
 		c.Options().NodeRole = prevRole
 	})
 
+	requireTestDb(t)
+
 	r, err := reg.NewClientRegistryWithConfig(c)
 	assert.NoError(t, err)
 
@@ -39,6 +42,47 @@ func TestClusterNodesMod_LegacyAliasAppToInstance(t *testing.T) {
 	}
 }
 
+func TestClusterNodesMod_DisplayNameOverride(t *testing.T) {
+	c := get.Config()
+	prevEdition := c.Options().Edition
+	prevRole := c.Options().NodeRole
+	c.Options().Edition = config.Portal
+	c.Options().NodeRole = cluster.RolePortal
+	t.Cleanup(func() {
+		c.Options().Edition = prevEdition
+		c.Options().NodeRole = prevRole
+	})
+
+	requireTestDb(t)
+
+	r, err := reg.NewClientRegistryWithConfig(c)
+	assert.NoError(t, err)
+
+	// Instance reports a display name on registration.
+	assert.NoError(t, r.Put(&reg.Node{Node: cluster.Node{Name: "pp-mod-dn", Role: cluster.RoleInstance, DisplayName: "Reported"}}))
+
+	// Admin override pins a new value.
+	_, err = RunWithTestContext(ClusterNodesModCommand, []string{"mod", "--display-name=Pinned Name", "-y", "pp-mod-dn"})
+	assert.NoError(t, err)
+	updated, err := r.FindByName("pp-mod-dn")
+	assert.NoError(t, err)
+	if !assert.NotNil(t, updated) {
+		return
+	}
+	assert.Equal(t, "Pinned Name", updated.DisplayName)
+
+	// A subsequent instance registration must not overwrite the pinned override.
+	assert.NoError(t, r.Put(&reg.Node{Node: cluster.Node{ClientID: updated.ClientID, Name: updated.Name, DisplayName: "Reported Again"}}))
+	updated, _ = r.FindByName("pp-mod-dn")
+	assert.Equal(t, "Pinned Name", updated.DisplayName)
+
+	// Clearing via an empty override un-pins and falls back to instance-reported.
+	_, err = RunWithTestContext(ClusterNodesModCommand, []string{"mod", "--display-name=", "-y", "pp-mod-dn"})
+	assert.NoError(t, err)
+	updated, _ = r.FindByName("pp-mod-dn")
+	assert.Equal(t, "", updated.DisplayName)
+}
+
 func TestClusterNodesMod_InvalidRole(t *testing.T) {
 	c := get.Config()
 	prevEdition := c.Options().Edition
@@ -49,6 +93,8 @@ func TestClusterNodesMod_InvalidRole(t *testing.T) {
 		c.Options().Edition = prevEdition
 		c.Options().NodeRole = prevRole
 	})
+
+	requireTestDb(t)
 
 	r, err := reg.NewClientRegistryWithConfig(c)
 	assert.NoError(t, err)
@@ -64,4 +110,56 @@ func TestClusterNodesMod_InvalidRole(t *testing.T) {
 		t.Fatalf("expected ExitCoder, got %T", err)
 	}
 	assert.Equal(t, 2, ec.ExitCode())
+}
+
+// TestClusterNodesMod_Confirm verifies that updating a node asks for confirmation, and that the command exits
+// with a usage error when it cannot ask.
+func TestClusterNodesMod_Confirm(t *testing.T) {
+	t.Setenv("PHOTOPRISM_CLI", "")
+
+	c := get.Config()
+	prevEdition := c.Options().Edition
+	prevRole := c.Options().NodeRole
+	c.Options().Edition = config.Portal
+	c.Options().NodeRole = cluster.RolePortal
+	t.Cleanup(func() {
+		c.Options().Edition = prevEdition
+		c.Options().NodeRole = prevRole
+	})
+
+	requireTestDb(t)
+
+	r, err := reg.NewClientRegistryWithConfig(c)
+	require.NoError(t, err)
+	require.NoError(t, r.Put(&reg.Node{Node: cluster.Node{Name: "pp-mod-confirm", Role: cluster.RoleInstance, DisplayName: "Reported"}}))
+
+	displayName := func() string {
+		n, findErr := r.FindByName("pp-mod-confirm")
+		require.NoError(t, findErr)
+		require.NotNil(t, n)
+		return n.DisplayName
+	}
+
+	t.Run("NoTerminal", func(t *testing.T) {
+		_, runErr := RunWithTestContext(ClusterNodesModCommand, []string{"mod", "--display-name=Pinned", "pp-mod-confirm"})
+
+		var exit cli.ExitCoder
+		require.ErrorAs(t, runErr, &exit)
+		assert.Equal(t, 2, exit.ExitCode())
+		assert.Equal(t, "Reported", displayName())
+	})
+	t.Run("AnsweredNo", func(t *testing.T) {
+		pipeResetAnswers(t, "n\n")
+
+		_, runErr := RunWithTestContext(ClusterNodesModCommand, []string{"mod", "--display-name=Pinned", "pp-mod-confirm"})
+
+		assert.NoError(t, runErr)
+		assert.Equal(t, "Reported", displayName())
+	})
+	t.Run("DryRun", func(t *testing.T) {
+		_, runErr := RunWithTestContext(ClusterNodesModCommand, []string{"mod", "--display-name=Pinned", "--dry-run", "pp-mod-confirm"})
+
+		assert.NoError(t, runErr)
+		assert.Equal(t, "Reported", displayName())
+	})
 }

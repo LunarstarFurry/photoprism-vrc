@@ -3,7 +3,9 @@ package api
 import (
 	"net/http"
 	"path"
+	"time"
 
+	"github.com/dustin/go-humanize/english"
 	"github.com/gabriel-vasile/mimetype"
 	"github.com/gin-gonic/gin"
 
@@ -13,6 +15,7 @@ import (
 	"github.com/photoprism/photoprism/internal/photoprism/get"
 	"github.com/photoprism/photoprism/internal/thumb/avatar"
 	"github.com/photoprism/photoprism/pkg/clean"
+	"github.com/photoprism/photoprism/pkg/fs/disk"
 	"github.com/photoprism/photoprism/pkg/http/header"
 	"github.com/photoprism/photoprism/pkg/i18n"
 	"github.com/photoprism/photoprism/pkg/log/status"
@@ -26,13 +29,14 @@ import (
 //	@Tags			Users
 //	@Accept			multipart/form-data
 //	@Produce		json
-//	@Param			uid					path		string	true	"user uid"
-//	@Param			files				formData	file	true	"avatar image (png or jpeg, <= 20 MB)"
-//	@Success		200					{object}	entity.User
-//	@Failure		400,401,403,404,429	{object}	i18n.Response
+//	@Param			uid						path		string	true	"user uid"
+//	@Param			files					formData	file	true	"avatar image (png or jpeg, <= 20 MB)"
+//	@Success		200						{object}	entity.User
+//	@Failure		400,401,403,404,413,429	{object}	i18n.Response
 //	@Router			/api/v1/users/{uid}/avatar [post]
 func UploadUserAvatar(router *gin.RouterGroup) {
 	router.POST("/users/:uid/avatar", func(c *gin.Context) {
+		start := time.Now()
 		conf := get.Config()
 
 		if conf.Demo() || conf.DisableSettings() {
@@ -40,20 +44,28 @@ func UploadUserAvatar(router *gin.RouterGroup) {
 			return
 		}
 
+		// Require user management or own-account access.
 		s := AuthAny(c, acl.ResourceUsers, acl.Permissions{acl.ActionManage, acl.AccessOwn})
 
 		if s.Abort(c) {
 			return
 		}
 
-		// Check if the session user is has user management privileges.
+		// Check whether the role can manage all user accounts.
 		isAdmin := acl.Rules.AllowAll(acl.ResourceUsers, s.GetUserRole(), acl.Permissions{acl.AccessAll, acl.ActionManage})
 		uid := clean.UID(c.Param("uid"))
 
-		// Users may only change their own avatar.
+		// Non-admin users may only change their own avatar.
 		if !isAdmin && s.GetUser().UserUID != uid {
 			event.AuditErr([]string{ClientIP(c), "session %s", "upload avatar", "user does not match"}, s.RefID)
 			AbortForbidden(c)
+			return
+		}
+
+		// Abort if there is not enough free storage to upload a new avatar.
+		if conf.InsufficientStorage() {
+			event.AuditErr([]string{ClientIP(c), "session %s", "upload avatar", status.InsufficientStorage}, s.RefID)
+			Abort(c, http.StatusInsufficientStorage, i18n.ErrInsufficientStorage)
 			return
 		}
 
@@ -117,7 +129,7 @@ func UploadUserAvatar(router *gin.RouterGroup) {
 			return
 		} else {
 			switch {
-			case mimeType.Is(header.ContentTypePng):
+			case mimeType.Is(header.ContentTypePng), mimeType.Is(header.ContentTypeAPng):
 				fileName = "avatar.png"
 			case mimeType.Is(header.ContentTypeJpeg):
 				fileName = "avatar.jpg"
@@ -133,6 +145,14 @@ func UploadUserAvatar(router *gin.RouterGroup) {
 
 		// Save avatar image.
 		if err = c.SaveUploadedFile(file, filePath); err != nil {
+			// Report a disk-full write failure as insufficient storage so the cause is clear.
+			if disk.IsNoSpace(err) {
+				disk.FlushFree()
+				event.AuditErr([]string{ClientIP(c), "session %s", "upload avatar", status.InsufficientStorage}, s.RefID)
+				Abort(c, http.StatusInsufficientStorage, i18n.ErrInsufficientStorage)
+				return
+			}
+
 			event.AuditErr([]string{ClientIP(c), "session %s", "upload avatar", "failed to save %s"}, s.RefID, clean.Log(filePath))
 			Abort(c, http.StatusBadRequest, i18n.ErrUploadFailed)
 			return
@@ -149,7 +169,7 @@ func UploadUserAvatar(router *gin.RouterGroup) {
 		s.ClearCache()
 
 		// Show success message.
-		log.Info(i18n.Msg(i18n.MsgFileUploaded))
+		log.Infof("avatar: uploaded %s in %s", english.Plural(len(files), "file", "files"), time.Since(start))
 
 		// Return updated user profile.
 		c.JSON(http.StatusOK, entity.FindUserByUID(uid))

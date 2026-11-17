@@ -5,6 +5,8 @@ import (
 	"strings"
 	"time"
 
+	"gorm.io/gorm"
+
 	"github.com/photoprism/photoprism/internal/entity"
 	"github.com/photoprism/photoprism/internal/service/maps"
 	"github.com/photoprism/photoprism/pkg/clean"
@@ -131,11 +133,12 @@ func (m Moment) Slug() (s string) {
 
 	country := maps.CountryName(m.Country)
 
-	if m.Year > 1900 && m.Month == 0 {
+	switch {
+	case m.Year > 1900 && m.Month == 0:
 		s = fmt.Sprintf("%s-%s-%04d", country, state, m.Year)
-	} else if m.Year > 1900 && m.Month > 0 && m.Month <= 12 {
+	case m.Year > 1900 && m.Month > 0 && m.Month <= 12:
 		s = fmt.Sprintf("%s-%s-%04d-%02d", country, state, m.Year, m.Month)
-	} else {
+	default:
 		s = fmt.Sprintf("%s-%s", country, state)
 	}
 
@@ -202,12 +205,14 @@ func MomentsTime(threshold int, public bool) (results Moments, err error) {
 
 	// Ignore private pictures?
 	if public {
-		stmt = stmt.Where("photo_private = 0")
+		stmt = stmt.Where("photo_private = FALSE")
 	}
 
 	stmt = stmt.Group("photos.photo_year, photos.photo_month").
 		Order("photos.photo_year DESC, photos.photo_month DESC").
-		Having("photo_count >= ?", threshold)
+		Having("COUNT(*) >= ?", threshold)
+
+	results = make(Moments, 0)
 
 	if err = stmt.Scan(&results).Error; err != nil {
 		return results, err
@@ -224,11 +229,13 @@ func MomentsCountries(threshold int, public bool) (results Moments, err error) {
 
 	// Ignore private pictures?
 	if public {
-		stmt = stmt.Where("photo_private = 0")
+		stmt = stmt.Where("photo_private = FALSE")
 	}
 
 	stmt = stmt.Group("photo_year, photo_country").
-		Having("photo_count >= ?", threshold)
+		Having("COUNT(*) >= ?", threshold)
+
+	results = make(Moments, 0)
 
 	if err = stmt.Scan(&results).Error; err != nil {
 		return results, err
@@ -246,11 +253,13 @@ func MomentsStates(threshold int, public bool) (results Moments, err error) {
 
 	// Ignore private pictures?
 	if public {
-		stmt = stmt.Where("photo_private = 0")
+		stmt = stmt.Where("photo_private = FALSE")
 	}
 
 	stmt = stmt.Group("p.place_country, p.place_state").
-		Having("photo_count >= ?", threshold)
+		Having("COUNT(*) >= ?", threshold)
+
+	results = make(Moments, 0)
 
 	if err = stmt.Scan(&results).Error; err != nil {
 		return results, err
@@ -277,11 +286,11 @@ func MomentsLabels(threshold int, public bool) (results Moments, err error) {
 
 	// Ignore private pictures?
 	if public {
-		stmt = stmt.Where("photo_private = 0")
+		stmt = stmt.Where("photo_private = FALSE")
 	}
 
 	stmt = stmt.Group("l.label_slug").
-		Having("photo_count >= ?", threshold)
+		Having("COUNT(*) >= ?", threshold)
 
 	if err = stmt.Scan(&m).Error; err != nil {
 		return m, err
@@ -305,24 +314,67 @@ func MomentsLabels(threshold int, public bool) (results Moments, err error) {
 	return results, nil
 }
 
-// RemoveDuplicateMoments deletes generated albums with duplicate slug or filter.
-func RemoveDuplicateMoments() (removed int, err error) {
-	if res := UnscopedDb().Exec(`DELETE FROM links WHERE share_uid 
-		IN (SELECT a.album_uid FROM albums a JOIN albums b ON a.album_type <> ?
+// duplicateMomentsFrom is the shared FROM/WHERE that pairs a generated album (a)
+// with an earlier same-type sibling (b) it duplicates. It binds three parameters
+// in order: the album type to skip (manual), then the folder type twice.
+//
+// Folder album slugs are not unique identities: long nested paths are truncated to
+// ClipSlug runes and slug.Make drops emoji, so distinct sibling folders can share one
+// album_slug. Folder albums are therefore deduplicated by album_filter (the serialized
+// path) alone; only non-folder albums treat a matching album_slug as a duplicate.
+const duplicateMomentsFrom = `albums a JOIN albums b ON a.album_type <> ?
 		AND a.album_type = b.album_type AND a.id > b.id
-		WHERE (a.album_slug = b.album_slug OR a.album_filter = b.album_filter)
-		GROUP BY a.album_uid)`, entity.AlbumManual); res.Error != nil {
-		return removed, res.Error
-	}
+		WHERE ((a.album_type = ? AND a.album_filter = b.album_filter)
+			OR (a.album_type <> ? AND (a.album_slug = b.album_slug OR a.album_filter = b.album_filter)))
+		GROUP BY a.id, a.album_uid`
 
-	if res := UnscopedDb().Exec(`DELETE FROM albums WHERE id 
-		IN (SELECT a.id FROM albums a JOIN albums b ON a.album_type <> ?
-			AND a.album_type = b.album_type  AND a.id > b.id
-			WHERE (a.album_slug = b.album_slug OR a.album_filter = b.album_filter)
-			GROUP BY a.album_uid)`, entity.AlbumManual); res.Error != nil {
-		return removed, res.Error
-	} else if res.RowsAffected > 0 {
-		removed = int(res.RowsAffected)
+// RemoveDuplicateMoments deletes generated albums with a duplicate filter, or a
+// duplicate slug for non-folder album types, along with their shares and photo links.
+func RemoveDuplicateMoments() (removed int, err error) {
+	batch := BatchSize()
+
+	// Selects the duplicates once inside the transaction, so every statement acts on the same albums
+	// and a failure rolls back the album and its references together.
+	err = UnscopedDb().Transaction(func(tx *gorm.DB) error {
+		var duplicates []struct {
+			ID       uint
+			AlbumUID string
+		}
+
+		if err := tx.Raw(`SELECT a.id, a.album_uid FROM `+duplicateMomentsFrom,
+			entity.AlbumManual, entity.AlbumFolder, entity.AlbumFolder).Scan(&duplicates).Error; err != nil {
+			return err
+		}
+
+		for i := 0; i < len(duplicates); i += batch {
+			chunk := duplicates[i:min(i+batch, len(duplicates))]
+			ids := make([]uint, len(chunk))
+			uids := make([]string, len(chunk))
+
+			for k := range chunk {
+				ids[k], uids[k] = chunk[k].ID, chunk[k].AlbumUID
+			}
+
+			if res := tx.Exec(`DELETE FROM albums WHERE id IN (?)`, ids); res.Error != nil {
+				return res.Error
+			} else {
+				removed += int(res.RowsAffected)
+			}
+
+			if err := entity.DeleteShareLinksTx(tx, uids); err != nil {
+				return err
+			}
+
+			if res := tx.Exec(`DELETE FROM photos_albums WHERE album_uid IN (?)`, uids); res.Error != nil {
+				return res.Error
+			}
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		return 0, err
 	}
 
 	return removed, nil

@@ -13,6 +13,7 @@ import (
 	"github.com/photoprism/photoprism/internal/ai/vision/openai"
 	"github.com/photoprism/photoprism/internal/ai/vision/schema"
 	"github.com/photoprism/photoprism/internal/entity"
+	"github.com/photoprism/photoprism/pkg/media"
 )
 
 func TestOpenAIBuilderBuild(t *testing.T) {
@@ -23,7 +24,7 @@ func TestOpenAIBuilderBuild(t *testing.T) {
 	}
 	model.ApplyEngineDefaults()
 
-	request, err := openaiBuilder{}.Build(context.Background(), model, Files{samplesPath + "/chameleon_lime.jpg"})
+	request, err := openaiBuilder{}.Build(context.Background(), model, Files{samplesPath + "/chameleon_lime.jpg"}, media.SrcLocal)
 	require.NoError(t, err)
 	require.NotNil(t, request)
 
@@ -44,12 +45,39 @@ func TestOpenAIBuilderBuildCaptionDisablesForceJSON(t *testing.T) {
 	}
 	model.ApplyEngineDefaults()
 
-	request, err := openaiBuilder{}.Build(context.Background(), model, Files{samplesPath + "/chameleon_lime.jpg"})
+	request, err := openaiBuilder{}.Build(context.Background(), model, Files{samplesPath + "/chameleon_lime.jpg"}, media.SrcLocal)
 	require.NoError(t, err)
 	require.NotNil(t, request)
 	require.NotNil(t, request.Options)
 	assert.False(t, request.Options.ForceJson)
 	assert.GreaterOrEqual(t, request.Options.MaxOutputTokens, openai.CaptionMaxTokens)
+}
+
+func TestOpenAIBuilderBuildSampling(t *testing.T) {
+	build := func(t *testing.T, model *Model) *ModelOptions {
+		t.Helper()
+		model.Options = &ModelOptions{Temperature: 0.2, TopP: 0.8}
+		model.ApplyEngineDefaults()
+		request, err := openaiBuilder{}.Build(context.Background(), model, Files{samplesPath + "/chameleon_lime.jpg"}, media.SrcLocal)
+		require.NoError(t, err)
+		require.NotNil(t, request.Options)
+		return request.Options
+	}
+	t.Run("DefaultModel", func(t *testing.T) {
+		opts := build(t, &Model{Type: ModelTypeLabels, Engine: openai.EngineName})
+		assert.Zero(t, opts.Temperature)
+		assert.Zero(t, opts.TopP)
+	})
+	t.Run("ModelOverride", func(t *testing.T) {
+		opts := build(t, &Model{Type: ModelTypeCaption, Name: "openai-captions", Model: "gpt-5.6-terra", Engine: openai.EngineName})
+		assert.Zero(t, opts.Temperature)
+		assert.Zero(t, opts.TopP)
+	})
+	t.Run("NonReasoningModel", func(t *testing.T) {
+		opts := build(t, &Model{Type: ModelTypeCaption, Name: "gpt-4.1-mini", Engine: openai.EngineName})
+		assert.InDelta(t, 0.2, opts.Temperature, 1e-6)
+		assert.InDelta(t, 0.8, opts.TopP, 1e-6)
+	})
 }
 
 func TestApiRequestJSONForOpenAI(t *testing.T) {
@@ -132,6 +160,33 @@ func TestApiRequestJSONForOpenAIDefaultSchemaName(t *testing.T) {
 
 	require.NoError(t, json.Unmarshal(payload, &decoded))
 	assert.Equal(t, schema.JsonSchemaName(req.Schema, openai.DefaultSchemaVersion), decoded.Text.Format.Name)
+}
+
+func TestApiRequestJSONForOpenAIServiceTier(t *testing.T) {
+	newReq := func(tier string) *ApiRequest {
+		return &ApiRequest{
+			Model:          "gpt-5-mini",
+			Images:         []string{"data:image/jpeg;base64,AA=="},
+			ResponseFormat: ApiFormatOpenAI,
+			Tier:           tier,
+		}
+	}
+	t.Run("SentWhenSet", func(t *testing.T) {
+		payload, err := newReq("flex").JSON()
+		require.NoError(t, err)
+
+		var decoded map[string]any
+		require.NoError(t, json.Unmarshal(payload, &decoded))
+		assert.Equal(t, "flex", decoded["service_tier"])
+	})
+	t.Run("OmittedWhenEmpty", func(t *testing.T) {
+		payload, err := newReq("  ").JSON()
+		require.NoError(t, err)
+
+		var decoded map[string]any
+		require.NoError(t, json.Unmarshal(payload, &decoded))
+		assert.NotContains(t, decoded, "service_tier")
+	})
 }
 
 func TestOpenAIParserParsesJSONFromTextPayload(t *testing.T) {
@@ -331,7 +386,117 @@ func TestPerformApiRequestOpenAIError(t *testing.T) {
 		Images:         []string{"data:image/jpeg;base64,AA=="},
 	}
 
+	resetServiceFailures(t)
+	logHook, systemHook := captureLogs(t)
+
 	_, err := PerformApiRequest(req, server.URL, http.MethodPost, "")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "Invalid image payload")
+	assert.EqualError(t, err, "openai service request failed (status 400)")
+	require.Len(t, logHook.AllEntries(), 1)
+	assert.Equal(t, "vision: openai request for model gpt-5-mini failed (status 400)", logHook.LastEntry().Message)
+	require.Len(t, systemHook.AllEntries(), 1)
+	assert.Contains(t, systemHook.LastEntry().Message, "Invalid image payload")
+}
+
+func TestPopulateOpenAIJSONResult(t *testing.T) {
+	const compound = `{"labels":[{"name":"ferris wheel","confidence":0.92,"topicality":0.88}]}`
+
+	t.Run("SingleWord", func(t *testing.T) {
+		result := ApiResult{}
+		require.NoError(t, populateOpenAIJSONResult(&result, json.RawMessage(compound), NormalizeWord))
+		require.Len(t, result.Labels, 1)
+		assert.Equal(t, "Ferris", result.Labels[0].Name)
+		assert.Equal(t, entity.SrcOpenAI, result.Labels[0].Source)
+	})
+	t.Run("Phrase", func(t *testing.T) {
+		result := ApiResult{}
+		require.NoError(t, populateOpenAIJSONResult(&result, json.RawMessage(compound), NormalizePhrase))
+		require.Len(t, result.Labels, 1)
+		assert.Equal(t, "Ferris Wheel", result.Labels[0].Name)
+	})
+	t.Run("False", func(t *testing.T) {
+		result := ApiResult{}
+		require.NoError(t, populateOpenAIJSONResult(&result, json.RawMessage(compound), NormalizeFalse))
+		require.Len(t, result.Labels, 1)
+		assert.Equal(t, "Ferris Wheel", result.Labels[0].Name)
+	})
+	t.Run("CaptionOnly", func(t *testing.T) {
+		result := ApiResult{}
+		payload := json.RawMessage(`{"caption":{"text":" A cat on a mat ","confidence":0.7}}`)
+		require.NoError(t, populateOpenAIJSONResult(&result, payload, NormalizeWord))
+		require.NotNil(t, result.Caption)
+		assert.Equal(t, "A cat on a mat", result.Caption.Text)
+		assert.Empty(t, result.Labels)
+	})
+	t.Run("EmptyPayload", func(t *testing.T) {
+		result := ApiResult{}
+		assert.NoError(t, populateOpenAIJSONResult(&result, nil, NormalizeWord))
+		assert.Empty(t, result.Labels)
+	})
+	t.Run("InvalidJson", func(t *testing.T) {
+		result := ApiResult{}
+		assert.Error(t, populateOpenAIJSONResult(&result, json.RawMessage(`{"labels":`), NormalizeWord))
+	})
+	t.Run("NilResult", func(t *testing.T) {
+		assert.NoError(t, populateOpenAIJSONResult(nil, json.RawMessage(compound), NormalizeWord))
+	})
+}
+
+func TestOpenAIParserNormalizeModes(t *testing.T) {
+	// The text branch is a separate call site from the structured one and has to honor the mode too.
+	const textPayload = `{
+		"id": "resp_123",
+		"model": "gpt-5-mini",
+		"output": [{
+			"role": "assistant",
+			"content": [{
+				"type": "output_text",
+				"text": "{\"labels\":[{\"name\":\"ferris wheel\",\"confidence\":0.98,\"topicality\":0.99}]}"
+			}]
+		}]
+	}`
+
+	parse := func(t *testing.T, req *ApiRequest) *ApiResponse {
+		t.Helper()
+
+		resp, err := openaiParser{}.Parse(context.Background(), req, []byte(textPayload), http.StatusOK)
+		require.NoError(t, err)
+		require.NotNil(t, resp)
+
+		return resp
+	}
+
+	t.Run("TextBranchSingleWord", func(t *testing.T) {
+		resp := parse(t, &ApiRequest{Model: "gpt-5-mini", ResponseFormat: ApiFormatOpenAI})
+		require.Len(t, resp.Result.Labels, 1)
+		assert.Equal(t, "Ferris", resp.Result.Labels[0].Name)
+	})
+	t.Run("TextBranchPhrase", func(t *testing.T) {
+		resp := parse(t, &ApiRequest{Model: "gpt-5-mini", ResponseFormat: ApiFormatOpenAI, Normalize: NormalizePhrase})
+		require.Len(t, resp.Result.Labels, 1)
+		assert.Equal(t, "Ferris Wheel", resp.Result.Labels[0].Name)
+	})
+	t.Run("NilRequestDefaults", func(t *testing.T) {
+		resp := parse(t, nil)
+		require.Len(t, resp.Result.Labels, 1)
+		assert.Equal(t, "Ferris", resp.Result.Labels[0].Name)
+	})
+}
+
+// TestOpenAIParserErrorStatus checks that the parser returns no response text for a failed request.
+func TestOpenAIParserErrorStatus(t *testing.T) {
+	resetServiceFailures(t)
+	captureLogs(t)
+
+	req := &ApiRequest{Id: "error", Model: "gpt-5-mini", ResponseFormat: ApiFormatOpenAI}
+
+	t.Run("Message", func(t *testing.T) {
+		resp, err := openaiParser{}.Parse(context.Background(), req, []byte(`{"error":{"message":"remote-error-marker"}}`), http.StatusBadRequest)
+		assert.Nil(t, resp)
+		assert.EqualError(t, err, "openai service request failed (status 400)")
+	})
+	t.Run("NoMessage", func(t *testing.T) {
+		resp, err := openaiParser{}.Parse(context.Background(), req, []byte(`<html></html>`), http.StatusBadGateway)
+		assert.Nil(t, resp)
+		assert.EqualError(t, err, "openai service request failed (status 502)")
+	})
 }

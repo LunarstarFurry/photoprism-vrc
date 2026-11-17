@@ -2,8 +2,12 @@ package entity
 
 import (
 	"fmt"
+	"time"
+
+	"gorm.io/gorm/clause"
 
 	"github.com/dustin/go-humanize/english"
+	"gorm.io/gorm"
 
 	"github.com/photoprism/photoprism/internal/event"
 	"github.com/photoprism/photoprism/pkg/authn"
@@ -28,15 +32,41 @@ func DeleteSession(s *Session) error {
 	// Delete session from cache.
 	DeleteFromSessionCache(s.ID)
 
-	if s.PreviewToken != "" {
-		PreviewToken.Set(s.PreviewToken, s.ID)
+	// Release the session's preview token from the in-memory lookup cache. The reverse index
+	// keeps a token resolvable until the last session that shares it has been removed, so no
+	// token is dropped while still in use.
+	PreviewToken.Unset(s.ID)
+
+	if err := UnscopedDb().Delete(s).Error; err != nil {
+		return err
 	}
 
-	if s.DownloadToken != "" {
-		DownloadToken.Set(s.DownloadToken, s.ID)
-	}
+	invalidateSessionCache(s.ID)
 
-	return UnscopedDb().Delete(s).Error
+	return nil
+}
+
+// invalidateSessionCache removes a deleted session from the cache and records its ID with a new cache version
+// under the lock CacheSession takes, so a lookup that read the session before it was deleted does not cache it.
+func invalidateSessionCache(id string) {
+	authCacheState.Lock()
+	defer authCacheState.Unlock()
+
+	now := time.Now()
+	authCacheState.version++
+	authCacheState.deleted[id] = sessionTombstone{version: authCacheState.version, at: now}
+	sessionCache.Delete(id)
+
+	// Forget deleted IDs no lookup in progress can still have read.
+	if now.Sub(authCacheState.pruned) > sessionTombstoneTTL {
+		for k, t := range authCacheState.deleted {
+			if now.Sub(t.at) > sessionTombstoneTTL {
+				delete(authCacheState.deleted, k)
+			}
+		}
+
+		authCacheState.pruned = now
+	}
 }
 
 // DeleteChildSessions deletes sessions that authenticated via the provided parent session ID.
@@ -65,8 +95,10 @@ func DeleteChildSessions(s *Session) (deleted int) {
 	return deleted
 }
 
-// DeleteClientSessions deletes sessions for the client beyond the configured retention limit.
-func DeleteClientSessions(client *Client, authMethod authn.MethodType, limit int64) (deleted int) {
+// DeleteClientSessions deletes sessions for the client beyond the configured retention limit,
+// keeping the most recently created ones. Ordering is fully specified: within one creation
+// second the session identified by keepID ranks first, then the session ID decides.
+func DeleteClientSessions(client *Client, authMethod authn.MethodType, limit int64, keepID string) (deleted int) {
 	if limit < 0 {
 		return 0
 	} else if client == nil {
@@ -75,11 +107,12 @@ func DeleteClientSessions(client *Client, authMethod authn.MethodType, limit int
 
 	q := Db()
 
-	if client.HasUID() {
+	switch {
+	case client.HasUID():
 		q = q.Where("client_uid = ?", client.GetUID())
-	} else if client.HasName() {
+	case client.HasName():
 		q = q.Where("client_name = ?", client.Name())
-	} else {
+	default:
 		return 0
 	}
 
@@ -91,7 +124,8 @@ func DeleteClientSessions(client *Client, authMethod authn.MethodType, limit int
 		q = q.Where("auth_method = ?", authMethod.String())
 	}
 
-	q = q.Order("created_at DESC").Limit(1000000000).Offset(limit)
+	q = q.Order(clause.OrderBy{Expression: gorm.Expr("created_at DESC, CASE WHEN id = ? THEN 1 ELSE 0 END DESC, id DESC", keepID)})
+	q = q.Limit(1000000000).Offset(int(limit))
 
 	found := Sessions{}
 

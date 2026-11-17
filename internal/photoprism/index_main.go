@@ -1,10 +1,12 @@
 package photoprism
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/photoprism/photoprism/internal/entity/query"
 	"github.com/photoprism/photoprism/pkg/clean"
+	"github.com/photoprism/photoprism/pkg/log/status"
 )
 
 // IndexMain indexes the main file from a group of related files and returns the result.
@@ -35,14 +37,27 @@ func IndexMain(related *RelatedFiles, ind *Index, o IndexOptions) (result IndexR
 		return result
 	}
 
+	warnInsta360LensNotVideo("index", f)
+
 	// Create JSON sidecar file, if needed.
 	if jsonErr := f.CreateExifToolJson(ind.convert); jsonErr != nil {
 		log.Warnf("index: %s", clean.Error(jsonErr))
 	}
 
-	// Create JPEG sidecar for media files in other formats so that thumbnails can be created.
-	if o.Convert && f.IsMedia() && !f.HasPreviewImage() {
-		if img, imgErr := ind.convert.ToImage(f, false); imgErr != nil {
+	// Create JPEG sidecar for media files in other formats so that thumbnails can be created. The left
+	// lens preview of a capture completed in this run is replaced only if FFmpeg can create the new one.
+	forcePreview := forceDewarpPreview(f, o.Rescan) ||
+		ind.conf.FFmpegEnabled() && ind.convert.FFmpegAllowed(f) && insta360StalePreview(f, related.Files)
+	if o.Convert && f.IsMedia() && (!f.HasPreviewImage() || forcePreview) {
+		if img, imgErr := ind.convert.ToImage(f, forcePreview); imgErr != nil {
+			// Stop the run instead of masking a full disk as a generic preview error.
+			if errors.Is(imgErr, status.ErrInsufficientStorage) {
+				ind.abortInsufficientStorage()
+				result.Err = imgErr
+				result.Status = IndexFailed
+				return result
+			}
+
 			result.Err = fmt.Errorf("index: could not create preview image for %s", clean.Log(f.RootRelName()))
 			log.Error(result.Err)
 			result.Status = IndexFailed
@@ -56,23 +71,57 @@ func IndexMain(related *RelatedFiles, ind *Index, o IndexOptions) (result IndexR
 		} else {
 			log.Debugf("index: created %s", clean.Log(img.BaseName()))
 
+			// Report 360° originals whose new preview shows the raw lens frames.
+			if img.InSidecar() && insta360ExpectsDewarp(f) && img.visualProjection.Unknown() {
+				log.Warnf("index: %s could not be dewarped to an equirectangular preview", clean.Log(f.RootRelName()))
+			}
+
 			if imgErr = img.GenerateThumbnails(ind.thumbPath(), false); imgErr != nil {
+				// Stop the run instead of masking a full disk as a generic thumbnail error.
+				if errors.Is(imgErr, status.ErrInsufficientStorage) {
+					ind.abortInsufficientStorage()
+					result.Err = imgErr
+					result.Status = IndexFailed
+					return result
+				}
+
 				result.Err = fmt.Errorf("index: failed to generate thumbnails for %s (%s)", clean.Log(f.RootRelName()), imgErr.Error())
 				result.Status = IndexFailed
 				return result
 			}
 
+			if forcePreview {
+				ind.forgetReplacedPreview(img)
+			}
+
+			img.SetRelatedMain(f)
 			related.Files = append(related.Files, img)
+		}
+	}
+
+	// Generate the playable equirectangular AVC while the index worker is already running in the
+	// background. This prevents the HTTP video endpoint from doing an expensive v360 conversion.
+	if o.Convert && f.DewarpableInsv() {
+		if avc, avcErr := ind.convert.ToAvc(f, ind.conf.FFmpegEncoder(), false, o.Rescan); errors.Is(avcErr, status.ErrInsufficientStorage) {
+			ind.abortInsufficientStorage()
+			result.Err = avcErr
+			result.Status = IndexFailed
+			return result
+		} else if avcErr != nil {
+			log.Warnf("index: could not create equirectangular video for %s (%s)", clean.Log(f.RootRelName()), clean.Error(avcErr))
+		} else if avc != nil {
+			related.Files = append(related.Files, avc)
 		}
 	}
 
 	// Index main MediaFile.
 	exists := ind.files.Exists(f.RootRelName(), f.Root())
+	f.SetRelatedMain(f)
 	result = ind.MediaFile(f, o, "", "")
 
 	// Save file error.
 	if fileUid, err := result.FileError(); err != nil {
-		query.SetFileError(fileUid, err.Error())
+		query.SetFileError(fileUid, clean.Error(err))
 	}
 
 	// Log index result.
@@ -89,4 +138,9 @@ func IndexMain(related *RelatedFiles, ind *Index, o IndexOptions) (result IndexR
 	}
 
 	return result
+}
+
+// forceDewarpPreview reports whether forced indexing should replace a recognized 360° preview.
+func forceDewarpPreview(f *MediaFile, rescan bool) bool {
+	return rescan && f != nil && (f.DewarpableInsv() || f.IsInsp() && f.DualFisheyeLayout() || f.FisheyeDng())
 }

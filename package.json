@@ -2,7 +2,7 @@
   "name": "photoprism",
   "private": true,
   "overrides": {
-    "axios": "1.14.0"
+    "serialize-javascript": "^7.1.2"
   },
   "workspaces": [
     "frontend"

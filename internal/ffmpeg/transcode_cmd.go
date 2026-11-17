@@ -10,6 +10,7 @@ import (
 	"github.com/photoprism/photoprism/internal/ffmpeg/nvidia"
 	"github.com/photoprism/photoprism/internal/ffmpeg/v4l"
 	"github.com/photoprism/photoprism/internal/ffmpeg/vaapi"
+	"github.com/photoprism/photoprism/internal/ffmpeg/vulkan"
 	"github.com/photoprism/photoprism/pkg/fs"
 )
 
@@ -31,13 +32,13 @@ func TranscodeCmd(srcName, destName string, opt encode.Options) (cmd *exec.Cmd, 
 
 	// Always use software encoder for transcoding animated pictures into videos.
 	if fs.TypeAnimated[fs.FileType(srcName)] != "" {
-		// #nosec G204 -- command arguments are built from validated options and paths.
-		cmd = exec.Command(
-			opt.Bin,
+		args := append([]string{
 			"-hide_banner",
 			"-y",
 			"-strict", "-2",
-			"-i", srcName,
+		}, encode.InputArgs(srcName)...)
+
+		args = append(args,
 			"-ignore_unknown",
 			"-pix_fmt", encode.FormatYUV420P.String(),
 			"-vf", "scale='trunc(iw/2)*2:trunc(ih/2)*2'",
@@ -45,6 +46,9 @@ func TranscodeCmd(srcName, destName string, opt encode.Options) (cmd *exec.Cmd, 
 			"-movflags", "+faststart",
 			destName,
 		)
+
+		// #nosec G204 -- command arguments are built from validated options and paths.
+		cmd = exec.Command(opt.Bin, args...)
 
 		return cmd, useMutex, nil
 	}
@@ -66,6 +70,8 @@ func TranscodeCmd(srcName, destName string, opt encode.Options) (cmd *exec.Cmd, 
 		cmd = nvidia.TranscodeToAvcCmd(srcName, destName, opt)
 	case encode.V4LAvc:
 		cmd = v4l.TranscodeToAvcCmd(srcName, destName, opt)
+	case encode.VulkanAvc:
+		cmd = vulkan.TranscodeToAvcCmd(srcName, destName, opt)
 	default:
 		cmd = encode.TranscodeToAvcCmd(srcName, destName, opt)
 	}

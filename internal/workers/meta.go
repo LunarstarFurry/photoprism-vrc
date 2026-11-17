@@ -13,6 +13,7 @@ import (
 	"github.com/photoprism/photoprism/internal/config"
 	"github.com/photoprism/photoprism/internal/entity"
 	"github.com/photoprism/photoprism/internal/entity/query"
+	"github.com/photoprism/photoprism/internal/event"
 	"github.com/photoprism/photoprism/internal/mutex"
 	"github.com/photoprism/photoprism/internal/photoprism"
 	"github.com/photoprism/photoprism/pkg/clean"
@@ -33,6 +34,17 @@ func (w *Meta) originalsPath() string {
 	return w.conf.OriginalsPath()
 }
 
+// saveSidecarYaml backs up the photo metadata to its YAML sidecar file, if enabled.
+func (w *Meta) saveSidecarYaml(photo *entity.Photo, logName string) {
+	if photo == nil || !w.conf.SidecarYaml() {
+		return
+	}
+
+	if err := photo.SaveSidecarYaml(w.conf.OriginalsPath(), w.conf.SidecarPath()); err != nil {
+		log.Errorf("index: %s in %s (save yaml sidecar)", clean.Error(err), logName)
+	}
+}
+
 // Start metadata optimization routine.
 func (w *Meta) Start(delay, interval time.Duration, force bool) (err error) {
 	defer func() {
@@ -42,11 +54,28 @@ func (w *Meta) Start(delay, interval time.Duration, force bool) (err error) {
 		}
 	}()
 
+	// A face migration runs from another process and rewrites every marker vector, so the markers
+	// this worker adds would be written in the model it is migrating away from and then blanked.
+	if held := w.conf.FacesLocked(); held != "" {
+		log.Infof("metadata: waiting for the %s to complete", held)
+		return nil
+	}
+
+	// Its target is recorded in "options.yml" once it completes, so a marker this worker adds
+	// afterwards waits for a restart rather than receiving a vector no cluster can read.
+	w.conf.CheckFaceModelSuperseded()
+
 	if err = mutex.MetaWorker.Start(); err != nil {
 		return err
 	}
 
 	defer mutex.MetaWorker.Stop()
+
+	// Notify clients about saved and merged photos, including when the run is canceled.
+	events := event.NewEntityBatch("photos", event.EntityUpdated)
+	defer events.Flush()
+	deleted := event.NewEntityBatch("photos", event.EntityDeleted)
+	defer deleted.Flush()
 
 	// Check time when worker was last executed.
 	updateIndex := force || mutex.MetaWorker.LastRun().Before(time.Now().Add(-1*entity.IndexUpdateInterval))
@@ -86,6 +115,9 @@ func (w *Meta) Start(delay, interval time.Duration, force bool) (err error) {
 			if mutex.MetaWorker.Canceled() {
 				return errors.New("index: metadata worker canceled")
 			}
+
+			events.FlushDue()
+			deleted.FlushDue()
 
 			if done[photo.PhotoUID] {
 				continue
@@ -131,7 +163,7 @@ func (w *Meta) Start(delay, interval time.Duration, force bool) (err error) {
 
 								if detectErr != nil {
 									log.Debugf("vision: %s in %s (detect faces)", detectErr, clean.Log(mediaFile.BaseName()))
-								} else if saved, count, applyErr := photoprism.ApplyDetectedFaces(primaryFile, faces); applyErr != nil {
+								} else if saved, count, applyErr := photoprism.ApplyDetectedFaces(mediaFile, primaryFile, faces); applyErr != nil {
 									log.Warnf("index: %s in %s (save faces)", clean.Error(applyErr), logName)
 								} else if saved {
 									photo.PhotoFaces = count
@@ -144,11 +176,9 @@ func (w *Meta) Start(delay, interval time.Duration, force bool) (err error) {
 						// Generate photo labels if needed.
 						if generateLabels {
 							if labels := mediaFile.GenerateLabels(entity.SrcAuto); len(labels) > 0 {
-								if w.conf.DetectNSFW() && !photo.PhotoPrivate {
-									if labels.IsNSFW(vision.Config.Thresholds.GetNSFW()) {
-										photo.PhotoPrivate = true
-										log.Infof("vision: changed private flag of %s to %t (labels)", logName, photo.PhotoPrivate)
-									}
+								if flag, write := labelsPrivateFlag(w.conf, photo.PhotoPrivate, labels); write {
+									photo.PhotoPrivate = flag
+									log.Infof("vision: changed private flag of %s to %t (labels)", logName, photo.PhotoPrivate)
 								}
 								photo.AddLabels(labels)
 								changed = true
@@ -172,6 +202,10 @@ func (w *Meta) Start(delay, interval time.Duration, force bool) (err error) {
 						if changed {
 							if saveErr := photo.SaveVision(); saveErr == nil {
 								updated = true
+
+								// Back up the vision metadata as well, so deferred labels, captions,
+								// and faces do not stay missing from the sidecar until a full rescan.
+								w.saveSidecarYaml(photo, logName)
 							}
 						}
 					}
@@ -192,10 +226,16 @@ func (w *Meta) Start(delay, interval time.Duration, force bool) (err error) {
 				optimized++
 			}
 
+			// A stack merge moves files to the photo that remains, even if its own row did not change.
+			if (updated || len(merged) > 0) && !photo.DeletedAt.Valid {
+				events.Add(photo.PhotoUID)
+			}
+
 			for _, p := range merged {
 				if p != nil {
 					log.Infof("index: merged %s", p.String())
 					done[p.PhotoUID] = true
+					deleted.Add(p.PhotoUID)
 				}
 			}
 		}
@@ -206,6 +246,10 @@ func (w *Meta) Start(delay, interval time.Duration, force bool) (err error) {
 
 		offset += limit
 	}
+
+	// Publish the last batches before face recognition and the index updates, which can take minutes.
+	events.Flush()
+	deleted.Flush()
 
 	if optimized > 0 {
 		log.Infof("index: updated %s [%s]", english.Plural(optimized, "photo", "photos"), time.Since(start))

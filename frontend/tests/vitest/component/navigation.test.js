@@ -1,10 +1,22 @@
-import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
+import { describe, it, expect, vi, afterEach, beforeEach, onTestFinished } from "vitest";
 import { shallowMount, config as VTUConfig } from "@vue/test-utils";
 import PNavigation from "component/navigation.vue";
 import { buildNamespace } from "common/storage";
 import clientConfig from "../config";
 
 const navigationModeKey = `${buildNamespace(clientConfig.storageNamespace)}navigation.mode`;
+
+// setDisplayWidth resizes the window for one test, since the Vuetify display breakpoints are read-only.
+function setDisplayWidth(wrapper, width) {
+  const display = wrapper.vm.$vuetify.display;
+  const previous = window.innerWidth;
+  onTestFinished(() => {
+    window.innerWidth = previous;
+    display.update();
+  });
+  window.innerWidth = width;
+  display.update();
+}
 
 function mountNavigation({
   routeName = "photos",
@@ -56,9 +68,15 @@ function mountNavigation({
     isPro: baseConfig.isPro || vi.fn(() => false),
     isSponsor: baseConfig.isSponsor || vi.fn(() => false),
     get: vi.fn((key) => {
-      if (key === "demo") return false;
-      if (key === "public") return isPublic;
-      if (key === "readonly") return false;
+      if (key === "demo") {
+        return false;
+      }
+      if (key === "public") {
+        return isPublic;
+      }
+      if (key === "readonly") {
+        return false;
+      }
       return false;
     }),
     feature: vi.fn((name) => {
@@ -197,7 +215,7 @@ describe("component/navigation", () => {
       });
 
       // Force small-screen mode and authenticated session
-      wrapper.vm.$vuetify.display.smAndDown = true;
+      setDisplayWidth(wrapper, 500);
       wrapper.vm.session.auth = true;
       wrapper.vm.isPublic = false;
 
@@ -237,25 +255,7 @@ describe("component/navigation", () => {
     });
   });
 
-  describe("account and legal navigation", () => {
-    it("showAccountSettings routes to account settings when account feature is enabled", () => {
-      const { wrapper, push } = mountNavigation({
-        featureOverrides: { account: true },
-      });
-
-      wrapper.vm.showAccountSettings();
-      expect(push).toHaveBeenCalledWith({ name: "settings_account" });
-    });
-
-    it("showAccountSettings falls back to general settings when account feature is disabled", () => {
-      const { wrapper, push } = mountNavigation({
-        featureOverrides: { account: false },
-      });
-
-      wrapper.vm.showAccountSettings();
-      expect(push).toHaveBeenCalledWith({ name: "settings" });
-    });
-
+  describe("legal navigation", () => {
     it("showLegalInfo opens external URL when legalUrl is configured", () => {
       const { wrapper, util } = mountNavigation({
         configValues: { legalUrl: "https://example.com/legal" },
@@ -275,6 +275,20 @@ describe("component/navigation", () => {
     });
   });
 
+  describe("account navigation", () => {
+    it("onAccount routes to account settings when the account feature is enabled", () => {
+      const { wrapper, push } = mountNavigation({ featureOverrides: { account: true } });
+      wrapper.vm.onAccount();
+      expect(push).toHaveBeenCalledWith({ name: "settings_account" });
+    });
+
+    it("onAccount falls back to general settings when the account feature is disabled", () => {
+      const { wrapper, push } = mountNavigation({ featureOverrides: { account: false } });
+      wrapper.vm.onAccount();
+      expect(push).toHaveBeenCalledWith({ name: "settings" });
+    });
+  });
+
   describe("home and upload actions", () => {
     it("onHome toggles drawer on small screens and does not navigate", () => {
       const { wrapper, push } = mountNavigation({
@@ -283,7 +297,7 @@ describe("component/navigation", () => {
       });
 
       // Ensure mobile mode and authenticated session so drawer logic runs
-      wrapper.vm.$vuetify.display.smAndDown = true;
+      setDisplayWidth(wrapper, 500);
       wrapper.vm.session.auth = true;
       wrapper.vm.isPublic = false;
       wrapper.vm.drawer = false;
@@ -300,7 +314,7 @@ describe("component/navigation", () => {
       });
 
       // Force desktop mode explicitly to avoid relying on Vuetify defaults
-      wrapper.vm.$vuetify.display.smAndDown = false;
+      setDisplayWidth(wrapper, 1280);
 
       wrapper.vm.onHome({ target: {} });
       expect(push).toHaveBeenCalledWith({ name: "home" });
@@ -366,14 +380,14 @@ describe("component/navigation", () => {
   });
 
   describe("logout", () => {
-    it("onLogout calls session.logout", () => {
-      const logout = vi.fn();
+    it("onLogout calls session.logoutEverywhere", () => {
+      const logoutEverywhere = vi.fn();
       const { wrapper, session } = mountNavigation({
-        sessionOverrides: { logout },
+        sessionOverrides: { logoutEverywhere },
       });
 
       wrapper.vm.onLogout();
-      expect(session.logout).toHaveBeenCalled();
+      expect(session.logoutEverywhere).toHaveBeenCalled();
     });
   });
 });

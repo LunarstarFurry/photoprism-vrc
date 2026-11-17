@@ -5,20 +5,25 @@ import (
 	"strings"
 
 	"github.com/photoprism/photoprism/internal/entity"
+	"github.com/photoprism/photoprism/pkg/clean"
 	"github.com/photoprism/photoprism/pkg/rnd"
 	"github.com/photoprism/photoprism/pkg/time/unix"
 )
 
+// ErrInvalidSessionID is returned by Session for an identifier that cannot name a session.
+var ErrInvalidSessionID = errors.New("invalid session id")
+
 // Session finds an existing session by its id.
 func Session(id string) (result entity.Session, err error) {
-	if l := len(id); l < 6 || l > 2048 {
-		return result, errors.New("invalid session id")
-	} else if rnd.IsRefID(id) {
+	switch l := len(id); {
+	case l < 6 || l > 2048:
+		return result, ErrInvalidSessionID
+	case rnd.IsRefID(id):
 		err = Db().Where("ref_id = ?", id).First(&result).Error
-	} else if rnd.IsSessionID(id) {
-		err = Db().Where("id LIKE ?", id).First(&result).Error
-	} else {
-		err = Db().Where("id LIKE ?", rnd.SessionID(id)).First(&result).Error
+	case rnd.IsSessionID(id):
+		err = Db().Where("id = ?", id).First(&result).Error
+	default:
+		err = Db().Where("id = ?", rnd.SessionID(id)).First(&result).Error
 	}
 
 	return result, err
@@ -31,16 +36,18 @@ func Sessions(limit, offset int, sortOrder, search string) (result entity.Sessio
 
 	search = strings.TrimSpace(search)
 
-	if search == "expired" {
+	switch {
+	case search == "expired":
 		stmt = stmt.Where("sess_expires > 0 AND sess_expires < ?", unix.Now())
-	} else if rnd.IsSessionID(search) {
+	case rnd.IsSessionID(search):
 		stmt = stmt.Where("id = ?", search)
-	} else if rnd.IsAuthToken(search) {
+	case rnd.IsAuthToken(search):
 		stmt = stmt.Where("id = ?", rnd.SessionID(search))
-	} else if rnd.IsUID(search, entity.UserUID) {
+	case rnd.IsUID(search, entity.UserUID):
 		stmt = stmt.Where("user_uid = ?", search)
-	} else if search != "" {
-		stmt = stmt.Where("user_name LIKE ? OR auth_provider LIKE ?", search+"%", search+"%")
+	case search != "":
+		like := clean.SqlLike(search) + "%"
+		stmt = stmt.Where("("+clean.SqlLikeCond(DbDialect(), false, "user_name")+" OR "+clean.SqlLikeCond(DbDialect(), true, "auth_provider")+")", like, like)
 	}
 
 	if sortOrder == "" {

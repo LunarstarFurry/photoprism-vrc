@@ -9,10 +9,13 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/photoprism/photoprism/internal/auth/acl"
+	"github.com/photoprism/photoprism/internal/auth/oidc"
+	"github.com/photoprism/photoprism/internal/entity"
 	"github.com/photoprism/photoprism/internal/event"
 	"github.com/photoprism/photoprism/internal/photoprism/get"
 	"github.com/photoprism/photoprism/internal/service/cluster"
 	reg "github.com/photoprism/photoprism/internal/service/cluster/registry"
+	"github.com/photoprism/photoprism/pkg/clean"
 	"github.com/photoprism/photoprism/pkg/i18n"
 	"github.com/photoprism/photoprism/pkg/log/status"
 	"github.com/photoprism/photoprism/pkg/txt"
@@ -188,10 +191,10 @@ func ClusterGetNode(router *gin.RouterGroup) {
 //	@Tags		Cluster
 //	@Accept		json
 //	@Produce	json
-//	@Param		uuid				path		string	true	"node uuid"
-//	@Param		node				body		object	true	"properties to update (Role, Labels, AdvertiseUrl, SiteUrl)"
-//	@Success	200					{object}	cluster.StatusResponse
-//	@Failure	400,401,403,404,429	{object}	i18n.Response
+//	@Param		uuid					path		string	true	"node uuid"
+//	@Param		node					body		object	true	"properties to update (Role, DisplayName, Labels, AdvertiseUrl, SiteUrl, RedirectURIs, AllowGroups, AllowGroupRoles, GroupsFullView)"
+//	@Success	200						{object}	cluster.StatusResponse
+//	@Failure	400,401,403,404,413,429	{object}	i18n.Response
 //	@Router		/api/v1/cluster/nodes/{uuid} [patch]
 func ClusterUpdateNode(router *gin.RouterGroup) {
 	router.PATCH("/cluster/nodes/:uuid", func(c *gin.Context) {
@@ -217,10 +220,15 @@ func ClusterUpdateNode(router *gin.RouterGroup) {
 		}
 
 		var req struct {
-			Role         *string           `json:"Role"`
-			Labels       map[string]string `json:"Labels"`
-			AdvertiseUrl *string           `json:"AdvertiseUrl"`
-			SiteUrl      *string           `json:"SiteUrl"`
+			Role            *string            `json:"Role"`
+			DisplayName     *string            `json:"DisplayName"`
+			Labels          map[string]string  `json:"Labels"`
+			AdvertiseUrl    *string            `json:"AdvertiseUrl"`
+			SiteUrl         *string            `json:"SiteUrl"`
+			RedirectURIs    *[]string          `json:"RedirectURIs"`
+			AllowGroups     *[]string          `json:"AllowGroups"`
+			AllowGroupRoles *map[string]string `json:"AllowGroupRoles"`
+			GroupsFullView  *bool              `json:"GroupsFullView"`
 		}
 
 		LimitRequestBodyBytes(c, MaxClusterRegisterBytes)
@@ -260,6 +268,14 @@ func ClusterUpdateNode(router *gin.RouterGroup) {
 			n.Role = role
 		}
 
+		// An admin-set DisplayName (SrcManual) pins the value so it survives
+		// later instance registrations; an empty value un-pins and falls back to
+		// the instance-reported name.
+		if req.DisplayName != nil {
+			n.DisplayName = clean.TypeUnicode(strings.TrimSpace(*req.DisplayName))
+			n.NameSrc = entity.SrcManual
+		}
+
 		if req.Labels != nil {
 			n.Labels = req.Labels
 		}
@@ -294,6 +310,52 @@ func ClusterUpdateNode(router *gin.RouterGroup) {
 			}
 		}
 
+		if req.RedirectURIs != nil {
+			normalized, err := normalizeRedirectURIs(*req.RedirectURIs)
+			if err != nil {
+				AbortBadRequest(c, err)
+				return
+			}
+			// Non-nil slice (even empty) replaces the persisted set; nil is "no change".
+			n.RedirectURIs = normalized
+		}
+
+		if req.AllowGroups != nil {
+			for _, group := range *req.AllowGroups {
+				if clean.GroupIDTooLong(group) {
+					AbortBadRequest(c, fmt.Errorf("group id %s is too long", clean.LogQuote(group)))
+					return
+				}
+			}
+
+			// Non-nil slice (even empty) replaces the persisted set; nil is "no change".
+			normalized := oidc.MergeGroups(*req.AllowGroups)
+			if normalized == nil {
+				normalized = []string{}
+			}
+			n.AllowGroups = normalized
+		}
+
+		if req.AllowGroupRoles != nil {
+			normalized, err := normalizeAllowGroupRoles(*req.AllowGroupRoles)
+			if err != nil {
+				AbortBadRequest(c, err)
+				return
+			}
+			// Non-nil map (even empty) replaces the persisted mapping; nil is "no change".
+			n.AllowGroupRoles = normalized
+		}
+
+		if req.GroupsFullView != nil {
+			n.GroupsFullView = req.GroupsFullView
+		}
+
+		// An admin edit pins the group config so instance registrations can't
+		// revert it; clearing all of it un-pins (see registry.applyGroupConfig).
+		if req.AllowGroups != nil || req.AllowGroupRoles != nil || req.GroupsFullView != nil {
+			n.GroupsSrc = entity.ClientGroupsSrcManual
+		}
+
 		n.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 
 		if err = regy.Put(n); err != nil {
@@ -309,6 +371,35 @@ func ClusterUpdateNode(router *gin.RouterGroup) {
 
 		c.JSON(http.StatusOK, cluster.StatusResponse{Status: "ok"})
 	})
+}
+
+// normalizeAllowGroupRoles validates a group → role mapping for an admin node
+// PATCH: keys normalize via oidc.NormalizeGroupID (empty dropped) and roles must
+// be cluster instance roles, so cluster_admin/visitor/unknown are rejected with an error.
+func normalizeAllowGroupRoles(in map[string]string) (map[string]string, error) {
+	out := make(map[string]string, len(in))
+
+	for group, roleName := range in {
+		if clean.GroupIDTooLong(group) {
+			return nil, fmt.Errorf("group id %s is too long", clean.LogQuote(group))
+		}
+
+		g := oidc.NormalizeGroupID(group)
+
+		if g == "" {
+			continue
+		}
+
+		role, ok := acl.ClusterInstanceRole(roleName)
+
+		if !ok {
+			return nil, fmt.Errorf("invalid role %s for group %s", clean.LogQuote(roleName), clean.LogQuote(group))
+		}
+
+		out[g] = role.String()
+	}
+
+	return out, nil
 }
 
 // ClusterDeleteNode removes a node entry from the registry.

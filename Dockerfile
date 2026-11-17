@@ -1,12 +1,15 @@
-# Ubuntu 25.10 (Questing Quokka)
-FROM photoprism/develop:260331-questing
+# Develop Base Image
+ARG DOCKERFILE_IMAGE_TAG=261111-stonking
+FROM photoprism/develop:${DOCKERFILE_IMAGE_TAG}
 
 # Harden npm usage by default (applies to npm ci / install in dev container)
 ENV NPM_CONFIG_IGNORE_SCRIPTS=true
 
 ## Alternative Environments:
+# FROM photoprism/develop:stonking # Ubuntu 26.10 (Stonking Stingray)
+# FROM photoprism/develop:resolute # Ubuntu 26.04 LTS (Resolute Raccoon)
+# FROM photoprism/develop:questing # Ubuntu 25.10 (Questing Quokka)
 # FROM photoprism/develop:plucky   # Ubuntu 25.04 (Plucky Puffin)
-# FROM photoprism/develop:armv7    # ARMv7 (32bit)
 # FROM photoprism/develop:oracular # Ubuntu 24.10 (Oracular Oriole)
 # FROM photoprism/develop:noble    # Ubuntu 24.04 LTS (Noble Numbat)
 # FROM photoprism/develop:mantic   # Ubuntu 23.10 (Mantic Minotaur)
@@ -17,11 +20,29 @@ ENV NPM_CONFIG_IGNORE_SCRIPTS=true
 # FROM photoprism/develop:bullseye # Debian 11 (Bullseye)
 # FROM photoprism/develop:buster   # Debian 10 (Buster)
 
-# Set default working directory.
-WORKDIR "/go/src/github.com/photoprism/photoprism"
+# Set default working directory. Override WORKING_DIR (e.g. via compose build
+# args populated from .env) to match a custom host-side clone layout; the value
+# must stay aligned with compose's working_dir and the source bind mount target.
+ARG WORKING_DIR=/go/src/github.com/photoprism/photoprism
+WORKDIR "${WORKING_DIR}"
 
 # Copy source to image.
 COPY . .
-COPY --chown=root:root /scripts/dist/ /scripts/
+
+# Update scripts in image.
+COPY --chown=root:root --chmod=755 ./scripts/dist/ /scripts/
+
+# Record the image, which the scripts copied above read at startup. Stated here rather than
+# inherited, so that the copy does not install readers onto a base that predates the file.
+RUN printf 'DOCKER_ENV=develop\nDOCKER_IMG=develop\n' > /scripts/.env && chmod 0444 /scripts/.env
+
+# Normalize the mode of the installed scripts. This copy lands after the base image ran
+# "cleanup.sh", so it repeats what that script does at the end of every build.
+RUN chmod -R go-w /scripts
+
+# Re-install the dev "mariadb" client config so a custom MARIADB_PORT in .env
+# is honored even when the base image was built before the port=<n> line was
+# removed (no-op once the next dated base image picks up the new .my.cnf).
+COPY --chown=root:root --chmod=644 ./.my.cnf /etc/my.cnf
 
 RUN sudo /scripts/install-yt-dlp.sh

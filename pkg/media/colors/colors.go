@@ -1,7 +1,7 @@
 /*
 Package colors provides types and functions for color classification.
 
-Copyright (c) 2018 - 2025 PhotoPrism UG. All rights reserved.
+Copyright (c) 2018 - 2026 PhotoPrism UG. All rights reserved.
 
 	This program is free software: you can redistribute it and/or modify
 	it under Version 3 of the GNU Affero General Public License (the "AGPL"):
@@ -14,7 +14,7 @@ Copyright (c) 2018 - 2025 PhotoPrism UG. All rights reserved.
 
 	The AGPL is supplemented by our Trademark and Brand Guidelines,
 	which describe how our Brand Assets may be used:
-	<https://www.photoprism.app/trademark>
+	<https://www.photoprism.app/trademark/>
 
 Feel free to send an email to hello@photoprism.app if you have questions,
 want to support our work, or just want to say hello.
@@ -37,10 +37,8 @@ type Color int16
 type Colors []Color
 
 const (
-	// Black color.
-	Black Color = iota
 	// Grey color.
-	Grey
+	Grey Color = iota + 1
 	// Brown color.
 	Brown
 	// Gold color.
@@ -69,6 +67,8 @@ const (
 	Red
 	// Pink color.
 	Pink
+	// Black color, which is 16 so that 0 never stands for a measured color.
+	Black
 )
 
 // All lists all defined colors in display order.
@@ -93,7 +93,6 @@ var All = Colors{
 
 // Names maps Color to their lowercase names.
 var Names = map[Color]string{
-	Black:   "black",   // 0
 	Grey:    "grey",    // 1
 	Brown:   "brown",   // 2
 	Gold:    "gold",    // 3
@@ -109,6 +108,7 @@ var Names = map[Color]string{
 	Orange:  "orange",  // D
 	Red:     "red",     // E
 	Pink:    "pink",    // F
+	Black:   "black",   // 16, hex 0
 }
 
 // Weights assigns relative importance to colors.
@@ -141,9 +141,9 @@ func (c Color) ID() int16 {
 	return int16(c)
 }
 
-// Hex returns the hex nibble for the color or "0" if out of range.
+// Hex returns the hex nibble for the color, which is "0" for Black or a value out of range.
 func (c Color) Hex() string {
-	if c < 0 || c > 15 {
+	if c == Black || c < 0 || c > 15 {
 		return "0"
 	}
 

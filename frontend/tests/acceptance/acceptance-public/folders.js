@@ -7,8 +7,18 @@ import ContextMenu from "../page-model/context-menu";
 import Photo from "../page-model/photo";
 import Page from "../page-model/page";
 import AlbumDialog from "../page-model/dialog-album";
+import { helperBeforeFixture, helperBeforeEach, helperAfterEach } from "../page-model/helpers";
 
-fixture`Test folders`.page`${testcafeconfig.url}`;
+fixture`Test folders`.page`${testcafeconfig.url}`
+.beforeEach(async t => {
+  await helperBeforeEach(t);
+})
+.afterEach(async t => {
+  await helperAfterEach(t);
+})
+.before(async ctx => {
+  await helperBeforeFixture(ctx);
+});
 
 const menu = new Menu();
 const album = new Album();
@@ -97,8 +107,8 @@ test.meta("testID", "folders-002").meta({ mode: "public" })("Common: Update fold
   await t
     .typeText(albumdialog.title, "Kanada", { replace: true })
     .click(albumdialog.category)
+    .click(albumdialog.category)
     .pressKey("ctrl+a delete")
-    .pressKey("enter")
     .click(albumdialog.description)
     .pressKey("ctrl+a delete")
     .pressKey("enter")
@@ -112,10 +122,15 @@ test.meta("testID", "folders-002").meta({ mode: "public" })("Common: Update fold
   await t
     .expect(page.cardTitle.nth(0).innerText)
     .contains("Kanada")
-    .expect(page.cardDescription.nth(0).innerText)
-    .notContains("We went to ski")
-    .expect(Selector("button.meta-location").nth(0).innerText)
-    .notContains("United States");
+    .expect(page.cardDescription.exists)
+    .notOk();
+
+  // Card-level checks aren't sufficient for these fields: the location button can render
+  // via the album's Country/State fallback, and the category never had a card affordance.
+  await album.openAlbumWithUid(AlbumUid);
+  await toolbar.triggerToolbarAction("edit");
+  await t.expect(albumdialog.location.value).eql("").expect(albumdialog.category.value).eql("");
+  await t.click(albumdialog.dialogCancel);
 });
 
 test.meta("testID", "folders-003").meta({ mode: "public" })("Common: Create, Edit, delete sharing link", async (t) => {
@@ -132,12 +147,13 @@ test.meta("testID", "folders-004").meta({ mode: "public" })(
     await album.openAlbumWithUid(HolidayAlbumUid);
     const InitialPhotoCountHoliday = await photo.getPhotoCount("all");
     await menu.openPage("folders");
-    const ThirdFolderUid = await album.getNthAlbumUid("all", 2);
-    await album.openAlbumWithUid(ThirdFolderUid);
+    await toolbar.search("Kanada");
+    const KanadaFolderUid = await album.getAlbumUidByTitle("Kanada");
+    await album.openAlbumWithUid(KanadaFolderUid);
     const PhotoCountInFolder = await photo.getPhotoCount("all");
     const FirstPhotoUid = await photo.getNthPhotoUid("image", 0);
     await menu.openPage("folders");
-    await album.selectAlbumFromUID(ThirdFolderUid);
+    await album.selectAlbumFromUID(KanadaFolderUid);
     await contextmenu.triggerContextMenuAction("clone", ["Holiday", "NotYetExistingAlbumForFolder"]);
     await menu.openPage("albums");
     const AlbumCountAfterCreation = await album.getAlbumCount("all");
@@ -167,7 +183,7 @@ test.meta("testID", "folders-004").meta({ mode: "public" })(
     await t.expect(PhotoCountHolidayAfterDelete).eql(InitialPhotoCountHoliday);
 
     await menu.openPage("folders");
-    await album.openAlbumWithUid(ThirdFolderUid);
+    await album.openAlbumWithUid(KanadaFolderUid);
     await photo.checkPhotoVisibility(FirstPhotoUid, true);
   }
 );

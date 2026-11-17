@@ -10,10 +10,16 @@ import (
 	"github.com/karrick/godirwalk"
 
 	"github.com/photoprism/photoprism/internal/config"
+	"github.com/photoprism/photoprism/internal/event"
+	"github.com/photoprism/photoprism/internal/ffmpeg"
 	"github.com/photoprism/photoprism/internal/mutex"
 	"github.com/photoprism/photoprism/pkg/clean"
 	"github.com/photoprism/photoprism/pkg/fs"
+	"github.com/photoprism/photoprism/pkg/fs/disk"
+	"github.com/photoprism/photoprism/pkg/i18n"
 	"github.com/photoprism/photoprism/pkg/list"
+	"github.com/photoprism/photoprism/pkg/log/status"
+	"github.com/photoprism/photoprism/pkg/media/video"
 )
 
 // Convert represents a file format conversion worker.
@@ -24,6 +30,7 @@ type Convert struct {
 	darktableExclude   fs.ExtList
 	rawTherapeeExclude fs.ExtList
 	imageMagickExclude fs.ExtList
+	ffmpegExclude      video.Formats
 }
 
 // NewConvert returns a new file format conversion worker.
@@ -34,9 +41,52 @@ func NewConvert(conf *config.Config) *Convert {
 		darktableExclude:   fs.NewExtList(conf.DarktableExclude()),
 		rawTherapeeExclude: fs.NewExtList(conf.RawTherapeeExclude()),
 		imageMagickExclude: fs.NewExtList(conf.ImageMagickExclude()),
+		ffmpegExclude:      ffmpeg.Exclude(),
 	}
 
 	return c
+}
+
+// FFmpegAllowed reports whether the media file's codec and container are both
+// absent from the FFmpegExclude list and the file may therefore be handed to
+// FFmpeg. The codec is taken from both the metadata and the built-in video
+// probe so either detector can match. A file with unknown codec and unknown
+// container passes through.
+func (w *Convert) FFmpegAllowed(f *MediaFile) bool {
+	if f == nil || len(w.ffmpegExclude) == 0 {
+		return true
+	}
+
+	return !w.ffmpegExclude.Contains(f.MetaData().Codec, f.VideoInfo().VideoCodec, f.FileType().String())
+}
+
+// Cancel stops the current conversion operation.
+func (w *Convert) Cancel() {
+	mutex.IndexWorker.Cancel()
+}
+
+// insufficientStorage reports whether the converter must abort due to quota or low free disk space.
+func (w *Convert) insufficientStorage() bool {
+	if !w.conf.InsufficientStorage() {
+		return false
+	}
+
+	log.Errorf("convert: aborting due to insufficient storage")
+	event.ErrorMsg(i18n.ErrInsufficientStorage)
+	return true
+}
+
+// cancelInsufficientStorage logs the insufficient-storage cause once and cancels the run so the
+// directory walk stops, instead of failing every remaining file when the disk filled mid-convert.
+// It is called from worker goroutines when a conversion leaf reports status.ErrInsufficientStorage.
+func (w *Convert) cancelInsufficientStorage() {
+	if mutex.IndexWorker.Canceled() {
+		return
+	}
+
+	log.Errorf("convert: aborting due to insufficient storage")
+	event.ErrorMsg(i18n.ErrInsufficientStorage)
+	w.Cancel()
 }
 
 // Start converts all files in the specified directory based on the current configuration.
@@ -48,11 +98,19 @@ func (w *Convert) Start(dir string, ext []string, force bool) (err error) {
 		}
 	}()
 
+	// Reset the cached disk usage so a freshly freed disk is detected immediately.
+	disk.FlushFree()
+
+	if w.insufficientStorage() {
+		return status.ErrInsufficientStorage
+	}
+
 	if err = mutex.IndexWorker.Start(); err != nil {
 		return err
 	}
 
 	defer mutex.IndexWorker.Stop()
+	defer flushUnportable("convert")
 
 	jobs := make(chan ConvertJob)
 
@@ -78,6 +136,13 @@ func (w *Convert) Start(dir string, ext []string, force bool) (err error) {
 		log.Infof("convert: ignoring %s", clean.Log(filepath.Base(fileName)))
 	}
 
+	// Names are checked below the originals folder, or below the folder the walk starts in if it is elsewhere.
+	nameRoot := filepath.Clean(dir)
+
+	if originals := filepath.Clean(w.conf.OriginalsPath()); fs.InDir(nameRoot, originals) {
+		nameRoot = originals
+	}
+
 	err = godirwalk.Walk(dir, &godirwalk.Options{
 		ErrorCallback: func(fileName string, err error) godirwalk.ErrorAction {
 			return godirwalk.SkipNode
@@ -90,7 +155,13 @@ func (w *Convert) Start(dir string, ext []string, force bool) (err error) {
 			}()
 
 			if mutex.IndexWorker.Canceled() {
-				return errors.New("canceled")
+				return status.ErrCanceled
+			}
+
+			// Stop the walk if storage drops below the threshold mid-convert.
+			if w.insufficientStorage() {
+				w.Cancel()
+				return status.ErrInsufficientStorage
 			}
 
 			isDir, _ := info.IsDirOrSymlinkToDir()
@@ -98,7 +169,24 @@ func (w *Convert) Start(dir string, ext []string, force bool) (err error) {
 
 			// Skip file?
 			if skip, result := fs.SkipWalk(fileName, isDir, isSymlink, done, ignore); skip {
+				if !isDir || errors.Is(result, filepath.SkipDir) {
+					return result
+				}
+
+				// A folder whose name is not portable is skipped with its contents. It is not recorded as walked, so a
+				// folder reached under another name is still converted under that name.
+				if p := skipUnportableDir(done, fileName, fs.RelName(fileName, nameRoot), isSymlink); p != "" {
+					warnUnportable("convert", nameRoot, p, "convert it")
+					return filepath.SkipDir
+				}
+
 				return result
+			}
+
+			// Files whose names are not portable are not passed to converters.
+			if !clean.PortableName(filepath.Base(fileName)) {
+				warnUnportable("convert", nameRoot, fs.RelName(fileName, nameRoot), "convert it")
+				return nil
 			}
 
 			// Process only files with specified extensions?
@@ -109,6 +197,10 @@ func (w *Convert) Start(dir string, ext []string, force bool) (err error) {
 			f, err := NewMediaFile(fileName)
 
 			if err != nil || f.Empty() || f.IsPreviewImage() || !f.IsMedia() {
+				return nil
+			} else if typeErr := f.CheckType(); typeErr != nil {
+				// Files whose content does not match their extension are not passed to converters.
+				log.Debugf("convert: skipped %s because it %s", clean.Log(f.RootRelName()), typeErr)
 				return nil
 			}
 
@@ -128,6 +220,13 @@ func (w *Convert) Start(dir string, ext []string, force bool) (err error) {
 
 	close(jobs)
 	wg.Wait()
+
+	logWalkResult("convert", err)
+
+	// A user-initiated Ctrl+C is expected; do not surface it as a CLI error.
+	if errors.Is(err, status.ErrCanceled) {
+		return nil
+	}
 
 	return err
 }

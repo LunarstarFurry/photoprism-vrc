@@ -20,6 +20,8 @@ func (s *Settings) ApplyScope(scope string) *Settings {
 	m.Features.Favorites = s.Features.Favorites && scopes.Contains(acl.ResourceFavorites.String())
 	m.Features.Folders = s.Features.Folders && scopes.Contains(acl.ResourceFolders.String())
 	m.Features.Labels = s.Features.Labels && scopes.Contains(acl.ResourceLabels.String())
+	m.Features.Cameras = s.Features.Cameras && scopes.Contains(acl.ResourceCameras.String())
+	m.Features.Lenses = s.Features.Lenses && scopes.Contains(acl.ResourceLenses.String())
 	m.Features.Calendar = s.Features.Calendar && scopes.Contains(acl.ResourceCalendar.String())
 	m.Features.Moments = s.Features.Moments && scopes.Contains(acl.ResourceMoments.String())
 	m.Features.People = s.Features.People && scopes.Contains(acl.ResourcePeople.String())
@@ -39,6 +41,7 @@ func (s *Settings) ApplyScope(scope string) *Settings {
 
 	// Browse, upload and download files.
 	m.Features.Upload = s.Features.Upload && scopes.Contains(acl.ResourcePhotos.String())
+	m.Features.Export = s.Features.Export && scopes.Contains(acl.ResourcePhotos.String())
 	m.Features.Download = s.Features.Download && scopes.Contains(acl.ResourcePhotos.String())
 
 	// Library.
@@ -49,6 +52,7 @@ func (s *Settings) ApplyScope(scope string) *Settings {
 
 	// Settings.
 	m.Features.Account = s.Features.Account && scopes.Contains(acl.ResourcePassword.String())
+	m.Features.AppPasswords = s.Features.AppPasswords && scopes.Contains(acl.ResourcePassword.String())
 	m.Features.Settings = s.Features.Settings && scopes.Contains(acl.ResourceSettings.String())
 	m.Features.Services = s.Features.Services && scopes.Contains(acl.ResourceServices.String())
 

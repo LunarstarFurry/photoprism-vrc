@@ -8,17 +8,20 @@ const RoleAliasNone = "none"
 
 // Roles that can be granted Permissions to use a Resource.
 const (
-	RoleDefault  Role = "default"
-	RoleAdmin    Role = "admin"
-	RoleUser     Role = "user"
-	RoleViewer   Role = "viewer"
-	RoleGuest    Role = "guest"
-	RoleVisitor  Role = "visitor"
-	RoleInstance Role = "instance"
-	RoleService  Role = "service"
-	RolePortal   Role = "portal"
-	RoleClient   Role = "client"
-	RoleNone     Role = ""
+	RoleDefault      Role = "default"
+	RoleClusterAdmin Role = "cluster_admin"
+	RoleAdmin        Role = "admin"
+	RoleManager      Role = "manager"
+	RoleUser         Role = "user"
+	RoleContributor  Role = "contributor"
+	RoleViewer       Role = "viewer"
+	RoleGuest        Role = "guest"
+	RoleVisitor      Role = "visitor"
+	RoleInstance     Role = "instance"
+	RoleService      Role = "service"
+	RolePortal       Role = "portal"
+	RoleClient       Role = "client"
+	RoleNone         Role = ""
 )
 
 // Permissions to use a Resource that can be granted to a Role.
@@ -62,6 +65,8 @@ const (
 	ResourcePeople    Resource = "people"
 	ResourcePlaces    Resource = "places"
 	ResourceLabels    Resource = "labels"
+	ResourceCameras   Resource = "cameras"
+	ResourceLenses    Resource = "lenses"
 	ResourceConfig    Resource = "config"
 	ResourceSettings  Resource = "settings"
 	ResourcePasscode  Resource = "passcode"
@@ -69,6 +74,7 @@ const (
 	ResourceServices  Resource = "services"
 	ResourceUsers     Resource = "users"
 	ResourceSessions  Resource = "sessions"
+	ResourceClients   Resource = "clients"
 	ResourceLogs      Resource = "logs"
 	ResourceApi       Resource = "api"
 	ResourceWebDAV    Resource = "webdav"
@@ -77,6 +83,7 @@ const (
 	ResourceVision    Resource = "vision"
 	ResourceCluster   Resource = "cluster"
 	ResourceFeedback  Resource = "feedback"
+	ResourceMCP       Resource = "mcp"
 	ResourceDefault   Resource = "default"
 )
 

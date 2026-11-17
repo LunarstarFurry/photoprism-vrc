@@ -2,6 +2,7 @@ package entity
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"sort"
 	"time"
@@ -11,11 +12,12 @@ import (
 	"github.com/photoprism/photoprism/internal/form"
 	"github.com/photoprism/photoprism/internal/service"
 	"github.com/photoprism/photoprism/internal/service/webdav"
+	"github.com/photoprism/photoprism/pkg/clean"
 	"github.com/photoprism/photoprism/pkg/fs"
 	"github.com/photoprism/photoprism/pkg/txt"
-	"github.com/photoprism/photoprism/pkg/txt/clip"
 )
 
+// Status values a service sync moves through.
 const (
 	SyncStatusRefresh  = "refresh"
 	SyncStatusDownload = "download"
@@ -23,6 +25,7 @@ const (
 	SyncStatusSynced   = "synced"
 )
 
+// Services represents a list of remote services.
 type Services []Service
 
 // Service represents a remote service, e.g. for uploading, downloading or syncing media files.
@@ -32,42 +35,48 @@ type Services []Service
 // - AccErrors holds the number of connection errors since the last reset.
 // - AccShare enables manual upload, see SharePath, ShareSize, and ShareExpires.
 // - AccSync enables automatic file synchronization, see SyncDownload and SyncUpload.
-// - RetryLimit specifies the number of retry attempts, a negative value disables the limit.
+// - RetryLimit specifies the number of retry attempts, 0 or a negative value disables the limit.
+// - SyncYaml controls transferring YAML sidecar files: -1 disabled, 0 default (enabled), 1 enabled.
 type Service struct {
-	ID            uint         `gorm:"primary_key" json:"ID"`
-	AccName       string       `gorm:"type:VARCHAR(160);" json:"AccName"`
-	AccOwner      string       `gorm:"type:VARCHAR(160);" json:"AccOwner"`
-	AccURL        string       `gorm:"type:VARCHAR(255);" json:"AccURL"`
-	AccType       string       `gorm:"type:VARBINARY(255);" json:"AccType"`
-	AccKey        string       `gorm:"type:VARBINARY(255);" json:"-"`
-	AccUser       string       `gorm:"type:VARBINARY(255);" json:"AccUser"`
-	AccPass       string       `gorm:"type:VARBINARY(255);" json:"-"`
-	AccTimeout    string       `gorm:"type:VARBINARY(16);" json:"AccTimeout"`
-	AccError      string       `gorm:"type:VARBINARY(512);" json:"AccError"`
-	AccErrors     int          `json:"AccErrors"`
+	ID            uint         `gorm:"primaryKey;size:32" json:"ID"`
+	AccName       string       `gorm:"size:160;" json:"AccName"`
+	AccOwner      string       `gorm:"size:160;" json:"AccOwner"`
+	AccURL        string       `gorm:"size:255;" json:"AccURL"`
+	AccType       string       `gorm:"type:bytes;size:255;" json:"AccType"`
+	AccKey        string       `gorm:"type:bytes;size:255;" json:"-"`
+	AccUser       string       `gorm:"type:bytes;size:255;" json:"AccUser"`
+	AccPass       string       `gorm:"type:bytes;size:255;" json:"-"`
+	AccTimeout    string       `gorm:"type:bytes;size:16;" json:"AccTimeout"`
+	AccError      string       `gorm:"type:bytes;size:512;" json:"AccError"`
+	AccErrors     int          `gorm:"size:32" json:"AccErrors"`
 	AccShare      bool         `json:"AccShare"`
 	AccSync       bool         `json:"AccSync"`
-	RetryLimit    int          `json:"RetryLimit"`
-	SharePath     string       `gorm:"type:VARBINARY(1024);" json:"SharePath"`
-	ShareSize     string       `gorm:"type:VARBINARY(16);" json:"ShareSize"`
-	ShareExpires  int          `json:"ShareExpires"`
-	SyncPath      string       `gorm:"type:VARBINARY(1024);" json:"SyncPath"`
-	SyncStatus    string       `gorm:"type:VARBINARY(16);" json:"SyncStatus"`
-	SyncInterval  int          `json:"SyncInterval"`
+	RetryLimit    int          `gorm:"size:32" json:"RetryLimit"`
+	SharePath     string       `gorm:"type:bytes;size:1024;" json:"SharePath"`
+	ShareSize     string       `gorm:"type:bytes;size:16;" json:"ShareSize"`
+	ShareExpires  int          `gorm:"size:32" json:"ShareExpires"`
+	SyncPath      string       `gorm:"type:bytes;size:1024;" json:"SyncPath"`
+	SyncStatus    string       `gorm:"type:bytes;size:16;" json:"SyncStatus"`
+	SyncInterval  int          `gorm:"size:32" json:"SyncInterval"`
 	SyncDate      sql.NullTime `deepcopier:"skip" json:"SyncDate"`
 	SyncUpload    bool         `json:"SyncUpload"`
 	SyncDownload  bool         `json:"SyncDownload"`
 	SyncFilenames bool         `json:"SyncFilenames"`
 	SyncRaw       bool         `json:"SyncRaw"`
+	SyncYaml      int          `gorm:"type:int;size:16;default:0;" json:"SyncYaml"`
 	CreatedAt     time.Time    `deepcopier:"skip" json:"CreatedAt"`
 	UpdatedAt     time.Time    `deepcopier:"skip" json:"UpdatedAt"`
-	DeletedAt     *time.Time   `deepcopier:"skip" sql:"index" json:"DeletedAt"`
+	DeletedAt     DeletedAt    `gorm:"index" deepcopier:"skip" json:"DeletedAt"`
 }
 
 // TableName returns the entity table name.
 func (Service) TableName() string {
 	return "services"
 }
+
+// ErrServiceFolderTooLong is returned when a sync or share folder leaves no room for the names of files below it,
+// or a folder name in the sync path is longer than local file systems accept.
+var ErrServiceFolderTooLong = errors.New("folder name is too long")
 
 // AddService adds a new service account to the database.
 func AddService(form form.Service) (model *Service, err error) {
@@ -84,28 +93,9 @@ func AddService(form form.Service) (model *Service, err error) {
 	return model, err
 }
 
-// LogErr updates the service error count and message.
-func (m *Service) LogErr(err error) error {
-	if err == nil {
-		return m.ResetErrors(true, true)
-	}
-
-	// Update error message and increase count.
-	m.AccError = clip.Chars(err.Error(), txt.ClipError)
-	m.AccErrors++
-
-	// Disable sharing when retry limit is reached.
-	if m.RetryLimit > 0 && m.AccErrors > m.RetryLimit {
-		m.AccShare = false
-	}
-
-	// Update fields in database.
-	return m.Updates(Service{AccError: m.AccError, AccErrors: m.AccErrors, AccShare: m.AccShare})
-}
-
-// ResetErrors resets the service and related file error messages and counters.
+// ResetErrors resets the service and related file error messages and counters, keeping per-file download error counts without a retry limit.
 func (m *Service) ResetErrors(share, sync bool) error {
-	if !share && !sync || Db().NewRecord(m) {
+	if !share && !sync || isNewRecord(Db(), m) {
 		return nil
 	}
 
@@ -114,13 +104,20 @@ func (m *Service) ResetErrors(share, sync bool) error {
 	}
 
 	if share {
-		if err := Db().Model(FileShare{}).Where("service_id = ?", m.ID).Updates(Values{"error": "", "errors": 0}).Error; err != nil {
+		if err := Db().Model(&FileShare{}).Where("service_id = ?", m.ID).Updates(Values{"error": "", "errors": 0}).Error; err != nil {
 			return err
 		}
 	}
 
 	if sync {
-		if err := Db().Model(FileSync{}).Where("service_id = ?", m.ID).Updates(Values{"error": "", "errors": 0}).Error; err != nil {
+		values := Values{"error": "", "errors": 0}
+
+		// Without a retry limit, the count only orders the download queue, so it is kept.
+		if m.RetryLimit <= 0 {
+			values = Values{"error": ""}
+		}
+
+		if err := Db().Model(&FileSync{}).Where("service_id = ?", m.ID).Updates(values).Error; err != nil {
 			return err
 		}
 	}
@@ -134,10 +131,22 @@ func (m *Service) ResetErrors(share, sync bool) error {
 // SaveForm saves the entity using form data and stores it in the database.
 func (m *Service) SaveForm(form form.Service) error {
 	db := Db()
+	stored, isNew := *m, isNewRecord(db, m)
 
 	// Copy model values from form.
 	if err := deepcopier.Copy(m).From(form); err != nil {
 		return err
+	}
+
+	// The account error is written by the sync worker, so a request may only clear it.
+	if form.AccError != "" {
+		m.AccError = stored.AccError
+	}
+
+	// Remove control characters, except from the password, whose bytes are the credential.
+	for _, s := range []*string{&m.AccName, &m.AccOwner, &m.AccURL, &m.AccType, &m.AccKey, &m.AccUser,
+		&m.AccTimeout, &m.SharePath, &m.ShareSize, &m.SyncPath} {
+		*s = clean.StripControl(*s)
 	}
 
 	// TODO: Support for other remote services in addition to WebDAV.
@@ -161,20 +170,41 @@ func (m *Service) SaveForm(form form.Service) error {
 		m.SyncPath = "/"
 	}
 
+	// Remote names of files below the folders must fit their records, and downloaded file and folder names local
+	// file systems. A stored folder is checked only when a save changes it or turns on what it is used for.
+	storedShare, storedSync := serviceFolder(stored.SharePath), serviceFolder(stored.SyncPath)
+	shareChanged := isNew || m.SharePath != storedShare || m.AccShare && !stored.AccShare
+	syncChanged := isNew || m.SyncPath != storedSync || m.AccSync && !stored.AccSync
+	downloadChanged := syncChanged || m.SyncDownload && !stored.SyncDownload
+
+	if shareChanged && len(m.SharePath) >= RemoteNameMaxLen || syncChanged && len(m.SyncPath) >= RemoteNameMaxLen ||
+		downloadChanged && m.SyncDownload && fs.NameTooLong(m.SyncPath) {
+		return ErrServiceFolderTooLong
+	}
+
 	// Number of remote request retry attempts.
-	if m.RetryLimit < -1 {
+	if m.RetryLimit < -1 || m.RetryLimit == 0 {
 		m.RetryLimit = -1 // Disabled.
 	} else if m.RetryLimit > 999 {
 		m.RetryLimit = 999 // 999 retries max.
 	}
 
-	// Refresh after performing changes.
-	if m.AccSync && m.SyncStatus == SyncStatusSynced {
+	// Automatic sync interval in seconds, where 0 means never.
+	if m.SyncInterval < 0 {
+		m.SyncInterval = 0
+	} else if m.SyncInterval > 31536000 {
+		m.SyncInterval = 31536000 // One year max.
+	}
+
+	// Refresh after performing changes, and in any stage when the folder or a direction changed, or raw and video
+	// files were turned on, also while sync is off.
+	if m.AccSync && m.SyncStatus == SyncStatusSynced || !isNew && (m.SyncPath != storedSync ||
+		m.SyncDownload != stored.SyncDownload || m.SyncUpload != stored.SyncUpload || m.SyncRaw && !stored.SyncRaw) {
 		m.SyncStatus = SyncStatusRefresh
 	}
 
 	// Reset error counters if account already exists.
-	if !Db().NewRecord(m) {
+	if !isNew {
 		Log("service", "reset errors", m.ResetErrors(m.AccShare, m.AccSync))
 	}
 
@@ -182,8 +212,29 @@ func (m *Service) SaveForm(form form.Service) error {
 	m.AccName = txt.Clip(m.AccName, txt.ClipName)
 	m.AccOwner = txt.Clip(m.AccOwner, txt.ClipName)
 
+	// Limit the YAML sidecar option to disabled, default, and enabled.
+	if m.SyncYaml < -1 {
+		m.SyncYaml = -1
+	} else if m.SyncYaml > 1 {
+		m.SyncYaml = 1
+	}
+
 	// Save changes.
 	return db.Save(m).Error
+}
+
+// serviceFolder returns a stored share or sync folder as a save normalizes it, so an unchanged folder compares equal.
+func serviceFolder(s string) string {
+	if s = clean.StripControl(s); s == "" {
+		return "/"
+	}
+
+	return s
+}
+
+// SyncYamlEnabled reports whether YAML sidecar files are transferred, which is the default.
+func (m *Service) SyncYamlEnabled() bool {
+	return m.SyncYaml >= 0
 }
 
 // Delete deletes the entity from the database.
@@ -204,11 +255,6 @@ func (m *Service) Directories(servicesCIDR string) (result fs.FileInfos, err err
 
 	// Sort directory list.
 	sort.Sort(result)
-
-	// Update error count and message.
-	if logErr := m.LogErr(err); logErr != nil {
-		log.Warnf("service: %s", logErr)
-	}
 
 	return result, err
 }

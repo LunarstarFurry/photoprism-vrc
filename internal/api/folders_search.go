@@ -47,6 +47,11 @@ func SearchFoldersOriginals(router *gin.RouterGroup) {
 //	@Tags		Folders
 //	@Produce	json
 //	@Success	200		{object}	api.FoldersResponse
+//	@Header		200		{number}	X-Folders	"The actual number of folders returned.  Do not use for determining if all the results have been returned."
+//	@Header		200		{number}	X-Files		"The actual number of files returned.  Use this for comparing to X-Limit to determine if all the results have been returned."
+//	@Header		200		{number}	X-Count		"The actual number of files and folders returned.  Do not use for determining if all the results have been returned."
+//	@Header		200		{number}	X-Limit		"The limit of the number of files to be returned"
+//	@Header		200		{number}	X-Offset	"The offset that was used"
 //	@Failure	401,403	{object}	i18n.Response
 //	@Router		/api/v1/folders/import [get]
 func SearchFoldersImport(router *gin.RouterGroup) {
@@ -57,7 +62,10 @@ func SearchFoldersImport(router *gin.RouterGroup) {
 // SearchFolders is a reusable request handler for directory listings (GET /api/v1/folders/*).
 func SearchFolders(router *gin.RouterGroup, urlPath, rootName, rootPath string) {
 	handler := func(c *gin.Context) {
-		s := Auth(c, acl.ResourceFiles, acl.AccessLibrary)
+		// A directory listing names every file in the library, private pictures included, so it
+		// asks for whole-library access rather than library reach alone - no less than the File
+		// Browser, Index and Import pages require before they render it.
+		s := AuthAccess(c, acl.ResourceFiles, acl.ActionSearch, acl.Permissions{acl.AccessAll})
 
 		// Abort if permission is not granted.
 		if s.Abort(c) {
@@ -74,13 +82,11 @@ func SearchFolders(router *gin.RouterGroup, urlPath, rootName, rootPath string) 
 			return
 		}
 
-		user := s.GetUser()
-		aclRole := user.AclRole()
-
-		// Exclude private content?
+		// Exclude private content? Evaluated on the session's effective role: for a client session,
+		// the intersection of the client and user roles.
 		if !get.Config().Settings().Features.Private {
 			frm.Public = false
-		} else if acl.Rules.Deny(acl.ResourcePhotos, aclRole, acl.AccessPrivate) {
+		} else if s.Denies(acl.ResourcePhotos, acl.AccessPrivate) {
 			frm.Public = true
 		}
 
@@ -97,7 +103,7 @@ func SearchFolders(router *gin.RouterGroup, urlPath, rootName, rootPath string) 
 			if cacheData, ok := cache.Get(cacheKey); ok {
 				cached := cacheData.(FoldersResponse)
 
-				log.Tracef("api: cache hit for %s [%s]", cacheKey, time.Since(start))
+				log.Tracef("api: cache hit for %s [%s]", clean.Log(cacheKey), time.Since(start))
 
 				c.JSON(http.StatusOK, cached)
 				return
@@ -105,7 +111,7 @@ func SearchFolders(router *gin.RouterGroup, urlPath, rootName, rootPath string) 
 		}
 
 		if folders, err := query.FoldersByPath(rootName, rootPath, path, recursive); err != nil {
-			log.Errorf("folder: %s", err)
+			log.Errorf("folder: %s", clean.Error(err))
 			c.JSON(http.StatusOK, resp)
 			return
 		} else {
@@ -114,7 +120,7 @@ func SearchFolders(router *gin.RouterGroup, urlPath, rootName, rootPath string) 
 
 		if listFiles {
 			if files, err := query.FilesByPath(frm.Count, frm.Offset, rootName, path, frm.Public); err != nil {
-				log.Errorf("folder: %s", err)
+				log.Errorf("folder: %s", clean.Error(err))
 			} else {
 				resp.Files = files
 			}
@@ -122,7 +128,7 @@ func SearchFolders(router *gin.RouterGroup, urlPath, rootName, rootPath string) 
 
 		if !uncached {
 			cache.SetDefault(cacheKey, resp)
-			log.Debugf("cached %s [%s]", cacheKey, time.Since(start))
+			log.Debugf("cached %s [%s]", clean.Log(cacheKey), time.Since(start))
 		}
 
 		AddFileCountHeaders(c, len(resp.Files), len(resp.Folders))

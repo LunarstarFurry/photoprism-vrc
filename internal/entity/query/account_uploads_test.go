@@ -4,22 +4,139 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/photoprism/photoprism/internal/entity"
+	"github.com/photoprism/photoprism/pkg/fs"
+	"github.com/photoprism/photoprism/pkg/media"
 )
 
 func TestAccountUploads(t *testing.T) {
-	a := entity.Service{ID: 1, SyncRaw: false}
+	t.Run("FailedUploads", func(t *testing.T) {
+		// A failed upload is not selected again in the same sync cycle, and is once refresh marks it for retry.
+		const serviceID = 4731
+		t.Cleanup(func() { _ = entity.UnscopedDb().Delete(&entity.FileSync{}, "service_id = ?", serviceID).Error })
 
+		a := entity.Service{ID: serviceID, SyncRaw: true}
+		all, err := AccountUploads(a, 1000)
+		require.NoError(t, err)
+		require.NotEmpty(t, all)
+		file := all[0]
+
+		require.NoError(t, entity.FailFileSyncUpload(serviceID, file.ID, "failed"))
+		results, err := AccountUploads(a, 1000)
+		require.NoError(t, err)
+		assert.Len(t, results, len(all)-1)
+		for _, f := range results {
+			assert.NotEqual(t, file.ID, f.ID)
+		}
+
+		require.NoError(t, entity.RetryFileSyncUploads(serviceID, -1))
+		results, err = AccountUploads(a, 1000)
+		require.NoError(t, err)
+		assert.Len(t, results, len(all))
+
+		// A record whose status is NULL, from an earlier release, keeps the file from being selected.
+		require.NoError(t, entity.Db().Exec("UPDATE files_sync SET status = NULL WHERE service_id = ?", serviceID).Error)
+		results, err = AccountUploads(a, 1000)
+		require.NoError(t, err)
+		assert.Len(t, results, len(all)-1)
+		require.NoError(t, entity.Db().Exec("UPDATE files_sync SET status = ? WHERE service_id = ?", entity.FileSyncRetry, serviceID).Error)
+
+		// An uploaded file is never selected again, also while a retry placeholder remains.
+		uploaded := entity.NewFileSync(serviceID, "/"+file.FileName)
+		uploaded.FileID, uploaded.Status = file.ID, entity.FileSyncUploaded
+		require.NoError(t, uploaded.Create())
+		results, err = AccountUploads(a, 1000)
+		require.NoError(t, err)
+		assert.Len(t, results, len(all)-1)
+	})
 	t.Run("FindUploads", func(t *testing.T) {
-		results, err := AccountUploads(a, 10)
+		results, err := AccountUploads(entity.Service{ID: 1, SyncRaw: false}, 10)
 
 		if err != nil {
 			t.Fatal(err)
 		}
 
-		// t.Logf("uploads: %+v", results)
-
 		assert.GreaterOrEqual(t, len(results), 1)
+	})
+	t.Run("SyncRawOffExcludesRawAndVideo", func(t *testing.T) {
+		results, err := AccountUploads(entity.Service{ID: 1, SyncRaw: false}, 1000)
+
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, f := range results {
+			// The file type is asserted too because "dng" is distinct from "raw", so a
+			// check against "raw" alone would let Adobe Digital Negatives through.
+			assert.NotContains(t, media.FileTypeStrings(media.Raw), f.FileType, "raw file must be held back: %s", f.FileName)
+			assert.NotEqual(t, media.Raw.String(), f.MediaType, "raw file must be held back: %s", f.FileName)
+			assert.NotEqual(t, media.Video.String(), f.MediaType, "video file must be held back: %s", f.FileName)
+		}
+	})
+	t.Run("SyncRawOffExcludesDng", func(t *testing.T) {
+		// A .dng has file type "dng" and media type "raw", so it must be held back like a .cr2.
+		results, err := AccountUploads(entity.Service{ID: 1, SyncRaw: false}, 1000)
+
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, f := range results {
+			assert.NotEqual(t, string(fs.ImageDng), f.FileType, "dng file must be held back: %s", f.FileName)
+		}
+	})
+	t.Run("SyncRawOnIncludesDng", func(t *testing.T) {
+		// With the option on, the dng must be eligible again rather than always excluded.
+		results, err := AccountUploads(entity.Service{ID: 1, SyncRaw: true}, 1000)
+
+		if err != nil {
+			t.Fatal(err)
+		}
+		var found int
+		for _, f := range results {
+			if f.FileType == string(fs.ImageDng) {
+				found++
+			}
+		}
+		assert.GreaterOrEqual(t, found, 1, "dng must be uploaded when SyncRaw is on")
+	})
+	t.Run("SyncRawOnIncludesVideo", func(t *testing.T) {
+		// With the option on, at least one video file must be eligible for upload,
+		// proving the flag toggles video inclusion rather than always excluding it.
+		results, err := AccountUploads(entity.Service{ID: 1, SyncRaw: true}, 1000)
+
+		if err != nil {
+			t.Fatal(err)
+		}
+		var videos int
+		for _, f := range results {
+			if f.MediaType == media.Video.String() {
+				videos++
+			}
+		}
+		assert.GreaterOrEqual(t, videos, 1, "videos must be uploaded when SyncRaw is on")
+	})
+	t.Run("SyncYaml", func(t *testing.T) {
+		yaml := &entity.File{PhotoID: 1000000, PhotoUID: "ps6sg6be2lvl0yh7", FileRoot: entity.RootOriginals, FileName: "2790/07/27900704_070228_D6D51B6C.yml",
+			FileType: fs.SidecarYaml.String(), MediaType: media.Sidecar.String(), FileSidecar: true, FileHash: "a2ac5c6a1bfc1c1ccc9bbb6a4e9d1e1f6c9f7a01"}
+		if err := yaml.Create(); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { entity.UnscopedDb().Unscoped().Delete(yaml) })
+		found := func(t *testing.T, syncYaml int) bool {
+			results, err := AccountUploads(entity.Service{ID: 1, SyncRaw: true, SyncYaml: syncYaml}, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, f := range results {
+				if f.ID == yaml.ID {
+					return true
+				}
+			}
+			return false
+		}
+		assert.True(t, found(t, 0), "yaml file must be uploaded by default")
+		assert.True(t, found(t, 1), "yaml file must be uploaded when SyncYaml is on")
+		assert.False(t, found(t, -1), "yaml file must be held back when SyncYaml is off")
 	})
 }

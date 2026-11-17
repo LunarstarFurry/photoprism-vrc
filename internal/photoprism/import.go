@@ -4,11 +4,15 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
 	"sort"
+	"strings"
 	"sync"
+	"time"
+	"unicode/utf8"
 
 	"github.com/karrick/godirwalk"
 
@@ -18,6 +22,9 @@ import (
 	"github.com/photoprism/photoprism/internal/mutex"
 	"github.com/photoprism/photoprism/pkg/clean"
 	"github.com/photoprism/photoprism/pkg/fs"
+	"github.com/photoprism/photoprism/pkg/fs/disk"
+	"github.com/photoprism/photoprism/pkg/i18n"
+	"github.com/photoprism/photoprism/pkg/log/status"
 	"github.com/photoprism/photoprism/pkg/media"
 )
 
@@ -51,39 +58,128 @@ func (imp *Import) thumbPath() string {
 	return imp.conf.ThumbCachePath()
 }
 
+// insufficientStorage reports whether the import must abort due to quota or low free disk space.
+func (imp *Import) insufficientStorage() bool {
+	if !imp.conf.InsufficientStorage() {
+		return false
+	}
+
+	log.Errorf("import: aborting due to insufficient storage")
+	event.ErrorMsg(i18n.ErrInsufficientStorage)
+	return true
+}
+
+// ErrImportBusy is returned by Import.Run when the import has to wait for another task to complete.
+var ErrImportBusy = errors.New("waiting for another task to complete")
+
+// ErrImportDest is returned by Import.Run when the destination folder or the Import.Dest pattern gives names that
+// are not supported.
+var ErrImportDest = errors.New("destination is not supported")
+
+// ErrImportPath is returned by Import.Run when the import folder is the originals folder or a folder inside it.
+var ErrImportPath = errors.New("import and originals folders must not overlap")
+
+// importError is an error with its own message that matches a sentinel error such as ErrImportDest.
+type importError struct {
+	msg string
+	err error
+}
+
+// Error returns the error message.
+func (e importError) Error() string {
+	return e.msg
+}
+
+// Unwrap returns the sentinel error.
+func (e importError) Unwrap() error {
+	return e.err
+}
+
+// errDestinationExists is returned by destinationFilename when a file with the same content already has the name.
+var errDestinationExists = errors.New("already exists")
+
+// ErrImportIncomplete is returned by Import.Run when files could not be moved or copied to the originals.
+var ErrImportIncomplete = errors.New("some files could not be imported")
+
 // Start imports media files from a directory and converts/indexes them as needed.
 func (imp *Import) Start(opt ImportOptions) fs.Done {
+	done, _ := imp.Run(opt)
+	return done
+}
+
+// Run imports media files like Start and returns an error if the import did not run, refused files
+// early, or could not move or copy some of them, such as ErrImportBusy, status.ErrInsufficientStorage,
+// status.ErrCanceled, or ErrImportIncomplete (status.ErrInsufficientStorage if the storage was full).
+func (imp *Import) Run(opt ImportOptions) (done fs.Done, result error) {
 	defer func() {
 		if r := recover(); r != nil {
 			log.Errorf("import: %s (panic)\nstack: %s", r, debug.Stack())
+			result = fmt.Errorf("import: %s", r)
 		}
 	}()
 
 	var directories []string
-	done := make(fs.Done)
+	done = make(fs.Done)
 
 	if imp.conf == nil {
 		log.Errorf("import: config is not set")
-		return done
+		return done, errors.New("config is not set")
 	}
+
+	// Importing indexes what it moves, so it reaches the same marker writes indexing does.
+	if held := imp.conf.FacesLocked(); held != "" {
+		log.Infof("import: waiting for the %s to complete", held)
+		return done, ErrImportBusy
+	}
+
+	// The same applies once it has completed: its target is recorded rather than loaded here.
+	imp.conf.CheckFaceModelSuperseded()
 
 	importPath := opt.Path
 
+	// Folder records name the configured import namespace, so a walk of that path or of a
+	// subfolder is recorded relative to it. A walk rooted elsewhere, such as a per-session upload
+	// directory, has no place in that namespace and records none. Names are checked below the
+	// configured import folder, or below the folder the walk starts in if it is elsewhere.
+	folderBase, nameRoot := "", filepath.Clean(importPath)
+
+	if base := imp.conf.ImportPath(); base != "" {
+		if _, ok := relBelow(base, importPath, false); ok {
+			folderBase, nameRoot = base, base
+		}
+	}
+
 	// Check if the import folder exists.
 	if !fs.PathExists(importPath) {
-		event.Error(fmt.Sprintf("import: directory %s not found", importPath))
-		return done
+		event.Error(fmt.Sprintf("import: directory %s not found", clean.Log(displayFolder(importPath, folderBase))))
+		return done, errors.New("directory not found")
+	}
+
+	if err := imp.Check(opt); err != nil {
+		return done, err
+	}
+
+	// Reset the cached disk usage so a freshly freed disk is detected immediately.
+	disk.FlushFree()
+
+	if imp.insufficientStorage() {
+		return done, status.ErrInsufficientStorage
 	}
 
 	// Make sure to run import only once, unless otherwise requested.
 	if !opt.NonBlocking {
 		if err := mutex.IndexWorker.Start(); err != nil {
 			event.Warn(fmt.Sprintf("import: %s", err.Error()))
-			return done
+			return done, ErrImportBusy
 		}
 
 		defer mutex.IndexWorker.Stop()
 	}
+
+	// The import workers check related files at their destination in originals as the index does.
+	defer flushUnportable("index")
+	defer flushUnportable("import")
+	defer flushHidden("import")
 
 	jobs := make(chan ImportJob)
 
@@ -113,8 +209,11 @@ func (imp *Import) Start(opt ImportOptions) fs.Done {
 	}
 
 	ignore.Log = func(fileName string) {
-		log.Infof(`import: ignored "%s"`, fs.RelName(fileName, importPath))
+		log.Infof(`import: ignored "%s"`, clean.Log(fs.RelName(fileName, importPath)))
 	}
+
+	var stopped error
+	var failures ImportFailures
 
 	err := godirwalk.Walk(importPath, &godirwalk.Options{
 		ErrorCallback: func(fileName string, err error) godirwalk.ErrorAction {
@@ -127,8 +226,21 @@ func (imp *Import) Start(opt ImportOptions) fs.Done {
 				}
 			}()
 
+			// The error callback skips nodes on any error, so the first reason a node is refused is kept here.
 			if mutex.IndexWorker.Canceled() {
-				return errors.New("canceled")
+				if stopped == nil {
+					stopped = status.ErrCanceled
+				}
+				return status.ErrCanceled
+			}
+
+			// Refuse further nodes if storage drops below the threshold mid-import.
+			if imp.insufficientStorage() {
+				imp.Cancel()
+				if stopped == nil {
+					stopped = status.ErrInsufficientStorage
+				}
+				return status.ErrInsufficientStorage
 			}
 
 			isDir, _ := info.IsDirOrSymlinkToDir()
@@ -139,17 +251,38 @@ func (imp *Import) Start(opt ImportOptions) fs.Done {
 					return result
 				}
 
+				// A folder whose name is not portable stays in the import folder with its contents. It is not recorded as
+				// walked, so a folder reached under another name is still imported under that name.
+				if p := skipUnportableDir(done, fileName, fs.RelName(fileName, nameRoot), isSymlink); p != "" {
+					warnUnportable("import", nameRoot, p, "import it")
+					return filepath.SkipDir
+				}
+
+				// A linked folder that leads to originals is not walked, since its files are already in the library.
+				if isSymlink && imp.linksToOriginals(fileName) {
+					log.Warnf("import: skipped %s because it links to the originals folder", clean.Log(fs.RelName(fileName, nameRoot)))
+					return filepath.SkipDir
+				}
+
 				if fileName != importPath {
 					directories = append(directories, fileName)
 				}
 
-				folder := entity.NewFolder(entity.RootImport, fs.RelName(fileName, imp.conf.ImportPath()), fs.ModTime(fileName))
+				if folderBase != "" {
+					folder := entity.NewFolder(entity.RootImport, fs.RelName(fileName, folderBase), fs.ModTime(fileName))
 
-				if err := folder.Create(); err == nil {
-					log.Infof("import: added folder /%s", folder.Path)
+					if _, created, err := entity.FirstOrCreateFolder(&folder); err == nil && created && folder.Path != "" {
+						log.Infof("import: added folder /%s", clean.Log(folder.Path))
+					}
 				}
 
 				return result
+			}
+
+			// A file whose name is not portable stays in the import folder.
+			if !clean.PortableName(filepath.Base(fileName)) {
+				warnUnportable("import", nameRoot, fs.RelName(fileName, nameRoot), "import it")
+				return nil
 			}
 
 			done[fileName] = fs.Found
@@ -176,7 +309,9 @@ func (imp *Import) Start(opt ImportOptions) fs.Done {
 
 			// Report files that have a missing or invalid filename extension,
 			// see https://github.com/photoprism/photoprism/issues/3518.
-			if typeErr := mf.CheckType(); typeErr != nil {
+			typeErr := mf.CheckType()
+
+			if typeErr != nil {
 				if !opt.RemoveInvalidFiles {
 					log.Warnf("import: %s %s and will not be indexed", clean.Log(mf.RootRelName()), typeErr)
 				} else if removeErr := mf.Remove(); removeErr != nil {
@@ -188,9 +323,12 @@ func (imp *Import) Start(opt ImportOptions) fs.Done {
 				}
 			}
 
-			// Create JSON sidecar file, if needed.
-			if err = mf.CreateExifToolJson(imp.convert); err != nil {
-				log.Warnf("import: %s", clean.Error(err))
+			// Create JSON sidecar file, if needed. A file that failed the type check is still moved
+			// with its stack, but not read by ExifTool.
+			if typeErr == nil {
+				if err = mf.CreateExifToolJson(imp.convert); err != nil {
+					log.Warnf("import: %s", clean.Error(err))
+				}
 			}
 
 			// Find related files to import.
@@ -198,6 +336,15 @@ func (imp *Import) Start(opt ImportOptions) fs.Done {
 
 			if err != nil {
 				event.Error(fmt.Sprintf("import: %s", err))
+				return nil
+			}
+
+			// Related files whose names are not portable stay in the import folder.
+			related = PortableRelated(related, mf, func(f *MediaFile) {
+				warnUnportable("import", nameRoot, fs.RelName(f.FileName(), nameRoot), "import it")
+			})
+
+			if related.Main == nil {
 				return nil
 			}
 
@@ -223,6 +370,7 @@ func (imp *Import) Start(opt ImportOptions) fs.Done {
 				IndexOpt:  indexOpt,
 				ImportOpt: opt,
 				Imp:       imp,
+				Failures:  &failures,
 			}
 
 			return nil
@@ -230,6 +378,12 @@ func (imp *Import) Start(opt ImportOptions) fs.Done {
 		Unsorted:            false,
 		FollowSymbolicLinks: true,
 	})
+
+	walkErr := err
+
+	if walkErr == nil {
+		walkErr = stopped
+	}
 
 	close(jobs)
 	wg.Wait()
@@ -243,7 +397,7 @@ func (imp *Import) Start(opt ImportOptions) fs.Done {
 		for _, directory := range directories {
 			if fs.DirIsEmpty(directory) {
 				if removeErr := os.Remove(directory); removeErr != nil {
-					log.Errorf("import: failed to delete empty folder %s (%s)", clean.Log(fs.RelName(directory, importPath)), removeErr)
+					log.Errorf("import: failed to delete empty folder %s (%s)", clean.Log(fs.RelName(directory, importPath)), clean.Error(removeErr))
 				} else {
 					log.Infof("import: deleted empty folder %s", clean.Log(fs.RelName(directory, importPath)))
 				}
@@ -251,8 +405,9 @@ func (imp *Import) Start(opt ImportOptions) fs.Done {
 		}
 	}
 
-	if opt.RemoveDotFiles {
-		// Remove hidden .files if option is enabled.
+	if opt.RemoveHiddenFiles {
+		// Hidden files are removed, except files of a known type whose names start with another character than a
+		// dot, such as pictures and their sidecars, which are kept and reported if they are media files.
 		for _, file := range ignore.Hidden() {
 			if !fs.FileExists(file) {
 				continue
@@ -260,15 +415,17 @@ func (imp *Import) Start(opt ImportOptions) fs.Done {
 
 			if base := filepath.Base(file); base == ".keep" || base == ".gitkeep" {
 				log.Debugf("import: %s file is preserved", clean.Log(fs.RelName(file, importPath)))
+			} else if !strings.HasPrefix(base, ".") && fs.FileType(file) != fs.TypeUnknown {
+				if media.MainFile(file) {
+					warnHidden("import", nameRoot, fs.RelName(file, nameRoot), "import it")
+				}
 			} else if err = os.Remove(file); err != nil {
-				log.Errorf("import: failed removing %s (%s)", clean.Log(fs.RelName(file, importPath)), err.Error())
+				log.Errorf("import: failed removing %s (%s)", clean.Log(fs.RelName(file, importPath)), clean.Error(err))
 			}
 		}
 	}
 
-	if err != nil {
-		log.Error(err.Error())
-	}
+	logWalkResult("import", walkErr)
 
 	if filesImported > 0 {
 		// Run face recognition if enabled.
@@ -287,7 +444,12 @@ func (imp *Import) Start(opt ImportOptions) fs.Done {
 	config.FlushUsageCache()
 	runtime.GC()
 
-	return done
+	// A stop reason takes precedence, since it applies to the files that were not attempted too.
+	if walkErr == nil {
+		walkErr = failures.Err()
+	}
+
+	return done, walkErr
 }
 
 // Cancel stops the current import operation.
@@ -295,9 +457,379 @@ func (imp *Import) Cancel() {
 	mutex.IndexWorker.Cancel()
 }
 
+// storedMatch describes how a file relates to the indexed files that hold the same content.
+type storedMatch int
+
+const (
+	storedNone      storedMatch = iota // no indexed file holds the content
+	storedCopy                         // another file holds the content
+	storedSame                         // the file itself, e.g. a link or another name for it
+	storedMaybeSame                    // possibly the file itself, e.g. through another mount, a case variant, or unreadable
+)
+
+// storedResult is how a file relates to the indexed files with the same content, with the file infos of a copy
+// and of the file itself.
+type storedResult struct {
+	file    *entity.File
+	match   storedMatch
+	info    os.FileInfo
+	source  os.FileInfo
+	rows    entity.Files // all files with the hash, in any root, if queried
+	queried bool
+}
+
+// unchanged reports whether the stored copy is still the file with the size and modification time it had when
+// it was compared, so that it still holds the content without being read again.
+func (r storedResult) unchanged() bool {
+	return r.file != nil && r.info != nil && sameFileInfo(FileName(r.file.FileRoot, r.file.FileName), r.info)
+}
+
+// sourceUnchanged reports whether the file at name is still the source file with the size and modification time it
+// had when it was compared.
+func (r storedResult) sourceUnchanged(name string) bool {
+	return r.source != nil && sameFileInfo(name, r.source)
+}
+
+// sameFileInfo reports whether name is still the file described by info, with the same size and modification time.
+func sameFileInfo(name string, info os.FileInfo) bool {
+	now, err := os.Stat(name)
+
+	return err == nil && sameInfo(now, info)
+}
+
+// sameInfo reports whether two file infos describe the same file with the same size and modification time.
+func sameInfo(a, b os.FileInfo) bool {
+	return os.SameFile(a, b) && a.Size() == b.Size() && a.ModTime().Equal(b.ModTime())
+}
+
+// storedFileOf reports how a file relates to the indexed files that hold the same content, and returns the row it
+// is, may be, or is a copy of, if known, with the file infos of a copy and of the source and all rows with the hash.
+// The answer comes from the files rather than the rows, since a caller removes its source on the strength of it.
+func storedFileOf(mediaFile *MediaFile) storedResult {
+	if mediaFile == nil {
+		return storedResult{}
+	}
+
+	fileHash := mediaFile.Hash()
+
+	if fileHash == "" {
+		return storedResult{}
+	}
+
+	files, err := filesByHash(fileHash)
+
+	if err != nil {
+		return storedResult{}
+	}
+
+	result := storedMatchOf(mediaFile, fileHash, files)
+	result.rows, result.queried = files, true
+
+	return result
+}
+
+// storedFileAt reports how a file relates to the file with the given root and name, e.g. one that a destination
+// name holds with the same content, without looking up all files with its hash. A file that is not indexed, e.g.
+// not yet, is compared as if it were.
+func storedFileAt(mediaFile *MediaFile, fileRoot, fileName string) storedResult {
+	if mediaFile == nil || mediaFile.Hash() == "" || fileName == "" {
+		return storedResult{}
+	}
+
+	files, err := filesByName(fileRoot, fileName)
+
+	if err != nil {
+		return storedResult{}
+	} else if len(files) == 0 {
+		files = entity.Files{{FileRoot: fileRoot, FileName: fileName}}
+	}
+
+	return storedMatchOf(mediaFile, mediaFile.Hash(), files)
+}
+
+// storedMatchOf reports how a file with the given hash relates to the given files, e.g. the indexed files with that
+// hash, see storedFileOf.
+func storedMatchOf(mediaFile *MediaFile, fileHash string, files entity.Files) storedResult {
+	src, srcErr := os.Stat(mediaFile.FileName())
+
+	if srcErr != nil {
+		return storedResult{}
+	}
+
+	// A source that changed since it was first read may no longer have the hash, so it is not a copy of anything,
+	// but it may still be a stored file itself.
+	first := mediaFile.FileInfo()
+	changed := first == nil || !sameInfo(first, src)
+
+	// The file itself is found without reading any file, so every row is checked for it first. A stored file that
+	// cannot be checked, other than an absent one, may be the file itself.
+	dests := make([]os.FileInfo, len(files))
+	unknown := false
+
+	srcName, _ := filepath.Abs(mediaFile.FileName())
+
+	for i := range files {
+		storedName := FileName(files[i].FileRoot, files[i].FileName)
+
+		// A case variant of the stored name may be the stored file itself, as the case mode of the folder may be
+		// unknown or reported wrongly, e.g. on a network share.
+		if storedName != srcName && strings.EqualFold(storedName, srcName) {
+			return storedResult{file: &files[i], match: storedMaybeSame}
+		}
+
+		dest, destErr := os.Stat(storedName)
+
+		switch {
+		case errors.Is(destErr, os.ErrNotExist):
+			continue
+		case destErr != nil:
+			unknown = true
+			continue
+		case os.SameFile(src, dest):
+			return storedResult{file: &files[i], match: storedSame}
+		}
+
+		dests[i] = dest
+	}
+
+	// A file that may be the file itself wins over a copy, also over one found before it. Only originals are
+	// copies, since other files, e.g. sidecars, may be replaced or removed with their photo.
+	var found storedResult
+
+	for i := range files {
+		switch {
+		case dests[i] == nil:
+		case maybeSameFile(src, dests[i]) && changed:
+			// The hash of a source that changed since it was read cannot confirm what the stored file holds.
+			return storedResult{file: &files[i], match: storedMaybeSame}
+		case maybeSameFile(src, dests[i]):
+			switch storedHash(FileName(files[i].FileRoot, files[i].FileName)) {
+			case fileHash:
+				return storedResult{file: &files[i], match: storedMaybeSame}
+			case "":
+				unknown = true
+			}
+		case found.file == nil && !changed && files[i].FileRoot == entity.RootOriginals:
+			if storedHash(FileName(files[i].FileRoot, files[i].FileName)) == fileHash {
+				found = storedResult{file: &files[i], match: storedCopy, info: dests[i], source: first}
+			}
+		}
+	}
+
+	if unknown {
+		return storedResult{match: storedMaybeSame}
+	}
+
+	return found
+}
+
+// filesByHash returns the indexed files with a hash, and can be replaced in tests.
+var filesByHash = entity.FilesByHash
+
+// filesByName returns the indexed files with a root and name, and can be replaced in tests.
+var filesByName = entity.FilesByName
+
+// firstFileByHash returns the first indexed file with a hash, and can be replaced in tests.
+var firstFileByHash = entity.FirstFileByHash
+
+// storedHash returns the hash of an indexed file, which reads the whole file.
+var storedHash = fs.Hash
+
+// maybeSameFile reports whether two files may be the same file on another mount, and can be replaced in tests.
+var maybeSameFile = fs.MaybeSameFile
+
+// Check returns ErrImportPath or ErrImportDest if the import folder or the destination of the options is not
+// supported, see CheckPath and CheckDest. The details name folders, so only the system log has them.
+func (imp *Import) Check(opt ImportOptions) error {
+	// Files are moved or copied to originals, so the import folder must not overlap with it.
+	if err := imp.CheckPath(opt.Path); err != nil {
+		event.SystemError([]string{"import", "%s"}, err.Error())
+		event.Error("import: import and originals folders must not overlap")
+		return ErrImportPath
+	}
+
+	// Imported files must get names that the index accepts.
+	if err := imp.CheckDest(opt.DestFolder); err != nil {
+		event.SystemError([]string{"import", "%s"}, err.Error())
+		event.Error("import: destination is not supported")
+		return ErrImportDest
+	}
+
+	return nil
+}
+
+// CheckPath returns ErrImportPath if the import folder is the originals folder, a folder inside it, or a folder
+// that contains it, compared after resolving symbolic links and regardless of letter case, since the case mode of a
+// network share can be unknown. Walks skip hidden folders and the storage folder, so a folder below one, such as
+// originals/.photoprism/storage or originals/storage, may contain or be in the other.
+func (imp *Import) CheckPath(importPath string) error {
+	originals := imp.originalsPath()
+
+	if importPath == "" || originals == "" {
+		return nil
+	}
+
+	src, dest := resolvedPath(importPath), resolvedPath(originals)
+
+	// walked reports whether folder is dir or a folder below it that a walk of dir reaches.
+	walked := func(dir, folder string) bool {
+		rel, ok := relBelow(dir, folder, true)
+		return ok && !walkSkips(dir, rel)
+	}
+
+	if walked(dest, src) || walked(src, dest) {
+		return fmt.Errorf("%w (import %s, originals %s)", ErrImportPath, clean.Log(importPath), clean.Log(originals))
+	}
+
+	return nil
+}
+
+// linksToOriginals reports whether a linked folder leads to the originals folder, a folder in it, or a folder
+// that contains it.
+func (imp *Import) linksToOriginals(dir string) bool {
+	return overlappingPaths(dir, imp.originalsPath())
+}
+
+// overlappingPaths reports whether two folders are the same, or one is inside the other, after resolving symbolic
+// links and regardless of letter case. An empty path overlaps with nothing.
+func overlappingPaths(a, b string) bool {
+	if a == "" || b == "" {
+		return false
+	}
+
+	a, b = resolvedPath(a), resolvedPath(b)
+
+	if _, ok := relBelow(b, a, true); ok {
+		return true
+	}
+
+	_, ok := relBelow(a, b, true)
+
+	return ok
+}
+
+// relBelow returns the path of folder relative to dir, and whether folder is dir itself or a folder below it. If
+// fold is set, letters are compared case-insensitively, as on a case-insensitive file system, and the relative path
+// keeps the letter case of folder.
+func relBelow(dir, folder string, fold bool) (string, bool) {
+	if fold {
+		dirNames, folderNames := pathNames(dir), pathNames(folder)
+
+		if len(folderNames) < len(dirNames) {
+			return "", false
+		}
+
+		for i := range dirNames {
+			if !sameNameFold(dirNames[i], folderNames[i]) {
+				return "", false
+			}
+		}
+
+		if len(folderNames) == len(dirNames) {
+			return ".", true
+		}
+
+		return filepath.Join(folderNames[len(dirNames):]...), true
+	}
+
+	rel, err := filepath.Rel(dir, folder)
+
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", false
+	}
+
+	return rel, true
+}
+
+// pathNames returns the names in a cleaned path, starting with an empty name if it is absolute.
+func pathNames(p string) []string {
+	return strings.Split(strings.TrimSuffix(filepath.Clean(p), string(filepath.Separator)), string(filepath.Separator))
+}
+
+// sameNameFold reports whether two names are equal regardless of letter case. Names that are not valid UTF-8 are
+// compared byte by byte, ignoring the case of ASCII letters only.
+func sameNameFold(a, b string) bool {
+	if utf8.ValidString(a) && utf8.ValidString(b) {
+		return strings.EqualFold(a, b)
+	} else if len(a) != len(b) {
+		return false
+	}
+
+	for i := 0; i < len(a); i++ {
+		if lowerASCII(a[i]) != lowerASCII(b[i]) {
+			return false
+		}
+	}
+
+	return true
+}
+
+// lowerASCII returns c in lowercase if it is an ASCII letter.
+func lowerASCII(c byte) byte {
+	if c >= 'A' && c <= 'Z' {
+		return c + ('a' - 'A')
+	}
+
+	return c
+}
+
+// walkSkips reports whether a walk of dir skips the folder at a relative path, because a folder on the way has a
+// hidden name or contains the storage marker file, as fs.SkipWalk checks.
+func walkSkips(dir, rel string) bool {
+	if rel == "." {
+		return false
+	}
+
+	for _, name := range strings.Split(rel, string(filepath.Separator)) {
+		if dir = filepath.Join(dir, name); fs.FileNameHidden(name) || fs.FileExists(filepath.Join(dir, fs.PPStorageFilename)) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// resolvedPath returns the absolute path of a folder with symbolic links resolved, or cleaned if it cannot be resolved.
+func resolvedPath(dir string) string {
+	if abs, err := filepath.Abs(dir); err == nil {
+		dir = abs
+	}
+
+	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+		return resolved
+	}
+
+	return filepath.Clean(dir)
+}
+
+// CheckDest returns ErrImportDest if the destination folder or the Import.Dest pattern gives names that are not
+// portable or hidden, which the index would skip.
+func (imp *Import) CheckDest(folder string) error {
+	// Checked as cleaned, since the destination is joined below the originals folder; ".." is refused as hidden.
+	if rel := path.Clean(clean.SlashPath(folder)); rel != "." && clean.UnsupportedPath(rel) != "" {
+		return importError{fmt.Sprintf("destination folder %s is not supported", clean.Log(folder)), ErrImportDest}
+	}
+
+	// Literal characters of the pattern appear in every name, so one sample time shows them.
+	pathPattern, namePattern := imp.conf.Settings().Import.GetDestName()
+	sample := time.Date(2026, time.October, 15, 13, 4, 5, 0, time.UTC)
+
+	if clean.UnsupportedPath(path.Join(sample.Format(pathPattern), fs.CanonicalName(sample, "", namePattern)+".jpg")) != "" {
+		return importError{fmt.Sprintf("destination pattern %s is not supported", clean.Log(imp.conf.Settings().Import.GetDest())), ErrImportDest}
+	}
+
+	return nil
+}
+
 // DestinationFilename returns the destination filename of a MediaFile to be imported.
 // Format: 2006/01/20060102_150405_CHECKSUM.ext
 func (imp *Import) DestinationFilename(mainFile *MediaFile, mediaFile *MediaFile, folder string) (string, error) {
+	return imp.destinationFilename(mainFile, mediaFile, folder, storedResult{})
+}
+
+// destinationFilename works like DestinationFilename, but takes the files with the hash of mediaFile in any root
+// from stored if they were queried, so that a new file costs one lookup.
+func (imp *Import) destinationFilename(mainFile, mediaFile *MediaFile, folder string, stored storedResult) (string, error) {
 	// Get the import destination path and file name patterns.
 	pathPattern, namePattern := imp.conf.Settings().Import.GetDestName()
 
@@ -306,24 +838,50 @@ func (imp *Import) DestinationFilename(mainFile *MediaFile, mediaFile *MediaFile
 	dateCreated := mainFile.DateCreated()
 
 	if !mediaFile.IsSidecar() {
-		if f, err := entity.FirstFileByHash(mediaFile.Hash()); err == nil {
+		var f entity.File
+		found := false
+
+		// A file that cannot be read matches no row, not even one recorded without a hash.
+		switch hash := mediaFile.Hash(); {
+		case hash == "":
+		case !stored.queried:
+			var err error
+			f, err = firstFileByHash(hash)
+			found = err == nil
+		case len(stored.rows) > 0:
+			f, found = stored.rows[0], true
+		}
+
+		if found {
 			existingFilename := FileName(f.FileRoot, f.FileName)
+
+			// The recorded name has three states, not two: the file is there and this is a duplicate,
+			// the name is free and the file can be restored to it, or an entry holds the name without
+			// the file being there, which is neither and takes the search below, as does a recorded
+			// name that is not portable.
 			if fs.FileExists(existingFilename) {
-				return existingFilename, fmt.Errorf("%s is identical to %s (sha1 %s)", clean.Log(filepath.Base(mediaFile.FileName())), clean.Log(f.FileName), mediaFile.Hash())
-			} else {
+				// The index records this hash under that name, which is not the same as the file
+				// still holding it, so the message says what was matched rather than claiming the
+				// two files are identical. storedFileOf is what establishes that, for the caller
+				// that removes its source.
+				return existingFilename, fmt.Errorf("%s is already indexed as %s", clean.Log(filepath.Base(mediaFile.FileName())), clean.Log(f.FileName))
+			} else if !fs.IsSymlink(existingFilename) && clean.UnportablePath(f.FileName) == "" {
 				return existingFilename, nil
 			}
 		}
 	}
 
-	// Find and return the next available file name if the default name is already being used by another file.
+	// Find and return the next available file name if the default name is already being used by another
+	// file. A symbolic link holds the name whether or not it resolves, so the search steps over one.
 	i := 0
 	pathName := filepath.Join(imp.originalsPath(), folder, dateCreated.Format(pathPattern))
 	filePath := filepath.Join(pathName, fileName+fileExtension)
 
-	for fs.FileExists(filePath) {
-		if mediaFile.Hash() == fs.Hash(filePath) {
-			return filePath, fmt.Errorf("%s already exists", clean.Log(fs.RelName(filePath, imp.originalsPath())))
+	for fs.FileExists(filePath) || fs.IsSymlink(filePath) {
+		// Both sides hash to the empty string when they cannot be read, so a hash is compared only
+		// once there is one.
+		if h := mediaFile.Hash(); h != "" && h == fs.Hash(filePath) {
+			return filePath, fmt.Errorf("%s %w", clean.Log(fs.RelName(filePath, imp.originalsPath())), errDestinationExists)
 		}
 
 		i++

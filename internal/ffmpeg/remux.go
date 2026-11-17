@@ -13,10 +13,12 @@ import (
 	"github.com/photoprism/photoprism/internal/ffmpeg/encode"
 	"github.com/photoprism/photoprism/pkg/clean"
 	"github.com/photoprism/photoprism/pkg/fs"
+	"github.com/photoprism/photoprism/pkg/media/video"
+	"github.com/photoprism/photoprism/pkg/proc"
 )
 
 // RemuxFile changes the file format to the specified container as needed.
-func RemuxFile(videoFilePath, destFilePath string, opt encode.Options) error {
+func RemuxFile(videoFilePath, destFilePath string, opt encode.Options) (err error) {
 	// Return if destination file already exists and force option is not set.
 	if !opt.Force && fs.FileExistsNotEmpty(destFilePath) {
 		return nil
@@ -32,6 +34,14 @@ func RemuxFile(videoFilePath, destFilePath string, opt encode.Options) error {
 		opt.Container = fs.ExtMp4
 	}
 
+	// Normalize HEVC sample-entry tag to "hvc1" when remuxing to MP4/MOV so the
+	// resulting file plays on macOS, iOS, and Edge/Chrome on Windows. Without
+	// this override, "-codec copy" preserves a source "hev1" tag, which those
+	// players reject. Skip when the caller already set VideoTag explicitly.
+	if opt.VideoTag == "" && (opt.Container == fs.VideoMp4 || opt.Container == fs.VideoMov) && video.IsHEVCFile(videoFilePath) {
+		opt.VideoTag = "hvc1"
+	}
+
 	videoBaseName := filepath.Base(videoFilePath)
 
 	if destFilePath == "" {
@@ -39,10 +49,28 @@ func RemuxFile(videoFilePath, destFilePath string, opt encode.Options) error {
 	}
 
 	destFileBase := filepath.Base(destFilePath)
-	destPathName := filepath.Dir(destFilePath)
 
-	tempBaseName := "." + fs.StripKnownExt(clean.FileName(videoBaseName)) + opt.Container.DefaultExt()
-	tempFilePath := filepath.Join(destPathName, tempBaseName)
+	// Write through a sibling reserved by this call, so each conversion owns its working file.
+	tempFilePath, err := fs.CreateStageFile(destFilePath)
+
+	if err != nil {
+		return fmt.Errorf("failed to create temp file for %s (%s)", clean.Log(destFileBase), err)
+	}
+
+	tempBaseName := filepath.Base(tempFilePath)
+	published := false
+
+	// Remove only the file this call created, on every way out including a panic. A converter that
+	// removed its own output leaves nothing to clean up, so that is not a failure.
+	defer func() {
+		if published {
+			return
+		}
+
+		if removeErr := os.Remove(tempFilePath); removeErr != nil && !os.IsNotExist(removeErr) {
+			err = errors.Join(err, fmt.Errorf("failed to remove temp file %s (%s)", clean.Log(tempBaseName), clean.Error(removeErr)))
+		}
+	}()
 
 	cmd, err := RemuxCmd(videoFilePath, tempFilePath, opt)
 
@@ -50,17 +78,6 @@ func RemuxFile(videoFilePath, destFilePath string, opt encode.Options) error {
 	if err != nil {
 		log.Error(err)
 		return err
-	}
-
-	// Check if target file already exists.
-	if fs.FileExists(tempFilePath) {
-		if !opt.Force {
-			return fmt.Errorf("temp file %s already exists", clean.Log(tempBaseName))
-		} else if err = os.Remove(tempFilePath); err != nil {
-			return fmt.Errorf("%s (remove temp file)", err)
-		}
-
-		log.Infof("ffmpeg: replacing temp file %s", clean.Log(tempBaseName))
 	}
 
 	// Fetch command output.
@@ -75,13 +92,14 @@ func RemuxFile(videoFilePath, destFilePath string, opt encode.Options) error {
 	log.Infof("ffmpeg: changing container format of %s to %s", clean.Log(videoBaseName), opt.Container)
 
 	// Log exact command for debugging in trace mode.
-	log.Trace(cmd.String())
+	log.Trace(clean.Cmd(cmd))
 
-	// Transcode source media file to AVC.
+	// Run the remux command within its budget, terminating the whole process tree if it is
+	// exceeded, so a source the muxer cannot finish does not hold the caller indefinitely.
 	start := time.Now()
-	if err = cmd.Run(); err != nil {
-		if stderr.String() != "" {
-			err = errors.New(stderr.String())
+	if err = proc.Run(cmd, opt.Timeout); err != nil {
+		if s := stderr.String(); s != "" {
+			err = fmt.Errorf("%w: %s", err, s)
 		}
 
 		// Log ffmpeg output for debugging.
@@ -89,35 +107,23 @@ func RemuxFile(videoFilePath, destFilePath string, opt encode.Options) error {
 			log.Debug(err)
 		}
 
-		// Log filename and transcoding time.
-		log.Warnf("ffmpeg: failed to convert %s [%s]", clean.Log(videoBaseName), time.Since(start))
-
-		// Remove broken video file.
-		if !fs.FileExists(tempFilePath) {
-			// Do nothing.
-		} else if err = os.Remove(tempFilePath); err != nil {
-			return fmt.Errorf("failed to remove temp file %s (%s)", clean.Log(tempBaseName), err)
-		}
+		// Log filename and remux time.
+		log.Warnf("ffmpeg: failed to remux %s [%s]", clean.Log(videoBaseName), time.Since(start))
 
 		return err
 	}
 
-	// Abort if destination file is missing or empty.
+	// Abort if the staged file is missing or empty.
 	if !fs.FileExistsNotEmpty(tempFilePath) {
-		_ = os.Remove(tempFilePath)
 		return fmt.Errorf("failed change container format of %s [%s]", clean.Log(videoBaseName), time.Since(start))
 	}
 
-	if !fs.FileExists(destFilePath) {
-		// Do nothing.
-	} else if err = os.Remove(destFilePath); err != nil {
-		_ = os.Remove(tempFilePath)
-		return fmt.Errorf("failed to remove %s (%s)", clean.Log(destFileBase), err)
-	}
-
+	// Publish by renaming, which replaces a regular destination in a single step.
 	if err = os.Rename(tempFilePath, destFilePath); err != nil {
 		return fmt.Errorf("failed to rename %s to %s (%s)", clean.Log(tempBaseName), clean.Log(destFileBase), err)
 	}
+
+	published = true
 
 	// Log filename and remux time.
 	if videoBaseName != destFileBase {
@@ -154,7 +160,11 @@ func RemuxCmd(srcName, destName string, opt encode.Options) (cmd *exec.Cmd, err 
 		"-strict", "-2",
 		// The "-avoid_negative_ts" flag is commonly used for remuxing, but may cause desync (please report any issues):
 		"-avoid_negative_ts", "make_zero",
-		"-i", srcName,
+	}
+
+	flags = append(flags, encode.InputArgs(srcName)...)
+
+	flags = append(flags,
 		"-map", opt.MapVideo,
 		"-map", opt.MapAudio,
 		// The "-dn" flag removes data streams, such as subtitles, timecode tracks, and camera motion data:
@@ -162,6 +172,13 @@ func RemuxCmd(srcName, destName string, opt encode.Options) (cmd *exec.Cmd, err 
 		"-ignore_unknown",
 		"-codec", "copy",
 		"-f", opt.Container.String(),
+	)
+
+	// Override the output video sample-entry tag when requested (e.g. "hvc1" for
+	// HEVC in MP4/MOV containers). Applied before the container-specific block
+	// so it covers both MP4 and MOV outputs.
+	if opt.VideoTag != "" {
+		flags = append(flags, "-tag:v", opt.VideoTag)
 	}
 
 	// Append format specific "ffmpeg" command flags.

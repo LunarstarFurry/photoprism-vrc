@@ -54,9 +54,9 @@ export default {
         return "";
       }
 
-      return this.$gettextInterpolate(this.$gettext("Merge %{a} with %{b}?"), {
-        a: this.subj1.originalValue("Name"),
-        b: this.subj2.Name,
+      return this.$gettext("Merge %{a} with %{b}?", {
+        a: this.$util.isolate(this.subj1.originalValue("Name")),
+        b: this.$util.isolate(this.subj2.Name),
       });
     },
   },

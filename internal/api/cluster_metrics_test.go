@@ -5,10 +5,23 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/tidwall/gjson"
+
+	"github.com/photoprism/photoprism/internal/entity"
 )
 
+// TestClusterMetrics_EmptyCounts checks the response for an empty node registry.
 func TestClusterMetrics_EmptyCounts(t *testing.T) {
+	var nodes []entity.Client
+	require.NoError(t, entity.Db().Where("node_uuid <> ''").Find(&nodes).Error)
+	t.Cleanup(func() {
+		for _, node := range nodes {
+			require.NoError(t, entity.Db().Model(&entity.Client{}).Where("client_uid = ?", node.ClientUID).UpdateColumn("node_uuid", node.NodeUUID).Error)
+		}
+	})
+	require.NoError(t, entity.Db().Model(&entity.Client{}).Where("node_uuid <> ''").UpdateColumn("node_uuid", "").Error)
+
 	app, router, conf := NewApiTest()
 	enablePortalAPIs(t, conf)
 	conf.Options().ClusterCIDR = "192.0.2.0/24"

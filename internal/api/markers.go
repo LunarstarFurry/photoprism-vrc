@@ -13,6 +13,7 @@ import (
 	"github.com/photoprism/photoprism/internal/auth/acl"
 	"github.com/photoprism/photoprism/internal/entity"
 	"github.com/photoprism/photoprism/internal/entity/query"
+	"github.com/photoprism/photoprism/internal/entity/search"
 	"github.com/photoprism/photoprism/internal/event"
 	"github.com/photoprism/photoprism/internal/form"
 	"github.com/photoprism/photoprism/internal/mutex"
@@ -35,41 +36,86 @@ func wakeupIntervalTooHigh(c *gin.Context) bool {
 	}
 }
 
-// findFileMarker returns a file and marker entity matching the api request.
-func findFileMarker(c *gin.Context) (file *entity.File, marker *entity.Marker, err error) {
+// faceMigrationRunning refuses a request with 409 while a face migration holds the lock, and
+// reports whether it did.
+//
+// A migration replaces every face cluster in one transaction, so these rows are the migration's
+// for its duration. The refusal is the response rather than a log line: an authenticated caller
+// can repeat it, and the operator running the migration already has its own output.
+func faceMigrationRunning(c *gin.Context) bool {
+	if get.Config().FacesLocked() == "" {
+		return false
+	}
+
+	log.Debugf("faces: refused %s while a migration is running", clean.Log(c.FullPath()))
+	AbortMigrationInProgress(c)
+
+	return true
+}
+
+// findFileMarker returns the session, file and marker entity matching the api request.
+func findFileMarker(c *gin.Context) (s *entity.Session, file *entity.File, marker *entity.Marker, err error) {
 	// Check authorization.
-	s := Auth(c, acl.ResourceFiles, acl.ActionUpdate)
+	s = Auth(c, acl.ResourceFiles, acl.ActionUpdate)
 
 	if s.Abort(c) {
-		return nil, nil, errors.New("unauthorized")
+		return s, nil, nil, errors.New("unauthorized")
 	}
 
 	// Check feature flags.
 	conf := get.Config()
 	if !conf.Settings().Features.People {
 		AbortFeatureDisabled(c)
-		return nil, nil, errors.New("feature disabled")
+		return s, nil, nil, errors.New("feature disabled")
 	}
 
 	// Find marker.
 	if uid := c.Param("marker_uid"); uid == "" {
 		AbortBadRequest(c)
-		return nil, nil, errors.New("bad request")
+		return s, nil, nil, errors.New("bad request")
 	} else if marker, err = query.MarkerByUID(uid); err != nil {
 		AbortEntityNotFound(c)
-		return nil, nil, fmt.Errorf("uid %s %s", uid, err)
+		return s, nil, nil, fmt.Errorf("uid %s %s", uid, err)
 	} else if marker.FileUID == "" {
 		AbortEntityNotFound(c)
-		return nil, marker, errors.New("marker file missing")
+		return s, nil, marker, errors.New("marker file missing")
 	}
 
 	// Find file.
 	if file, err = query.FileByUID(marker.FileUID); err != nil {
 		AbortEntityNotFound(c)
-		return file, marker, fmt.Errorf("file %s %s", marker.FileUID, err)
+		return s, file, marker, fmt.Errorf("file %s %s", marker.FileUID, err)
 	}
 
-	return file, marker, nil
+	// Limit the edit to the file's photo within the session's shared scope. PhotoSessionSeesEverything
+	// is query-free and client and user role aware, so full-access sessions skip the check.
+	if !search.PhotoSessionSeesEverything(s) {
+		if visible, vErr := search.PhotoVisibleToSession(file.PhotoUID, s); vErr != nil || !visible {
+			AbortForbidden(c)
+			return s, file, marker, errors.New("forbidden")
+		}
+	}
+
+	// A marker naming a person the session may not see is reported as not found, so a write cannot
+	// answer with an identity a read withholds. Not found rather than forbidden, matching how the
+	// subject handlers answer for the same person.
+	if marker.WithheldFromSession(s) {
+		AbortEntityNotFound(c)
+		return s, file, marker, errors.New("marker withheld")
+	}
+
+	return s, file, marker, nil
+}
+
+// markerSubjectSrcAccepted reports whether a marker request may name a face with the subject source it
+// carries. A request without a name, or with the stored name and source, chooses no new name or source,
+// and the automatic source applies no name.
+func markerSubjectSrcAccepted(name, subjSrc string, frm form.Marker) bool {
+	if n := clean.Name(frm.MarkerName); n == "" || n == clean.Name(name) && frm.SubjSrc == subjSrc || frm.SubjSrc == entity.SrcAuto {
+		return true
+	}
+
+	return entity.SrcSubjects[frm.SubjSrc] >= entity.SrcPriority[entity.SrcBatch]
 }
 
 // CreateMarker adds a new file area marker to assign faces or other subjects.
@@ -78,7 +124,8 @@ func findFileMarker(c *gin.Context) (file *entity.File, marker *entity.Marker, e
 //
 //	@Tags		Files
 //	@Produce	json
-//	@Success	201	{object}	entity.Marker
+//	@Success	201						{object}	entity.Marker
+//	@Failure	400,401,403,409,413,500	{object}	i18n.Response
 //	@Router		/api/v1/markers [post]
 func CreateMarker(router *gin.RouterGroup) {
 	router.POST("/markers", func(c *gin.Context) {
@@ -86,6 +133,11 @@ func CreateMarker(router *gin.RouterGroup) {
 
 		// Abort if permission is not granted.
 		if s.Abort(c) {
+			return
+		}
+
+		// Abort if a face migration is replacing the clusters this would write to.
+		if faceMigrationRunning(c) {
 			return
 		}
 
@@ -114,10 +166,19 @@ func CreateMarker(router *gin.RouterGroup) {
 		// Find related file.
 		file, err := query.FileByUID(frm.FileUID)
 
-		// Abort if not found.
-		if err != nil {
+		// Require a file with a hash for the marker thumbnail.
+		if err != nil || file.FileHash == "" {
 			AbortEntityNotFound(c)
 			return
+		}
+
+		// Limit the edit to the file's photo within the session's shared scope. PhotoSessionSeesEverything
+		// is query-free and client and user role aware, so full-access sessions skip the check.
+		if !search.PhotoSessionSeesEverything(s) {
+			if visible, vErr := search.PhotoVisibleToSession(file.PhotoUID, s); vErr != nil || !visible {
+				AbortForbidden(c)
+				return
+			}
 		}
 
 		// Validate form values.
@@ -128,13 +189,25 @@ func CreateMarker(router *gin.RouterGroup) {
 			log.Errorf("faces: width and height must be greater than zero")
 			AbortBadRequest(c)
 			return
+		} else if !markerSubjectSrcAccepted("", entity.SrcAuto, frm) {
+			log.Debugf("faces: cannot name marker with subject source %s", clean.Log(entity.SrcString(frm.SubjSrc)))
+			AbortBadRequest(c)
+			return
+		}
+
+		if frm.MarkerSrc != entity.SrcManual || frm.MarkerType != entity.MarkerFace {
+			AbortBadRequest(c)
+			return
 		}
 
 		// Create new face marker area.
 		area := crop.NewArea("face", frm.X, frm.Y, frm.W, frm.H)
 
 		// Create new marker entity.
-		marker := entity.NewMarker(*file, area, "", frm.MarkerSrc, frm.MarkerType, int(frm.W*float32(file.FileWidth)), 100)
+		marker := entity.NewMarker(*file, area, "", entity.SrcManual, entity.MarkerFace, entity.MarkerSize(area, *file), 100)
+
+		// Apply the requested review state.
+		marker.MarkerReview = frm.MarkerReview
 
 		// Update marker from form values.
 		if err = marker.Create(); err != nil {
@@ -168,7 +241,7 @@ func CreateMarker(router *gin.RouterGroup) {
 			log.Errorf("faces: %s (update photo title)", err)
 		} else {
 			// Publish updated photo entity.
-			PublishPhotoEvent(StatusUpdated, file.PhotoUID, c)
+			PublishPhotoEvent(StatusUpdated, file.PhotoUID)
 		}
 
 		// Display success message.
@@ -176,7 +249,7 @@ func CreateMarker(router *gin.RouterGroup) {
 
 		// Return new marker with location header.
 		header.SetLocation(c, c.FullPath(), marker.MarkerUID)
-		c.JSON(http.StatusCreated, marker)
+		c.JSON(http.StatusCreated, marker.RedactForSession(s))
 	})
 }
 
@@ -187,10 +260,10 @@ func CreateMarker(router *gin.RouterGroup) {
 //	@Tags		Files
 //	@Accept		json
 //	@Produce	json
-//	@Param		marker_uid			path		string		true	"marker uid"
-//	@Param		marker				body		form.Marker	true	"marker properties"
-//	@Success	200					{object}	entity.Marker
-//	@Failure	400,401,403,404,429	{object}	i18n.Response
+//	@Param		marker_uid					path		string		true	"marker uid"
+//	@Param		marker						body		form.Marker	true	"marker properties"
+//	@Success	200							{object}	entity.Marker
+//	@Failure	400,401,403,404,409,413,429	{object}	i18n.Response
 //	@Router		/api/v1/markers/{marker_uid} [put]
 func UpdateMarker(router *gin.RouterGroup) {
 	router.PUT("/markers/:marker_uid", func(c *gin.Context) {
@@ -207,10 +280,15 @@ func UpdateMarker(router *gin.RouterGroup) {
 
 		defer mutex.UpdatePeople.Stop()
 
-		file, marker, err := findFileMarker(c)
+		s, file, marker, err := findFileMarker(c)
 
 		if err != nil {
 			log.Debugf("faces: %s (find marker to update)", err)
+			return
+		}
+
+		// Abort if a face migration is replacing the clusters this would write to.
+		if faceMigrationRunning(c) {
 			return
 		}
 
@@ -241,6 +319,10 @@ func UpdateMarker(router *gin.RouterGroup) {
 			log.Errorf("faces: %s (validate updated marker)", err)
 			AbortBadRequest(c, err)
 			return
+		} else if !markerSubjectSrcAccepted(marker.MarkerName, marker.SubjSrc, frm) {
+			log.Debugf("faces: cannot name marker with subject source %s", clean.Log(entity.SrcString(frm.SubjSrc)))
+			AbortBadRequest(c)
+			return
 		}
 
 		// Update marker from form values.
@@ -249,7 +331,7 @@ func UpdateMarker(router *gin.RouterGroup) {
 			AbortSaveFailed(c)
 			return
 		} else if changed {
-			if marker.FaceID != "" && marker.SubjUID != "" && marker.SubjSrc == entity.SrcManual {
+			if marker.FaceID != "" && marker.SubjUID != "" && entity.SrcSubjects[marker.SubjSrc] >= entity.SrcPriority[entity.SrcBatch] {
 				if res, err := get.Faces().OptimizeFor(marker.SubjUID); err != nil {
 					log.Errorf("faces: %s (optimize)", err)
 				} else if res.Merged > 0 {
@@ -275,14 +357,15 @@ func UpdateMarker(router *gin.RouterGroup) {
 			log.Errorf("faces: %s (update photo title)", err)
 		} else {
 			// Notify clients.
-			PublishPhotoEvent(StatusUpdated, file.PhotoUID, c)
+			PublishPhotoEvent(StatusUpdated, file.PhotoUID)
 		}
 
 		// Display success message.
 		event.SuccessMsg(i18n.MsgChangesSaved)
 
-		// Return updated marker.
-		c.JSON(http.StatusOK, marker)
+		// Return updated marker, shaped like a read: the name submitted here may resolve to a
+		// person the session may not see.
+		c.JSON(http.StatusOK, marker.RedactForSession(s))
 	})
 }
 
@@ -292,9 +375,9 @@ func UpdateMarker(router *gin.RouterGroup) {
 //	@Id			ClearMarkerSubject
 //	@Tags		Files
 //	@Produce	json
-//	@Param		marker_uid			path		string	true	"marker uid"
-//	@Success	200					{object}	entity.Marker
-//	@Failure	400,401,403,404,429	{object}	i18n.Response
+//	@Param		marker_uid				path		string	true	"marker uid"
+//	@Success	200						{object}	entity.Marker
+//	@Failure	400,401,403,404,409,429	{object}	i18n.Response
 //	@Router		/api/v1/markers/{marker_uid}/subject [delete]
 func ClearMarkerSubject(router *gin.RouterGroup) {
 	router.DELETE("/markers/:marker_uid/subject", func(c *gin.Context) {
@@ -311,10 +394,15 @@ func ClearMarkerSubject(router *gin.RouterGroup) {
 
 		defer mutex.UpdatePeople.Stop()
 
-		file, marker, err := findFileMarker(c)
+		s, file, marker, err := findFileMarker(c)
 
 		if err != nil {
 			log.Debugf("faces: %s (find marker to clear subject)", err)
+			return
+		}
+
+		// Abort if a face migration is replacing the clusters this would write to.
+		if faceMigrationRunning(c) {
 			return
 		}
 
@@ -337,11 +425,11 @@ func ClearMarkerSubject(router *gin.RouterGroup) {
 			log.Errorf("faces: %s (update photo title)", err)
 		} else {
 			// Notify clients.
-			PublishPhotoEvent(StatusUpdated, file.PhotoUID, c)
+			PublishPhotoEvent(StatusUpdated, file.PhotoUID)
 		}
 
 		event.SuccessMsg(i18n.MsgChangesSaved)
 
-		c.JSON(http.StatusOK, marker)
+		c.JSON(http.StatusOK, marker.RedactForSession(s))
 	})
 }

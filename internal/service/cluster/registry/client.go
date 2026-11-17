@@ -6,7 +6,7 @@ import (
 	"sort"
 	"time"
 
-	"github.com/jinzhu/gorm"
+	"gorm.io/gorm"
 
 	"github.com/photoprism/photoprism/internal/config"
 	"github.com/photoprism/photoprism/internal/entity"
@@ -43,6 +43,7 @@ func toNode(c *entity.Client) *Node {
 		UUID:         c.NodeUUID,
 		Name:         c.ClientName,
 		Role:         role,
+		DisplayName:  c.DisplayName,
 		ClientID:     c.ClientUID,
 		AdvertiseUrl: c.ClientURL,
 		AppName:      c.AppName,
@@ -68,36 +69,161 @@ func toNode(c *entity.Client) *Node {
 		}
 		n.RotatedAt = data.RotatedAt
 		n.Theme = data.Theme
+		if len(data.RedirectURIs) > 0 {
+			n.RedirectURIs = append([]string(nil), data.RedirectURIs...)
+		}
+		if len(data.AllowGroups) > 0 {
+			n.AllowGroups = append([]string(nil), data.AllowGroups...)
+		}
+		if len(data.AllowGroupRoles) > 0 {
+			n.AllowGroupRoles = maps.Clone(data.AllowGroupRoles)
+		}
+		if data.GroupsFullView {
+			v := true
+			n.GroupsFullView = &v
+		}
+		// n.Node.GroupsSrc is the read DTO field; n.GroupsSrc (registry.Node) is
+		// the separate write-control input, so this assignment is qualified.
+		n.Node.GroupsSrc = data.GroupsSrc
 	}
 
 	return n
 }
 
-// Put creates or updates a node record, preferring NodeUUID as the primary key
-// and falling back to ClientID or Name when required. The provided Node pointer
-// is updated with persisted identifiers so API/CLI layers can echo the result.
+// applyGroupConfig applies the node's group-based admission config to data,
+// honoring source priority per n.GroupsSrc: an admin-pinned (manual) config is
+// never replaced by an instance-declared (node) one, an instance declaration
+// replaces the config wholesale and clears values it previously declared, and
+// callers that don't manage group config (empty GroupsSrc) get plain
+// nil-means-no-change semantics without provenance updates.
+func applyGroupConfig(data *entity.ClientData, n *Node) {
+	switch n.GroupsSrc {
+	case entity.ClientGroupsSrcManual:
+		changed := false
+		if n.AllowGroups != nil {
+			data.AllowGroups = append([]string(nil), n.AllowGroups...)
+			changed = true
+		}
+		if n.AllowGroupRoles != nil {
+			data.AllowGroupRoles = maps.Clone(n.AllowGroupRoles)
+			changed = true
+		}
+		if n.GroupsFullView != nil {
+			data.GroupsFullView = *n.GroupsFullView
+			changed = true
+		}
+		if !changed {
+			return
+		}
+		// A fully cleared config un-pins the override so a declared instance
+		// config can repopulate it on the next registration.
+		if len(data.AllowGroups) == 0 && len(data.AllowGroupRoles) == 0 && !data.GroupsFullView {
+			data.GroupsSrc = ""
+		} else {
+			data.GroupsSrc = entity.ClientGroupsSrcManual
+		}
+	case entity.ClientGroupsSrcNode:
+		if data.GroupsSrc == entity.ClientGroupsSrcManual {
+			return
+		}
+		if len(n.AllowGroups) > 0 || len(n.AllowGroupRoles) > 0 || (n.GroupsFullView != nil && *n.GroupsFullView) {
+			data.AllowGroups = append([]string(nil), n.AllowGroups...)
+			data.AllowGroupRoles = maps.Clone(n.AllowGroupRoles)
+			data.GroupsFullView = n.GroupsFullView != nil && *n.GroupsFullView
+			data.GroupsSrc = entity.ClientGroupsSrcNode
+		} else if data.GroupsSrc == entity.ClientGroupsSrcNode {
+			// The instance stopped declaring a config; clear only values it
+			// previously declared, never unmanaged or admin-set ones.
+			data.AllowGroups = nil
+			data.AllowGroupRoles = nil
+			data.GroupsFullView = false
+			data.GroupsSrc = ""
+		}
+	default:
+		if n.AllowGroups != nil {
+			data.AllowGroups = append([]string(nil), n.AllowGroups...)
+		}
+		if n.AllowGroupRoles != nil {
+			data.AllowGroupRoles = maps.Clone(n.AllowGroupRoles)
+		}
+		if n.GroupsFullView != nil {
+			data.GroupsFullView = *n.GroupsFullView
+		}
+	}
+}
+
+// RecordDatabase stores db with a node that records no database yet, and reports whether it did.
+// A recorded database is kept, since removing the node drops the database its record names.
+func (r *ClientRegistry) RecordDatabase(n *Node, db cluster.NodeDatabase) (bool, error) {
+	if n == nil || db.Name == "" {
+		return false, nil
+	} else if n.Database != nil && n.Database.Name != "" {
+		return false, nil
+	}
+
+	n.Database = &db
+
+	if err := r.Put(n); err != nil {
+		return false, err
+	}
+
+	return true, nil
+}
+
+// Create adds a node record, and refuses identifiers that resolve to an existing one.
+// A caller with no client identifier cannot show which record is its own, so it may not
+// reach an existing one; use Put to update a resolved record.
+func (r *ClientRegistry) Create(n *Node) error {
+	return r.put(n, true)
+}
+
+// Put creates or updates a node record, resolving it by NodeUUID, then ClientID, then Name,
+// and updates the provided Node pointer with the persisted identifiers.
+// A UUID and a client ID must resolve to the same record; a pair naming two records is
+// rejected, so a write always applies to a single registration.
 func (r *ClientRegistry) Put(n *Node) error {
+	return r.put(n, false)
+}
+
+// put creates or updates a node record; with insertOnly, an identifier that resolves to an
+// existing record is refused, so a create never writes into one.
+func (r *ClientRegistry) put(n *Node, insertOnly bool) error {
 	// Upsert client preferring NodeUUID (primary), then ClientID, then Name.
 	var m *entity.Client
 
-	// 1) Try NodeUUID first, if provided.
+	// 1) Try NodeUUID first, if provided. A UUID that resolves to no current record but
+	// still has rows is retired rather than free, so it is refused instead of re-assigned.
 	if n.UUID != "" {
 		if existing := entity.FindClientByNodeUUID(n.UUID); existing != nil && existing.ClientUID != "" {
 			m = existing
+		} else if len(entity.FindClientsByNodeUUID(n.UUID)) > 0 {
+			return ErrIdentifierMismatch
 		}
 	}
 
-	// 2) Fall back to ClientID if not found by UUID and ClientID is valid.
-	if m == nil && rnd.IsUID(n.ClientID, entity.ClientUID) {
+	// 2) Resolve the ClientID if it is valid, so a mismatch is caught rather than
+	// silently writing to whichever record the other identifier named. The lookup reads
+	// deleted records too, because the mismatch below must see them; a retired one is
+	// refused rather than written to, since its identifiers are reserved, not available.
+	if rnd.IsUID(n.ClientID, entity.ClientUID) {
 		if existing := entity.FindClientByUID(n.ClientID); existing != nil {
-			m = existing
+			switch {
+			case m != nil && m.ClientUID != existing.ClientUID:
+				return ErrIdentifierMismatch
+			case existing.Deleted():
+				return ErrIdentifierMismatch
+			case m == nil:
+				m = existing
+			}
 		}
 	}
 
-	// 3) Finally, try by Name (latest by UpdatedAt). Avoid mismatching when a UUID is provided but name belongs to another node.
-	if m == nil && n.Name != "" {
+	// 3) Finally, try by Name (latest by UpdatedAt). Avoid mismatching when a UUID is provided but
+	// name belongs to another node. Deleted records are skipped: a name is released by deletion,
+	// so a request carrying one creates a record rather than writing into the retired one.
+	if name := clean.DNSLabel(n.Name); m == nil && name != "" {
 		var list []entity.Client
-		if err := entity.UnscopedDb().Where("client_name = ?", n.Name).Find(&list).Error; err == nil && len(list) > 0 {
+		if err := entity.Db().Where("client_name = ?", name).Find(&list).Error; err == nil && len(list) > 0 {
 			// pick latest
 			latest := &list[0]
 			for i := 1; i < len(list); i++ {
@@ -114,6 +240,8 @@ func (r *ClientRegistry) Put(n *Node) error {
 
 	if m == nil {
 		m = entity.NewClient()
+	} else if insertOnly {
+		return ErrIdentifierMismatch
 	}
 
 	// Apply fields.
@@ -151,9 +279,21 @@ func (r *ClientRegistry) Put(n *Node) error {
 	if n.SiteUrl != "" {
 		data.SiteURL = n.SiteUrl
 	}
+
+	// DisplayName follows the same source-priority rule as User.SetDisplayName:
+	// an admin override (SrcManual) pins the value so later instance
+	// registrations (SrcAuto) can't overwrite it, and clearing it un-pins.
+	m.SetDisplayName(n.DisplayName, n.NameSrc)
 	if n.UUID != "" {
 		m.NodeUUID = n.UUID
 	}
+
+	// nil = no change so callers that don't touch the field can't clear it; non-nil replaces.
+	if n.RedirectURIs != nil {
+		data.RedirectURIs = append([]string(nil), n.RedirectURIs...)
+	}
+
+	applyGroupConfig(data, n)
 
 	data.RotatedAt = n.RotatedAt
 
@@ -190,6 +330,7 @@ func (r *ClientRegistry) Put(n *Node) error {
 	n.ClientID = m.ClientUID
 	n.Name = m.ClientName
 	n.Role = m.ClientRole
+	n.DisplayName = m.DisplayName
 	n.AdvertiseUrl = m.ClientURL
 	n.AppName = m.AppName
 	n.AppVersion = m.AppVersion
@@ -210,6 +351,30 @@ func (r *ClientRegistry) Put(n *Node) error {
 		}
 		n.RotatedAt = d.RotatedAt
 		n.Theme = d.Theme
+		if len(d.RedirectURIs) > 0 {
+			n.RedirectURIs = append([]string(nil), d.RedirectURIs...)
+		} else {
+			n.RedirectURIs = nil
+		}
+		if len(d.AllowGroups) > 0 {
+			n.AllowGroups = append([]string(nil), d.AllowGroups...)
+		} else {
+			n.AllowGroups = nil
+		}
+		if len(d.AllowGroupRoles) > 0 {
+			n.AllowGroupRoles = maps.Clone(d.AllowGroupRoles)
+		} else {
+			n.AllowGroupRoles = nil
+		}
+		if d.GroupsFullView {
+			v := true
+			n.GroupsFullView = &v
+		} else {
+			n.GroupsFullView = nil
+		}
+		// Reflect the persisted provenance back into the read DTO field
+		// (qualified to bypass the registry.Node write-control GroupsSrc).
+		n.Node.GroupsSrc = d.GroupsSrc
 	}
 
 	// Set initial secret if provided on create/update.
@@ -246,7 +411,7 @@ func (r *ClientRegistry) FindByName(name string) (*Node, error) {
 	}
 
 	m := &entity.Client{}
-	if err := entity.UnscopedDb().
+	if err := entity.Db().
 		Where("client_name = ?", name).
 		Order("updated_at DESC").
 		First(m).Error; err != nil {
@@ -259,22 +424,41 @@ func (r *ClientRegistry) FindByName(name string) (*Node, error) {
 	return toNode(m), nil
 }
 
-// FindByNodeUUID looks up a node by its NodeUUID and returns the latest record.
+// FindByNodeUUID looks up a node by its NodeUUID and returns the latest current record.
 func (r *ClientRegistry) FindByNodeUUID(nodeUUID string) (*Node, error) {
 	if nodeUUID == "" {
 		return nil, ErrNotFound
 	}
 
-	list := entity.FindClientsByNodeUUID(nodeUUID)
+	c := entity.FindClientByNodeUUID(nodeUUID)
 
-	if len(list) == 0 {
+	if c == nil {
 		return nil, ErrNotFound
 	}
 
-	return toNode(&list[0]), nil
+	return toNode(c), nil
 }
 
-// FindByClientID looks up a node by its OAuth client identifier.
+// FindRetiredByNodeUUID looks up a node that has been deleted but whose NodeUUID is still
+// reserved, returning the most recently updated record. Operator tooling uses it to report or
+// release a registration that no ordinary lookup resolves anymore.
+func (r *ClientRegistry) FindRetiredByNodeUUID(nodeUUID string) (*Node, error) {
+	if nodeUUID == "" {
+		return nil, ErrNotFound
+	}
+
+	for _, c := range entity.FindClientsByNodeUUID(nodeUUID) {
+		if c.Deleted() {
+			return toNode(&c), nil
+		}
+	}
+
+	return nil, ErrNotFound
+}
+
+// FindByClientID looks up a current node by its OAuth client identifier. The underlying
+// lookup reports deleted records too, because ownership checks need them, so this resolves
+// only the ones a caller may still act on.
 func (r *ClientRegistry) FindByClientID(id string) (*Node, error) {
 	if !rnd.IsUID(id, entity.ClientUID) {
 		return nil, ErrNotFound
@@ -282,7 +466,7 @@ func (r *ClientRegistry) FindByClientID(id string) (*Node, error) {
 
 	c := entity.FindClientByUID(id)
 
-	if c == nil {
+	if c.Deleted() {
 		return nil, ErrNotFound
 	}
 
@@ -307,7 +491,7 @@ func (r *ClientRegistry) List() ([]Node, error) {
 	var list []entity.Client
 
 	// Identify cluster nodes primarily by presence of NodeUUID.
-	if err := entity.UnscopedDb().Where("node_uuid <> ''").Find(&list).Error; err != nil {
+	if err := entity.Db().Where("node_uuid <> ''").Find(&list).Error; err != nil {
 		return nil, err
 	}
 
@@ -338,7 +522,7 @@ func (r *ClientRegistry) Delete(uuid string) error {
 
 	c := entity.FindClientByUID(n.ClientID)
 
-	if c == nil {
+	if c.Deleted() {
 		return ErrNotFound
 	}
 
@@ -366,6 +550,52 @@ func (r *ClientRegistry) DeleteAllByUUID(uuid string) error {
 	return nil
 }
 
+// NodeDatabases returns the databases recorded by every record that holds the given NodeUUID,
+// including retired ones, in the order the records are read. A caller that releases the identifier
+// removes all of those records, so it has to see all of their databases rather than one record's.
+func (r *ClientRegistry) NodeDatabases(uuid string) []string {
+	if uuid == "" {
+		return nil
+	}
+
+	var names []string
+
+	for _, c := range entity.FindClientsByNodeUUID(uuid) {
+		if n := toNode(&c); n != nil && n.Database != nil {
+			if name := n.Database.Name; name != "" {
+				names = append(names, name)
+			} else if user := n.Database.User; user != "" {
+				names = append(names, user)
+			}
+		}
+	}
+
+	return names
+}
+
+// PurgeAllByUUID permanently removes every client row that matches the given NodeUUID,
+// including retired ones, which releases the UUID so a later node may claim it. Callers are
+// responsible for the database and the grants that the UUID names; this removes neither.
+func (r *ClientRegistry) PurgeAllByUUID(uuid string) error {
+	if uuid == "" {
+		return ErrNotFound
+	}
+
+	list := entity.FindClientsByNodeUUID(uuid)
+
+	if len(list) == 0 {
+		return ErrNotFound
+	}
+
+	for i := range list {
+		if err := list[i].Purge(); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
 // RotateSecret issues a new client secret for the node identified by NodeUUID
 // and returns the updated node with the plaintext secret populated for the
 // caller to deliver.
@@ -380,9 +610,22 @@ func (r *ClientRegistry) RotateSecret(uuid string) (*Node, error) {
 		return nil, ErrNotFound
 	}
 
-	c := entity.FindClientByUID(n.ClientID)
+	return r.RotateSecretByClientID(n.ClientID)
+}
 
-	if c == nil {
+// RotateSecretByClientID issues a new secret for the given OAuth client, revokes its sessions
+// except those in omitSessions, and returns the node with the plaintext secret to deliver.
+// The client identifier rather than the UUID selects whose secret is replaced.
+func (r *ClientRegistry) RotateSecretByClientID(clientID string, omitSessions ...string) (*Node, error) {
+	if clientID == "" {
+		return nil, ErrNotFound
+	}
+
+	c := entity.FindClientByUID(clientID)
+
+	// The lookup reports deleted records too, and rotating writes the new hash before the
+	// record is saved, so a retired one is refused before anything is replaced.
+	if c.Deleted() {
 		return nil, ErrNotFound
 	}
 
@@ -399,7 +642,11 @@ func (r *ClientRegistry) RotateSecret(uuid string) (*Node, error) {
 	if err := c.Save(); err != nil {
 		return nil, err
 	}
-	n = toNode(c)
+
+	// Access tokens issued with the previous secret stay valid until revoked.
+	c.RevokeSessions(omitSessions)
+
+	n := toNode(c)
 	n.ClientSecret = secret // plaintext only in-memory for response composition
 
 	return n, nil

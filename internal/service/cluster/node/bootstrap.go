@@ -12,23 +12,29 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
+
+	"github.com/tidwall/gjson"
 
 	clusterjwt "github.com/photoprism/photoprism/internal/auth/jwt"
 	"github.com/photoprism/photoprism/internal/config"
 	"github.com/photoprism/photoprism/internal/event"
 	"github.com/photoprism/photoprism/internal/service/cluster"
 	"github.com/photoprism/photoprism/pkg/clean"
+	"github.com/photoprism/photoprism/pkg/dsn"
 	"github.com/photoprism/photoprism/pkg/fs"
 	"github.com/photoprism/photoprism/pkg/http/dns"
+	"github.com/photoprism/photoprism/pkg/http/scheme"
 	"github.com/photoprism/photoprism/pkg/rnd"
 )
 
-var log = event.Log
+// log writes to the console only, since bootstrap runs before the database connection and the hub
+// has no subscriber that early. An operator reads these lines, so they keep the locations they name.
+var log = event.SystemLog
 
-const bootstrapOAuthScope = "cluster"
+// OAuthScope is the scope a node requests when exchanging its client credentials.
+const OAuthScope = "cluster"
 
 // init registers the cluster node bootstrap extension so it runs before the
 // database connection is established.
@@ -37,13 +43,10 @@ func init() {
 	config.Register(config.StageBoot, "cluster-node", InitConfig, nil)
 }
 
-// InitConfig performs node bootstrap: optional registration with the Portal
-// and theme installation. Runs early during config.Init().
+// InitConfig performs node bootstrap during config.Init(): when the server starts, optional registration
+// with the Portal and theme installation; for other commands and the start command's config report,
+// a warning if the node has not joined yet.
 func InitConfig(c *config.Config) error {
-	if !cluster.BootstrapAutoJoinEnabled && !cluster.BootstrapAutoThemeEnabled {
-		return nil
-	}
-
 	role := c.NodeRole()
 
 	// Skip on portal nodes and unknown node types.
@@ -52,38 +55,17 @@ func InitConfig(c *config.Config) error {
 		return nil
 	}
 
-	portalURL := strings.TrimSpace(c.PortalUrl())
-	joinToken := strings.TrimSpace(c.JoinToken())
-
-	if portalURL == "" || joinToken == "" {
-		log.Debugf("cluster: no bootstrap configuration found")
-		return nil
+	// Auto-join the cluster and sync the theme when the server starts, if enabled and configured.
+	if !c.Starting() || c.StartReport() {
+		warnNotJoined(c)
+	} else if cluster.BootstrapAutoJoinEnabled || cluster.BootstrapAutoThemeEnabled {
+		bootstrapClusterNode(c)
 	}
 
-	log.Debugf("config: attempting to join the configured cluster")
-
-	u, err := url.Parse(portalURL)
-	if err != nil || u.Scheme == "" || u.Host == "" {
-		log.Warnf("cluster: invalid portal URL %s", clean.Log(portalURL))
-		return nil
-	}
-
-	// Register with retry policy.
-	var registerResp *cluster.RegisterResponse
-	if cluster.BootstrapAutoJoinEnabled {
-		if registerResp, err = registerWithPortal(c, u, joinToken); err != nil {
-			log.Warnf("config: failed to join the configured cluster (%s)", clean.Error(err))
-		}
-	}
-
-	// Pull theme if missing or outdated, and activate it when present.
-	if cluster.BootstrapAutoThemeEnabled {
-		if err = syncNodeTheme(c, u, registerResp); err != nil {
-			// Theme install failures are non-critical; log at debug to avoid noise.
-			log.Debugf("cluster: theme download skipped (%s)", clean.Error(err))
-		}
-		activateNodeThemeIfPresent(c)
-	}
+	// Derive the OIDC RP credentials from the node client (PHOTOPRISM_CLUSTER_OIDC),
+	// independent of the auto-join/theme toggles, so a registered instance re-wires
+	// the OIDC RP on every restart.
+	resolveNodeOIDCClient(c)
 
 	// Log cluster UUID.
 	if uuid := c.ClusterUUID(); uuid != "" {
@@ -91,6 +73,153 @@ func InitConfig(c *config.Config) error {
 	}
 
 	return nil
+}
+
+// warnNotJoined warns that a command runs without the cluster settings when the node is configured to
+// join a cluster but has not joined yet, since only the start command joins it.
+func warnNotJoined(c *config.Config) {
+	if !cluster.BootstrapAutoJoinEnabled || strings.TrimSpace(c.PortalUrl()) == "" || strings.TrimSpace(c.JoinToken()) == "" {
+		return
+	} else if strings.TrimSpace(c.NodeClientID()) != "" && strings.TrimSpace(c.NodeClientSecret()) != "" {
+		return
+	}
+
+	log.Warnf("cluster: this node has not joined the cluster yet, start the server first")
+}
+
+// bootstrapClusterNode registers the node with the configured Portal and installs
+// its theme, honoring the auto-join/theme toggles. All failures are non-fatal so
+// the node still boots; it is a no-op without a Portal URL, or without a join token and node credentials.
+func bootstrapClusterNode(c *config.Config) {
+	portalURL := strings.TrimSpace(c.PortalUrl())
+	joinToken := strings.TrimSpace(c.JoinToken())
+
+	// Proceed with either a join token (first join) or the node's own OAuth
+	// credentials (already joined). The credential-only case lets a plain restart
+	// re-send the idempotent registration so a changed declarative config reaches
+	// the Portal after the join token has been removed from the environment.
+	hasNodeCreds := strings.TrimSpace(c.NodeClientID()) != "" && strings.TrimSpace(c.NodeClientSecret()) != ""
+
+	if portalURL == "" || (joinToken == "" && !hasNodeCreds) {
+		log.Debugf("cluster: no bootstrap configuration found")
+		return
+	}
+
+	log.Debugf("config: attempting to join the configured cluster")
+
+	u, err := url.Parse(portalURL)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		log.Warnf("cluster: invalid portal URL %s", clean.Log(redactedPortalUrl(portalURL)))
+		return
+	}
+
+	// Register with retry policy.
+	var registerResp *cluster.RegisterResponse
+	if cluster.BootstrapAutoJoinEnabled {
+		if registerResp, err = registerWithPortal(c, u, joinToken); err != nil {
+			log.Warnf("config: failed to join the configured cluster (%s)", clean.ErrorFull(err))
+		}
+	}
+
+	// Pull theme if missing or outdated, and activate it when present.
+	if cluster.BootstrapAutoThemeEnabled {
+		if err = syncNodeTheme(c, u, registerResp); err != nil {
+			// Theme install failures are non-critical; log at debug to avoid noise.
+			log.Debugf("cluster: theme download skipped (%s)", clean.ErrorFull(err))
+		}
+		activateNodeThemeIfPresent(c)
+	}
+}
+
+// redactedPortalUrl renders a portal URL without the credentials it carries, keeping the rest
+// readable because a malformed value is what an operator has to fix. UriRedacted covers a query
+// parameter and yields nothing for a value url.Parse rejects, so the userinfo is removed textually.
+func redactedPortalUrl(s string) string {
+	// Only consulted for a value carrying a query, since it renders what url.Parse produced and
+	// a normalized spelling of a value this reports as invalid would mislead.
+	if strings.Contains(s, "?") {
+		if redacted := clean.UriRedacted(s); redacted != "" {
+			s = redacted
+		}
+	}
+
+	return redactedUserinfo(s)
+}
+
+// redactedUserinfo replaces the userinfo of a URL that no parser accepts. Everything before the
+// last "@" of the authority is treated as userinfo, since a value reported here as malformed is
+// one that url.Parse cannot split.
+func redactedUserinfo(s string) string {
+	scheme, rest := "", s
+
+	if i := strings.Index(s, "://"); i >= 0 {
+		scheme, rest = s[:i+3], s[i+3:]
+	} else if strings.HasPrefix(s, "//") {
+		// Protocol-relative, which url.Parse accepts while leaving the scheme empty.
+		scheme, rest = s[:2], s[2:]
+	}
+
+	authority := rest
+
+	if i := strings.IndexAny(rest, "/?#"); i >= 0 {
+		authority = rest[:i]
+	}
+
+	i := strings.LastIndex(authority, "@")
+
+	if i < 0 {
+		return s
+	}
+
+	if user, _, hasPassword := strings.Cut(authority[:i], ":"); hasPassword {
+		return scheme + user + ":" + clean.UriRedactedValue + rest[i:]
+	}
+
+	return scheme + clean.UriRedactedValue + rest[i:]
+}
+
+// resolveNodeOIDCClient derives the instance's OIDC RP credentials from the node
+// client credentials when PHOTOPRISM_CLUSTER_OIDC is enabled, so a Portal-fronted
+// instance logs in on first boot without injecting PHOTOPRISM_OIDC_*. An explicit
+// OIDC client id wins; the issuer defaults to the instance's own origin when unset;
+// the secret is read file-first so a rotation propagates on the next start.
+func resolveNodeOIDCClient(c *config.Config) {
+	if c == nil || !c.ClusterOIDC() {
+		return
+	}
+
+	// Explicit OIDC client credentials (a different IdP, or a hand-issued client)
+	// win unchanged.
+	if strings.TrimSpace(c.OIDCClient()) != "" {
+		return
+	}
+
+	if c.NodeRole() != cluster.RoleInstance {
+		log.Warnf("cluster: ignoring cluster OIDC because this node is not an instance")
+		return
+	}
+
+	id := strings.TrimSpace(c.NodeClientID())
+	secret := strings.TrimSpace(c.NodeClientSecret())
+
+	if id == "" || secret == "" {
+		log.Warnf("cluster: cannot derive the OIDC client from node credentials yet (node not registered)")
+		return
+	}
+
+	// Default the OIDC issuer to the instance's own origin root (the shared-domain
+	// Portal OP) when unset, so enabling cluster OIDC is the only configuration an
+	// instance needs. An explicit PHOTOPRISM_OIDC_URI (e.g. a subdomain-isolated
+	// Portal) is respected.
+	if c.OIDCUri().Host == "" {
+		if issuer := scheme.OriginURL(c.SiteUrl()); issuer != "" {
+			c.SetOIDCUri(issuer)
+		}
+	}
+
+	c.SetOIDCClient(id)
+	c.SetOIDCSecret(secret)
+	log.Infof("cluster: OIDC login configured via the Portal using node client %s", clean.Log(id))
 }
 
 // newHTTPClient returns a short-lived HTTP client configured with the provided
@@ -111,7 +240,9 @@ func registerWithPortal(c *config.Config, portal *url.URL, token string) (*clust
 	delay := cluster.BootstrapRegisterRetryDelay
 	timeout := cluster.BootstrapRegisterTimeout
 
+	// The query of the configured Portal URL is dropped, since none of the endpoints takes one.
 	endpoint := *portal
+	endpoint.RawQuery = ""
 	endpoint.Path = strings.TrimRight(endpoint.Path, "/") + "/api/v1/cluster/nodes/register"
 
 	// Let the configuration decide if credentials are missing (MySQL with no effective name/user/password).
@@ -142,7 +273,7 @@ func registerWithPortal(c *config.Config, portal *url.URL, token string) (*clust
 		resp, err := newHTTPClient(timeout).Do(req) //nolint:gosec
 		if err != nil {
 			if attempt < maxAttempts {
-				log.Debugf("cluster: join attempt %d/%d failed with %s", attempt, maxAttempts, clean.Error(err))
+				log.Debugf("cluster: join attempt %d/%d failed with %s", attempt, maxAttempts, clean.ErrorFull(err))
 				time.Sleep(delay)
 				continue
 			}
@@ -152,7 +283,7 @@ func registerWithPortal(c *config.Config, portal *url.URL, token string) (*clust
 		retry, registerResp, err := func() (bool, *cluster.RegisterResponse, error) {
 			defer func() {
 				if closeErr := resp.Body.Close(); closeErr != nil {
-					log.Debugf("cluster: %s (close registration response body)", clean.Error(closeErr))
+					log.Debugf("cluster: %s (close registration response body)", clean.ErrorFull(closeErr))
 				}
 			}()
 
@@ -183,15 +314,17 @@ func registerWithPortal(c *config.Config, portal *url.URL, token string) (*clust
 				}
 				return false, nil, errors.New(resp.Status)
 			case http.StatusConflict, http.StatusBadRequest:
-				// Do not retry on 400/409 per spec intent.
-				return false, nil, errors.New(resp.Status)
+				// Do not retry on 400/409 per spec intent. The Portal explains which
+				// identifier it refused and what to do about it, and the status alone
+				// does not, so the reason is reported rather than dropped.
+				return false, nil, registerError(resp)
 			default:
 				if attempt < maxAttempts {
-					log.Debugf("cluster: join attempt %d/%d failed with status %s", attempt, maxAttempts, resp.Status)
+					log.Debugf("cluster: join attempt %d/%d failed with status %s", attempt, maxAttempts, clean.Log(resp.Status))
 					// TODO: Consider exponential backoff with jitter instead of constant delay.
 					return true, nil, nil
 				}
-				return false, nil, errors.New(resp.Status)
+				return false, nil, registerError(resp)
 			}
 		}()
 
@@ -208,6 +341,27 @@ func registerWithPortal(c *config.Config, portal *url.URL, token string) (*clust
 	return nil, nil
 }
 
+// registerError reports a refused registration with the reason the Portal gave, falling back
+// to the status when the body carries none. The body names the identifier that was refused,
+// which is what an operator needs, and the status alone reads the same for every cause.
+func registerError(resp *http.Response) error {
+	if resp == nil {
+		return errors.New("registration failed")
+	}
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 4096))
+
+	if err != nil || len(body) == 0 {
+		return errors.New(resp.Status)
+	}
+
+	if reason := strings.TrimSpace(gjson.GetBytes(body, "error").String()); reason != "" {
+		return fmt.Errorf("%s (%s)", reason, resp.Status)
+	}
+
+	return errors.New(resp.Status)
+}
+
 // registerAuthToken returns the bearer token used for register requests.
 // Existing-node mutations use an OAuth access token, while first-time joins
 // use the configured join token when no node credentials exist yet.
@@ -217,7 +371,7 @@ func registerAuthToken(c *config.Config, portal *url.URL, joinToken string) (str
 	}
 
 	if id, secret := strings.TrimSpace(c.NodeClientID()), strings.TrimSpace(c.NodeClientSecret()); id != "" && secret != "" {
-		token, err := oauthAccessToken(portal, id, secret, bootstrapOAuthScope)
+		token, err := OAuthAccessToken(portal, id, secret, OAuthScope)
 		if err != nil {
 			return "", fmt.Errorf("portal access token request failed: %w", err)
 		}
@@ -305,6 +459,14 @@ func buildRegisterPayload(c *config.Config) cluster.RegisterRequest {
 		Theme:        clean.TypeUnicode(c.NodeThemeVersion()),
 	}
 
+	// Report a human-friendly DisplayName from the operator's configured branding via
+	// Config.SiteName (SITE_NAME, then the raw AppName, then SiteTitle). It is empty
+	// for an unbranded instance, so the Portal falls back to the node Name slug, and
+	// it ignores the product Name default so an unbranded Pro node does not look
+	// configured. SiteCaption is intentionally excluded: Plus/Pro default it to the
+	// shared marketing description, so it is not a per-instance label.
+	payload.DisplayName = c.SiteName()
+
 	// Auto-derive Advertise/Site URLs from node name and cluster domain when not configured.
 	if domain := strings.TrimSpace(defaultClusterDomain(c)); domain != "" {
 		if payload.NodeName == "" {
@@ -326,6 +488,13 @@ func buildRegisterPayload(c *config.Config) cluster.RegisterRequest {
 	if su := c.SiteUrl(); su != "" {
 		payload.SiteUrl = su
 	}
+
+	// Declare the instance's group-based admission config so it takes effect on
+	// first boot and every re-registration; an admin override on the Portal
+	// still wins (see the registry's group-config source precedence).
+	payload.AllowGroups = c.ClusterAllowGroups()
+	payload.AllowGroupRoles = c.ClusterAllowGroupRoles()
+	payload.GroupsFullView = c.ClusterGroupsFullView()
 
 	return payload
 }
@@ -361,6 +530,15 @@ func persistRegistration(c *config.Config, r *cluster.RegisterResponse, wantRota
 		c.SetJWKSUrl(jwksUrl)
 	}
 
+	// Apply the validating setter first and persist only what it accepted, so
+	// a malformed URL from a misbehaving Portal is never written to options.yml.
+	if loginUrl := strings.TrimSpace(r.PortalLoginUrl); loginUrl != "" {
+		c.SetPortalLoginUrl(loginUrl)
+		if v := c.PortalLoginUrl(); v != "" {
+			updates.SetPortalLoginUrl(v)
+		}
+	}
+
 	// Persist NodeUUID from portal response if provided and not set locally.
 	if r.Node.UUID != "" && c.NodeUUID() == "" {
 		updates.SetNodeUUID(r.Node.UUID)
@@ -369,19 +547,26 @@ func persistRegistration(c *config.Config, r *cluster.RegisterResponse, wantRota
 	// Persist DB settings only if rotation was requested and driver is MySQL/MariaDB
 	// and local DB not configured (as checked before calling).
 	if wantRotateDatabase {
-		if r.Database.DSN != "" {
-			updates.SetDatabaseDriver(r.Database.Driver)
-			updates.SetDatabaseDSN(r.Database.DSN)
-		} else if r.Database.Name != "" && r.Database.User != "" && r.Database.Password != "" {
-			server := r.Database.Host
-			if r.Database.Port > 0 {
-				server = net.JoinHostPort(r.Database.Host, strconv.Itoa(r.Database.Port))
+		if r.Database.Incomplete {
+			log.Warnf("cluster: the portal could not complete database provisioning, retrying on the next start")
+		}
+
+		if server, ok := updates.SetDatabase(r.Database); !ok {
+			log.Warnf("cluster: ignored database settings with unusable server address %s", clean.Log(server))
+		} else if !updates.HasDatabaseUpdate() && r.Database.DSN != "" && !r.Database.Incomplete {
+			// A response without separate settings may still carry a DSN.
+			driver := strings.TrimSpace(r.Database.Driver)
+			if driver == "" {
+				driver = dsn.DriverMySQL
 			}
-			updates.SetDatabaseDriver(r.Database.Driver)
-			updates.SetDatabaseServer(server)
-			updates.SetDatabaseName(r.Database.Name)
-			updates.SetDatabaseUser(r.Database.User)
-			updates.SetDatabasePassword(r.Database.Password)
+			updates.SetDatabaseDriver(driver)
+			updates.SetDatabaseDSN(r.Database.DSN)
+		}
+
+		// Database settings the config refuses are skipped as a whole, and the rest is saved.
+		if err := config.ValidateClusterDatabaseUpdate(updates); err != nil {
+			log.Warnf("cluster: ignored database settings (%s)", clean.Error(err))
+			updates.ClearDatabase()
 		}
 	}
 
@@ -404,6 +589,9 @@ func persistRegistration(c *config.Config, r *cluster.RegisterResponse, wantRota
 
 // primeJWKS eagerly fetches the Portal JWKS so that subsequent token
 // verification does not incur network latency during critical operations.
+// It uses its own verifier and reaches the request-serving one only through
+// the shared cache file, so it does not spend that verifier's forced refresh
+// interval.
 func primeJWKS(c *config.Config, url string) {
 	if c == nil {
 		return
@@ -421,7 +609,7 @@ func primeJWKS(c *config.Config, url string) {
 	defer cancel()
 
 	if err := verifier.Prime(ctx, url); err != nil {
-		log.Debugf("auth: jwks prime skipped (%s)", clean.Error(err))
+		log.Debugf("auth: jwks prime skipped (%s)", clean.ErrorFull(err))
 	}
 }
 
@@ -475,9 +663,9 @@ func syncNodeTheme(c *config.Config, portal *url.URL, registerResp *cluster.Regi
 	bearer := ""
 	var tokenErr error
 	if id, secret := strings.TrimSpace(c.NodeClientID()), strings.TrimSpace(c.NodeClientSecret()); id != "" && secret != "" {
-		if t, err := oauthAccessToken(portal, id, secret, bootstrapOAuthScope); err != nil {
+		if t, err := OAuthAccessToken(portal, id, secret, OAuthScope); err != nil {
 			tokenErr = err
-			log.Infof("config: portal access token request failed (%s)", clean.Error(err))
+			log.Infof("config: portal access token request failed (%s)", clean.ErrorFull(err))
 		} else {
 			bearer = t
 		}
@@ -485,7 +673,7 @@ func syncNodeTheme(c *config.Config, portal *url.URL, registerResp *cluster.Regi
 
 	if bearer == "" {
 		if tokenErr != nil {
-			log.Infof("theme: sync skipped because portal access token request failed (%s)", clean.Error(tokenErr))
+			log.Infof("theme: sync skipped because portal access token request failed (%s)", clean.ErrorFull(tokenErr))
 		}
 	}
 
@@ -495,6 +683,7 @@ func syncNodeTheme(c *config.Config, portal *url.URL, registerResp *cluster.Regi
 	}
 
 	endpoint := *portal
+	endpoint.RawQuery = ""
 	endpoint.Path = strings.TrimRight(endpoint.Path, "/") + "/api/v1/cluster/theme"
 
 	req, _ := http.NewRequest(http.MethodGet, endpoint.String(), nil)
@@ -510,7 +699,7 @@ func syncNodeTheme(c *config.Config, portal *url.URL, registerResp *cluster.Regi
 
 	defer func() {
 		if closeErr := resp.Body.Close(); closeErr != nil {
-			log.Debugf("theme: %s (close theme response body)", clean.Error(closeErr))
+			log.Debugf("theme: %s (close theme response body)", clean.ErrorFull(closeErr))
 		}
 	}()
 
@@ -583,20 +772,26 @@ func activateNodeThemeIfPresent(c *config.Config) {
 	log.Debugf("config: activated portal theme from %s", clean.Log(nodeDir))
 }
 
-// oauthAccessToken requests an OAuth access token via client_credentials using Basic auth.
-func oauthAccessToken(portal *url.URL, clientID, clientSecret, scope string) (string, error) {
+// OAuthAccessToken requests an OAuth access token via client_credentials using Basic auth.
+func OAuthAccessToken(portal *url.URL, clientID, clientSecret, scope string) (string, error) {
 	if portal == nil {
 		return "", fmt.Errorf("invalid portal url")
 	}
 
 	tokenURL := *portal
+	tokenURL.RawQuery = ""
 	tokenURL.Path = strings.TrimRight(tokenURL.Path, "/") + "/api/v1/oauth/token"
 
 	form := url.Values{}
 	form.Set("grant_type", "client_credentials")
 	form.Set("scope", clean.Scope(scope))
 
-	req, _ := http.NewRequest(http.MethodPost, tokenURL.String(), strings.NewReader(form.Encode()))
+	req, err := http.NewRequest(http.MethodPost, tokenURL.String(), strings.NewReader(form.Encode()))
+
+	if err != nil {
+		return "", err
+	}
+
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
 
@@ -613,7 +808,7 @@ func oauthAccessToken(portal *url.URL, clientID, clientSecret, scope string) (st
 
 	defer func() {
 		if closeErr := resp.Body.Close(); closeErr != nil {
-			log.Debugf("cluster: %s (close token response body)", clean.Error(closeErr))
+			log.Debugf("cluster: %s (close token response body)", clean.ErrorFull(closeErr))
 		}
 	}()
 

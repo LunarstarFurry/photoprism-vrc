@@ -12,7 +12,7 @@ single-arch ARM64 images (updated and tested less frequently):
 
   Stable Release     : photoprism/photoprism:arm64
   Development Preview: photoprism/photoprism:preview-arm64
-  MariaDB            : arm64v8/mariadb:11
+  MariaDB            : arm64v8/mariadb:12.3
 
 If your device meets the system requirements, mostly the same installation instructions
 as for regular Linux servers apply:
@@ -99,8 +99,8 @@ system resources are running low:
 - If you are using SQLite, switch to MariaDB, which is better optimized
   for high concurrency
 
-- As a last measure, you can disable the use of TensorFlow for image
-  classification and face recognition
+- As a last measure, you can disable image classification and face
+  recognition
 
 Other issues? Our troubleshooting checklists help you quickly diagnose
 and solve them:

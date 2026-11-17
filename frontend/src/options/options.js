@@ -56,36 +56,37 @@ export const Batch = (items, mixed) => {
   return items;
 };
 
+// Countries returns the country options, with a localized name for the "zz" code.
 export const Countries = () => {
-  return countries;
+  return countries.map((c) => (c.Code === "zz" ? { ...c, Name: $gettext("Unknown") } : c));
 };
 
 export const GmtOffsets = [
   { ID: "GMT", Name: "Etc/GMT" },
-  { ID: "UTC+1", Name: "Etc/GMT+01:00" },
-  { ID: "UTC+2", Name: "Etc/GMT+02:00" },
-  { ID: "UTC+3", Name: "Etc/GMT+03:00" },
-  { ID: "UTC+4", Name: "Etc/GMT+04:00" },
-  { ID: "UTC+5", Name: "Etc/GMT+05:00" },
-  { ID: "UTC+6", Name: "Etc/GMT+06:00" },
-  { ID: "UTC+7", Name: "Etc/GMT+07:00" },
-  { ID: "UTC+8", Name: "Etc/GMT+08:00" },
-  { ID: "UTC+9", Name: "Etc/GMT+09:00" },
-  { ID: "UTC+10", Name: "Etc/GMT+10:00" },
-  { ID: "UTC+11", Name: "Etc/GMT+11:00" },
-  { ID: "UTC+12", Name: "Etc/GMT+12:00" },
-  { ID: "UTC-1", Name: "Etc/GMT-01:00" },
-  { ID: "UTC-2", Name: "Etc/GMT-02:00" },
-  { ID: "UTC-3", Name: "Etc/GMT-03:00" },
-  { ID: "UTC-4", Name: "Etc/GMT-04:00" },
-  { ID: "UTC-5", Name: "Etc/GMT-05:00" },
-  { ID: "UTC-6", Name: "Etc/GMT-06:00" },
-  { ID: "UTC-7", Name: "Etc/GMT-07:00" },
-  { ID: "UTC-8", Name: "Etc/GMT-08:00" },
-  { ID: "UTC-9", Name: "Etc/GMT-09:00" },
-  { ID: "UTC-10", Name: "Etc/GMT-10:00" },
-  { ID: "UTC-11", Name: "Etc/GMT-11:00" },
-  { ID: "UTC-12", Name: "Etc/GMT-12:00" },
+  { ID: "UTC+1", Name: "UTC+01:00" },
+  { ID: "UTC+2", Name: "UTC+02:00" },
+  { ID: "UTC+3", Name: "UTC+03:00" },
+  { ID: "UTC+4", Name: "UTC+04:00" },
+  { ID: "UTC+5", Name: "UTC+05:00" },
+  { ID: "UTC+6", Name: "UTC+06:00" },
+  { ID: "UTC+7", Name: "UTC+07:00" },
+  { ID: "UTC+8", Name: "UTC+08:00" },
+  { ID: "UTC+9", Name: "UTC+09:00" },
+  { ID: "UTC+10", Name: "UTC+10:00" },
+  { ID: "UTC+11", Name: "UTC+11:00" },
+  { ID: "UTC+12", Name: "UTC+12:00" },
+  { ID: "UTC-1", Name: "UTC-01:00" },
+  { ID: "UTC-2", Name: "UTC-02:00" },
+  { ID: "UTC-3", Name: "UTC-03:00" },
+  { ID: "UTC-4", Name: "UTC-04:00" },
+  { ID: "UTC-5", Name: "UTC-05:00" },
+  { ID: "UTC-6", Name: "UTC-06:00" },
+  { ID: "UTC-7", Name: "UTC-07:00" },
+  { ID: "UTC-8", Name: "UTC-08:00" },
+  { ID: "UTC-9", Name: "UTC-09:00" },
+  { ID: "UTC-10", Name: "UTC-10:00" },
+  { ID: "UTC-11", Name: "UTC-11:00" },
+  { ID: "UTC-12", Name: "UTC-12:00" },
 ];
 
 export const TimeZones = (defaultName) =>
@@ -178,6 +179,8 @@ export const SetDefaultLocale = (locale) => {
     return;
   }
 
+  // Clears the previous default, so a locale that is not offered resolves to the first offered one.
+  DefaultLocale = "";
   DefaultLocale = FindLocale(locale);
 };
 
@@ -193,7 +196,8 @@ export const FallbackLanguage = () => {
   return { text: "English", value: "en" };
 };
 
-// Finds the best matching language by locale.
+// Finds the best matching language by locale, or else the default language if offered, or else the first one.
+// Reads DefaultLocale directly, since SetDefaultLocale resolves its value through this function.
 export const FindLanguage = (locale) => {
   if (!locale || locale.length < 2) {
     locale = DefaultLocale;
@@ -214,7 +218,7 @@ export const FindLanguage = (locale) => {
   if (found) {
     return found;
   } else if (languages.length > 0) {
-    return languages[0];
+    return languages.find((l) => l.value === DefaultLocale) ?? languages[0];
   } else {
     return locales.Options[0];
   }
@@ -287,7 +291,9 @@ export const MapsAnimate = () => [
   },
 ];
 
-export const MapsStyle = (experimental) => {
+// MapsStyle returns the selectable map styles.
+// Styles that require a MapTiler API key are omitted unless mapKey is true.
+export const MapsStyle = (experimental, mapKey = true) => {
   const styles = [
     {
       title: $gettext("Default"),
@@ -334,7 +340,7 @@ export const MapsStyle = (experimental) => {
     });
   }
 
-  return styles;
+  return mapKey ? styles : styles.filter((s) => !s.sponsor);
 };
 
 export const PhotoTypes = () => [
@@ -496,3 +502,33 @@ export const Orientations = () => [
 ];
 
 export const AccountTypes = () => [{ value: "webdav", text: $gettext("WebDAV") }];
+
+export const DownloadName = () => [
+  { value: "file", text: $gettext("Current Name") },
+  { value: "original", text: $gettext("Original Name") },
+  { value: "share", text: $gettext("Share Friendly") },
+];
+
+// SortOrderLabels maps the picture sort-order keys to their translated display labels.
+const SortOrderLabels = () => ({
+  newest: $gettext("Newest First"),
+  oldest: $gettext("Oldest First"),
+  added: $gettext("Recently Added"),
+  archived: $gettext("Recently Archived"),
+  edited: $gettext("Recently Edited"),
+  title: $gettext("Picture Title"),
+  name: $gettext("File Name"),
+  size: $gettext("File Size"),
+  duration: $gettext("Video Duration"),
+  similar: $gettext("Visual Similarity"),
+  relevance: $gettext("Most Relevant"),
+});
+
+// SortOrderOptions builds sort-order select items for the given keys, in the order provided.
+export const SortOrderOptions = (keys) => {
+  const labels = SortOrderLabels();
+  return keys.filter((key) => key in labels).map((key) => ({ value: key, text: labels[key] }));
+};
+
+// AlbumSortOrder returns the sort-order options offered for albums and collections.
+export const AlbumSortOrder = () => SortOrderOptions(["newest", "oldest", "added", "title", "name", "size", "duration", "relevance"]);

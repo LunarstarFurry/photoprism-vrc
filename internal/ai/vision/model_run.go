@@ -1,6 +1,9 @@
 package vision
 
 import (
+	"strings"
+
+	"github.com/photoprism/photoprism/internal/ai/classify"
 	"github.com/photoprism/photoprism/pkg/clean"
 )
 
@@ -22,7 +25,7 @@ const (
 	RunOnDemand RunType = "on-demand"
 	// RunOnSchedule runs manually and on-schedule.
 	RunOnSchedule RunType = "on-schedule"
-	// RunOnIndex runs manually and after indexing.
+	// RunOnIndex runs manually and during indexing.
 	RunOnIndex RunType = "on-index"
 )
 
@@ -36,6 +39,21 @@ func ReportRunType(when RunType) string {
 	}
 
 	return when
+}
+
+// KnownRunType reports whether s names a supported run type. ParseRunType cannot answer this:
+// it returns RunAuto both for the values that ask for it and for the ones it does not know.
+func KnownRunType(s string) bool {
+	_, found := RunTypes[clean.TypeLowerDash(s)]
+
+	return found
+}
+
+// RunTypeUsageString lists the canonical run types for use in CLI help text. It leaves out the
+// aliases RunTypes accepts, which would make the list unreadable without adding a choice.
+func RunTypeUsageString() string {
+	return strings.Join([]string{"auto", RunAlways, RunOnIndex, RunNewlyIndexed,
+		RunOnSchedule, RunOnDemand, RunManual, RunNever}, ", ")
 }
 
 // RunTypes maps configuration strings to standard RunType model settings.
@@ -88,31 +106,61 @@ func (m *Model) ShouldRun(when RunType) bool {
 
 	when = ParseRunType(when)
 
-	switch m.RunType() {
-	case RunAuto:
-		switch when {
-		case RunAuto, RunManual, RunOnDemand, RunOnSchedule:
-			return true
-		case RunAlways, RunOnIndex:
-			return m.IsDefault()
-		case RunNewlyIndexed:
-			return !m.IsDefault()
-		}
-	case RunNever:
-		return false
-	case RunManual:
-		return when == RunManual
-	case RunAlways:
-		return when != RunNever
+	if should, decided := ShouldRunAt(m.RunType(), when); decided {
+		return should
+	}
+
+	uri, _ := m.Endpoint()
+	if m.Type == ModelTypeNsfw && m.TensorFlow == nil && uri == "" && !m.Service.UriUnresolved() {
+		return when != RunNewlyIndexed && when != RunNever
+	}
+
+	inline := m.IsDefault()
+
+	// A local classifier runs during indexing only if it is the default one, so an automatically
+	// selected alternative, which has Default set, still runs after indexing.
+	if m.Type == ModelTypeLabels && m.TensorFlow == nil && uri == "" && !m.Service.UriUnresolved() {
+		inline = classify.NormalizeModelName(classify.ModelName(m.Name)) == classify.NormalizeModelName(classify.ModelName(DefaultLabelModel.Name))
+	}
+
+	switch when {
+	case RunAuto, RunManual, RunOnDemand, RunOnSchedule:
+		return true
+	case RunAlways, RunOnIndex:
+		return inline
 	case RunNewlyIndexed:
-		return when == RunManual || when == RunNewlyIndexed || when == RunOnDemand
-	case RunOnDemand:
-		return when == RunAuto || when == RunManual || when == RunNewlyIndexed || when == RunOnDemand || when == RunOnSchedule
-	case RunOnSchedule:
-		return when == RunAuto || when == RunManual || when == RunOnSchedule || when == RunOnDemand
-	case RunOnIndex:
-		return when == RunManual || when == RunOnIndex
+		return !inline
 	}
 
 	return false
+}
+
+// ShouldRunAt reports whether work configured to run at "run" executes in the "when" context, and
+// whether that could be decided here at all.
+//
+// RunAuto is left undecided, because what "auto" means belongs to the caller: a vision model asks
+// whether it is the default one, face detection whether the host is fast enough to detect inline.
+// Everything else is one table rather than one per caller - a second copy dropped a term from
+// RunOnDemand, which left FACE_RUN=on-demand skipping the scheduled pass it names.
+func ShouldRunAt(run, when RunType) (should, decided bool) {
+	when = ParseRunType(when)
+
+	switch ParseRunType(run) {
+	case RunNever:
+		return false, true
+	case RunManual:
+		return when == RunManual, true
+	case RunAlways:
+		return when != RunNever, true
+	case RunNewlyIndexed:
+		return when == RunManual || when == RunNewlyIndexed || when == RunOnDemand, true
+	case RunOnDemand:
+		return when == RunAuto || when == RunManual || when == RunNewlyIndexed || when == RunOnDemand || when == RunOnSchedule, true
+	case RunOnSchedule:
+		return when == RunAuto || when == RunManual || when == RunOnSchedule || when == RunOnDemand, true
+	case RunOnIndex:
+		return when == RunManual || when == RunOnIndex, true
+	}
+
+	return false, false
 }

@@ -7,17 +7,18 @@ import (
 	"path/filepath"
 	"regexp"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	gc "github.com/patrickmn/go-cache"
 	"github.com/urfave/cli/v2"
-
-	_ "github.com/jinzhu/gorm/dialects/mysql" // register mysql dialect
-	_ "github.com/jinzhu/gorm/dialects/sqlite"
+	"gorm.io/gorm"
 
 	"github.com/photoprism/photoprism/internal/config/customize"
+	"github.com/photoprism/photoprism/internal/entity"
+	"github.com/photoprism/photoprism/internal/event"
 	"github.com/photoprism/photoprism/internal/service/hub"
 	"github.com/photoprism/photoprism/internal/thumb"
 	"github.com/photoprism/photoprism/pkg/authn"
@@ -25,6 +26,7 @@ import (
 	"github.com/photoprism/photoprism/pkg/clean"
 	"github.com/photoprism/photoprism/pkg/dsn"
 	"github.com/photoprism/photoprism/pkg/fs"
+	"github.com/photoprism/photoprism/pkg/log/status"
 	"github.com/photoprism/photoprism/pkg/rnd"
 	"github.com/photoprism/photoprism/pkg/txt/report"
 )
@@ -119,8 +121,9 @@ func NewTestOptionsForPath(dbName, dataPath string) *Options {
 
 	// Obtain test database credentials.
 	//
-	// Example PHOTOPRISM_TEST_DSN for MariaDB / MySQL:
-	// - "photoprism:photoprism@tcp(mariadb:4001)/photoprism?parseTime=true"
+	// Example PHOTOPRISM_TEST_DSN for MariaDB / MySQL (the port matches the dev
+	// MariaDB service, which defaults to 4001 unless MARIADB_PORT overrides it):
+	// - "root:photoprism@tcp(mariadb:4001)/testdb?parseTime=true"
 	dbName = PkgNameRegexp.ReplaceAllString(dbName, "")
 	testDriver := os.Getenv("PHOTOPRISM_TEST_DRIVER")
 	testDsn := os.Getenv("PHOTOPRISM_TEST_DSN")
@@ -146,13 +149,16 @@ func NewTestOptionsForPath(dbName, dataPath string) *Options {
 				log.Errorf("sqlite: failed to remove existing test database %s (%s)", clean.Log(testDsn), err)
 			}
 		}
+	} else {
+		// Give the package a database of its own, so that tests can run in parallel.
+		testDsn = entity.TestDbDSN(testDriver, testDsn)
 	}
 
 	// Test config options.
 	opts := &Options{
 		Name:            "PhotoPrism",
 		Version:         "0.0.0",
-		Copyright:       "(c) 2018-2025 PhotoPrism UG. All rights reserved.",
+		Copyright:       "(c) 2018-2026 PhotoPrism UG. All rights reserved.",
 		Public:          true,
 		Sponsor:         true,
 		AuthMode:        "",
@@ -205,7 +211,7 @@ func NewTestOptionsError() *Options {
 		OriginalsPath:  dataPath + "/originals",
 		ImportPath:     dataPath + "/import",
 		TempPath:       dataPath + "/temp",
-		DatabaseDriver: SQLite3,
+		DatabaseDriver: dsn.DriverSQLite3,
 		DatabaseDSN:    ".test-error.db",
 	}
 
@@ -225,15 +231,56 @@ func TestConfig() *Config {
 	return testConfig
 }
 
+// RestoreDBFromCache will restore an SQLite database from a cache.
+// Only works if the target database does not exist.
+func RestoreDBFromCache(c *Config) (cachedDB bool) {
+	cachedDB = false
+	// Try to restore test db from cache.
+	if len(testDbCache) > 0 && c.DatabaseDriver() == dsn.DriverSQLite3 && !fs.FileExists(c.DatabaseFile()) {
+		if err := os.WriteFile(c.DatabaseFile(), testDbCache, fs.ModeFile); err != nil {
+			log.Warnf("config: %s (restore test database)", err)
+		} else {
+			log.Infof("config: restored %s from cache", c.DatabaseFile())
+			cachedDB = true
+		}
+
+		// Open the database
+		c.RegisterDb()
+	} else {
+		log.Infof("config: cache was not used for %s", c.DatabaseFile())
+	}
+	return cachedDB
+}
+
+// OnceTestConfig attempts to set testConfig if it hasn't already been done.
+func OnceTestConfig(c *Config) {
+	// If this is the 1st call to NewTestConfig, then cache it.
+	// This is required for /internal/photoprism tests.
+	testConfigOnce.Do(func() { testConfig = c })
+}
+
 // NewMinimalTestConfig creates a lightweight test Config (no DB, minimal filesystem).
 //
 // Not suitable for tests requiring a database or pre-created storage directories.
 func NewMinimalTestConfig(dataPath string) *Config {
-	return NewIsolatedTestConfig("", dataPath, false)
+	// Name the database even though this config never connects to one: an empty name
+	// resolves to the shared SQLite test DSN and deletes that file, which would drop the
+	// schema out from under a suite whose TestMain already opened it via TestConfig().
+	return NewIsolatedTestConfig("minimal", dataPath, false)
 }
 
 var testDbCache []byte
 var testDbMutex sync.Mutex
+
+// OpenTestDb opens a test connection without publishing it as the entity provider.
+// Configure callbacks before Init or RegisterDb makes the connection available to workers.
+func (c *Config) OpenTestDb() (*gorm.DB, error) {
+	if err := c.connectDb(); err != nil {
+		return nil, err
+	}
+
+	return c.db, nil
+}
 
 // NewMinimalTestConfigWithDb creates a lightweight test Config (minimal filesystem).
 //
@@ -244,7 +291,7 @@ func NewMinimalTestConfigWithDb(dbName, dataPath string) *Config {
 	cachedDb := false
 
 	// Try to restore test db from cache.
-	if len(testDbCache) > 0 && c.DatabaseDriver() == SQLite3 && !fs.FileExists(c.DatabaseDSN()) {
+	if len(testDbCache) > 0 && c.DatabaseDriver() == dsn.DriverSQLite3 && !fs.FileExists(c.DatabaseDSN()) {
 		if err := os.WriteFile(c.DatabaseDSN(), testDbCache, fs.ModeFile); err != nil {
 			log.Warnf("config: %s (restore test database)", err)
 		} else {
@@ -264,7 +311,7 @@ func NewMinimalTestConfigWithDb(dbName, dataPath string) *Config {
 
 	c.InitTestDb()
 
-	if testDbCache == nil && c.DatabaseDriver() == SQLite3 && fs.FileExistsNotEmpty(c.DatabaseDSN()) {
+	if testDbCache == nil && c.DatabaseDriver() == dsn.DriverSQLite3 && fs.FileExistsNotEmpty(c.DatabaseDSN()) {
 		testDbMutex.Lock()
 		defer testDbMutex.Unlock()
 
@@ -311,39 +358,55 @@ func NewIsolatedTestConfig(dbName, dataPath string, createDirs bool) *Config {
 	return c
 }
 
-// NewTestConfig initializes test data so required directories exist before tests run.
-// See AGENTS.md (Test Data & Fixtures) and specs/dev/backend-testing.md for guidance.
+// NewTestConfig initializes test data in an isolated storage folder, so packages tested at the same
+// time do not clash. Call CleanupTestFolder to remove it; see internal/AGENTS.md (Internal Tests & Fixtures).
 func NewTestConfig(dbName string) *Config {
 	defer log.Debug(capture.Time(time.Now(), "config: new test config created"))
 
 	testConfigMutex.Lock()
 	defer testConfigMutex.Unlock()
 
+	storagePath := os.Getenv("PHOTOPRISM_STORAGE_PATH")
+	if storagePath == "" {
+		storagePath = fs.Abs("../../storage")
+	}
+
+	var tp string
+	var err error
+
+	if tp, err = os.MkdirTemp(storagePath, "test-photoprism-*"); err != nil {
+		log.Panicf("config: %s", clean.Error(err))
+	}
+
+	testFolder := tp
+	tp = filepath.Join(tp, fs.TestdataDir)
+
 	c := &Config{
-		cliCtx:  CliTestContext(),
-		options: NewTestOptions(dbName),
-		token:   rnd.Base36(8),
-		cache:   gc.New(time.Second, time.Minute),
+		cliCtx:     CliTestContext(),
+		options:    NewTestOptionsForPath(dbName, tp),
+		token:      rnd.Base36(8),
+		cache:      gc.New(time.Second, time.Minute),
+		testFolder: testFolder,
 	}
 
 	s := customize.NewSettings(c.DefaultTheme(), c.DefaultLocale(), c.DefaultTimezone().String())
 
-	if err := fs.MkdirAll(c.ConfigPath()); err != nil {
-		log.Panicf("config: %s", err.Error())
+	if err = fs.MkdirAll(c.ConfigPath()); err != nil {
+		log.Panicf("config: %s", clean.Error(err))
 	}
 
 	// Save settings next to the test config path, reusing any existing
 	// `.yaml`/`.yml` variant so the tests mirror production behavior.
-	if err := s.Save(fs.ConfigFilePath(c.ConfigPath(), "settings", fs.ExtYml)); err != nil {
-		log.Panicf("config: %s", err.Error())
+	if err = s.Save(fs.ConfigFilePath(c.ConfigPath(), "settings", fs.ExtYml)); err != nil {
+		log.Panicf("config: %s", clean.Error(err))
 	}
 
-	if err := c.Init(); err != nil {
-		log.Panicf("config: %s", err.Error())
+	if err = c.Init(); err != nil {
+		log.Panicf("config: %s", clean.Error(err))
 	}
 
-	if err := c.InitializeTestData(); err != nil {
-		log.Errorf("config: %s", err.Error())
+	if err = c.InitializeTestData(); err != nil {
+		log.Errorf("config: %s", clean.Error(err))
 	}
 
 	c.RegisterDb()
@@ -351,6 +414,7 @@ func NewTestConfig(dbName string) *Config {
 
 	thumb.SizeCached = c.ThumbSizePrecached()
 	thumb.SizeOnDemand = c.ThumbSizeUncached()
+	thumb.SizeFace = c.ThumbSizeFace()
 	thumb.Filter = c.ThumbFilter()
 	thumb.JpegQualityDefault = c.JpegQuality()
 
@@ -373,7 +437,7 @@ func NewTestContext(args []string) *cli.Context {
 	app := cli.NewApp()
 	app.Usage = "PhotoPrism®"
 	app.Version = "test"
-	app.Copyright = "(c) 2018-2025 PhotoPrism UG. All rights reserved."
+	app.Copyright = "(c) 2018-2026 PhotoPrism UG. All rights reserved."
 	app.EnableBashCompletion = true
 	app.Flags = Flags.Cli()
 	app.Metadata = Values{
@@ -418,9 +482,13 @@ func CliTestContext() *cli.Context {
 	globalSet.String("darktable-cli", config.DarktableBin, "doc")
 	globalSet.String("darktable-exclude", config.DarktableExclude, "doc")
 	globalSet.String("sips-exclude", config.SipsExclude, "doc")
+	globalSet.String("ffmpeg-exclude", config.FFmpegExclude, "doc")
 	globalSet.String("wakeup-interval", "1h34m9s", "doc")
 	globalSet.Bool("vision-api", config.VisionApi, "doc")
+	globalSet.String("labels-model", "", "doc")
+	globalSet.String("nsfw-model", "auto", "doc")
 	globalSet.Bool("detect-nsfw", config.DetectNSFW, "doc")
+	globalSet.Bool("xmp-faces", config.XMPFaces, "doc")
 	globalSet.Bool("debug", false, "doc")
 	globalSet.Bool("sponsor", true, "doc")
 	globalSet.Bool("test", true, "doc")
@@ -454,8 +522,11 @@ func CliTestContext() *cli.Context {
 	LogErr(c.Set("darktable-cli", config.DarktableBin))
 	LogErr(c.Set("darktable-exclude", "raf, cr3"))
 	LogErr(c.Set("sips-exclude", "avif, avifs, thm"))
+	LogErr(c.Set("ffmpeg-exclude", "magicyuv"))
 	LogErr(c.Set("wakeup-interval", "1h34m9s"))
 	LogErr(c.Set("vision-api", "true"))
+	LogErr(c.Set("labels-model", ""))
+	LogErr(c.Set("nsfw-model", "auto"))
 	LogErr(c.Set("detect-nsfw", "true"))
 	LogErr(c.Set("debug", "false"))
 	LogErr(c.Set("sponsor", "true"))
@@ -526,7 +597,7 @@ func (c *Config) UnzipTestData() error {
 //
 // The function removes prior artifacts, downloads fixtures when missing,
 // unzips them, and then calls CreateDirectories so required directories exist.
-// See AGENTS.md (Test Data & Fixtures) for details.
+// See internal/AGENTS.md (Internal Tests & Fixtures) for details.
 func (c *Config) InitializeTestData() (err error) {
 	testDataMutex.Lock()
 	defer testDataMutex.Unlock()
@@ -606,5 +677,35 @@ func (c *Config) AssertTestData(t *testing.T) {
 		reportDir(dir)
 	} else {
 		reportErr("SidecarPath")
+	}
+}
+
+// CleanupTestFolder removes the isolated storage directory created by NewTestConfig, or else the one
+// StoragePath points to. Only "test-photoprism-*" directories are removed, and a test that changes
+// StoragePath does not change which one. A failed removal is logged rather than aborting the run.
+func (c *Config) CleanupTestFolder() {
+	if c.options == nil && c.testFolder == "" {
+		event.SystemWarn([]string{"config", "test", "c.options is nil in CleanupTestFolder"})
+		return
+	}
+
+	var td, parent string
+
+	if c.testFolder != "" {
+		parent = c.testFolder
+		td = filepath.Join(parent, fs.TestdataDir)
+	} else {
+		td = c.StoragePath()
+		parent = filepath.Dir(td)
+	}
+
+	if filepath.Base(td) == fs.TestdataDir && strings.HasPrefix(filepath.Base(parent), "test-photoprism-") {
+		if err := os.RemoveAll(parent); err != nil {
+			event.SystemWarn([]string{"config", "test", "cleanup %s", "%s"}, parent, clean.ErrorFull(err))
+			return
+		}
+		event.SystemDebug([]string{"config", "test", "cleanup %s", status.Succeeded}, parent)
+	} else {
+		event.SystemWarn([]string{"config", "test", "cleanup %s", "failed"}, td)
 	}
 }

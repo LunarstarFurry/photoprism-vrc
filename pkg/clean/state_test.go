@@ -1,9 +1,12 @@
 package clean
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+
+	"github.com/photoprism/photoprism/pkg/txt"
 )
 
 func TestState(t *testing.T) {
@@ -58,6 +61,31 @@ func TestState(t *testing.T) {
 	t.Run("SpecialChars", func(t *testing.T) {
 		result := State("Wa?shing*ton"+string(rune(127)), "us")
 		assert.Equal(t, "Washington", result)
+	})
+	t.Run("LongName", func(t *testing.T) {
+		got := State(strings.Repeat("a", txt.ClipName+50), "")
+		assert.Equal(t, txt.ClipName, len(got))
+		assert.Equal(t, strings.Repeat("a", txt.ClipName), got)
+	})
+	t.Run("LongMultiByte", func(t *testing.T) {
+		got := State(strings.Repeat("陈", txt.ClipName+50), "")
+		assert.Equal(t, txt.ClipName, len([]rune(got)))
+		assert.Equal(t, got, string([]rune(got)))
+	})
+	t.Run("JoinersKept", func(t *testing.T) {
+		assert.Equal(t, "\u0686\u0647\u0627\u0631\u0645\u200C\u0645\u062D\u0627\u0644", State("\u0686\u0647\u0627\u0631\u0645\u200C\u0645\u062D\u0627\u0644", "ir"))
+		assert.Equal(t, "\U0001F3F3\uFE0F\u200D\U0001F308 Pride", State("\U0001F3F3\uFE0F\u200D\U0001F308 Pride", ""))
+	})
+	t.Run("SpacesFolded", func(t *testing.T) {
+		assert.Equal(t, "Baden W\u00FCrttemberg", State("Baden\u00A0W\u00FCrttemberg", ""))
+		assert.Equal(t, "Baden W\u00FCrttemberg", State("Baden\u3000W\u00FCrttemberg", ""))
+	})
+	t.Run("FormatCharsRemoved", func(t *testing.T) {
+		assert.Equal(t, "Bayern", State("Bay\u202Eern\u200B", "de"))
+	})
+	t.Run("Injection", func(t *testing.T) {
+		assert.Equal(t, "", State("hello ${jndi:ldap://example.com/x}", ""))
+		assert.Equal(t, "", State("ldap://attacker.example/", ""))
 	})
 
 }

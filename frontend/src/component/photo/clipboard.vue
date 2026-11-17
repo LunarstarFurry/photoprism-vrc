@@ -169,7 +169,8 @@
   </div>
 </template>
 <script>
-import $api from "common/api";
+import Axios from "axios";
+import $api, { requestErrorDetails } from "common/api";
 import $notify from "common/notify";
 import download from "common/download";
 import Photo from "model/photo";
@@ -249,6 +250,7 @@ export default {
     },
     onApproved() {
       $notify.success(this.$gettext("Selection approved"));
+      this.selection.forEach((uid) => Photo.evictCache(uid));
       this.clearClipboard();
     },
     archivePhotos() {
@@ -279,6 +281,7 @@ export default {
     },
     onArchived() {
       $notify.success(this.$gettext("Selection archived"));
+      this.selection.forEach((uid) => Photo.evictCache(uid));
       this.clearClipboard();
     },
     deletePhotos() {
@@ -299,12 +302,14 @@ export default {
     },
     onDeleted() {
       $notify.success(this.$gettext("Permanently deleted"));
+      this.selection.forEach((uid) => Photo.evictCache(uid));
       this.clearClipboard();
     },
     batchPrivate() {
       $api.post("batch/photos/private", { photos: this.selection }).then(() => this.onPrivateSaved());
     },
     onPrivateSaved() {
+      this.selection.forEach((uid) => Photo.evictCache(uid));
       this.clearClipboard();
     },
     batchRestore() {
@@ -312,6 +317,7 @@ export default {
     },
     onRestored() {
       $notify.success(this.$gettext("Selection restored"));
+      this.selection.forEach((uid) => Photo.evictCache(uid));
       this.clearClipboard();
     },
     addToAlbum(ppidOrList) {
@@ -338,7 +344,7 @@ export default {
 
       Promise.all(uniqueAlbumUids.map((uid) => $api.post(`albums/${uid}/photos`, body)))
         .then(() => this.onAdded())
-        .catch((error) => {
+        .catch(() => {
           $notify.error(this.$gettext("Some albums could not be updated"));
         })
         .finally(() => {
@@ -346,6 +352,7 @@ export default {
         });
     },
     onAdded() {
+      this.selection.forEach((uid) => Photo.evictCache(uid));
       this.clearClipboard();
     },
     removeFromAlbum() {
@@ -372,6 +379,7 @@ export default {
         });
     },
     onRemoved() {
+      this.selection.forEach((uid) => Photo.evictCache(uid));
       this.clearClipboard();
     },
     download() {
@@ -388,12 +396,30 @@ export default {
         case 1:
           new Photo()
             .find(this.selection[0])
-            .then((p) => p.downloadAll())
+            .then((p) => {
+              const { downloaded } = p.downloadAll();
+
+              if (downloaded > 0) {
+                $notify.success(this.$gettext("Downloading…"));
+              } else {
+                $notify.warn(this.$gettext("No files available for download"));
+              }
+            })
+            .catch((err) => {
+              console.warn("download failed", requestErrorDetails(err));
+
+              // The API client already notifies the user of failed requests.
+              if (!Axios.isAxiosError(err)) {
+                $notify.warn(this.$gettext("No files available for download"));
+              }
+            })
             .finally(() => {
               this.busy = false;
             });
           break;
         default:
+          $notify.success(this.$gettext("Downloading…"));
+
           $api
             .post("zip", { photos: this.selection })
             .then((r) => {
@@ -403,8 +429,6 @@ export default {
               this.busy = false;
             });
       }
-
-      $notify.success(this.$gettext("Downloading…"));
 
       this.expanded = false;
     },

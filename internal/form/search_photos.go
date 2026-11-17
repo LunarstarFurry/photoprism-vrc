@@ -42,6 +42,7 @@ type SearchPhotos struct {
 	Scan        string    `form:"scan" example:"scan:true scan:false" notes:"Finds scanned photos and documents"`
 	Mp          string    `form:"mp" example:"mp:3-6" notes:"Resolution in Megapixels (MP)"`
 	Panorama    bool      `form:"panorama" notes:"Finds panorama pictures only (aspect ratio 1.9:1 or more)"`
+	Fisheye     bool      `form:"fisheye" notes:"Finds fisheye 360° originals (e.g. Insta360 .insv/.insp)"`
 	Portrait    bool      `form:"portrait" notes:"Finds portrait pictures only"`
 	Landscape   bool      `form:"landscape" notes:"Finds landscape pictures only"`
 	Square      bool      `form:"square" notes:"Finds square pictures only (aspect ratio 1:1)"`
@@ -68,12 +69,12 @@ type SearchPhotos struct {
 	F           string    `form:"f" example:"f:2.8-4.5" notes:"Aperture (F-Number)"`
 	Color       string    `form:"color" example:"color:\"red|blue\"" notes:"Color name separated by |, e.g. purple, magenta, pink, red, orange, gold, yellow, lime, green, teal, cyan, blue, brown, white, grey, or black"` // Main color
 	Codec       string    `form:"codec" example:"codec:avc1" notes:"Media codec types separated by |, e.g. jpeg, avc1, or hvc1"`
-	Chroma      int16     `form:"chroma" example:"chroma:70" notes:"Chroma (0-100)"`
+	Chroma      int16     `form:"chroma" example:"chroma:70" notes:"Chroma (1-100)"`
 	Mono        bool      `form:"mono" notes:"Pictures with few or no colors"`
 	Diff        uint32    `form:"diff" notes:"Differential Perceptual Hash (000000-FFFFFF)"`
 	Geo         string    `form:"geo" example:"geo:yes" notes:"Finds content with or without latitude and longitude"`
 	Keywords    string    `form:"keywords" example:"keywords:\"sand&water\"" notes:"Keywords, combinable with & and |"`
-	Label       string    `form:"label" example:"label:cat|dog" notes:"Label names, separated by |"`
+	Label       string    `form:"label" example:"label:\"cat|dog&!blurry\"" notes:"Label names: | is OR within a group, & is AND between groups (every positive group must match), leading ! negates a group (e.g. !rejected). Category expansion applies to both positive and negative terms. Escape a literal &, |, or leading ! with \\"`
 	Category    string    `form:"category" example:"category:airport" notes:"Location category type"`
 	Country     string    `form:"country" example:"country:\"de|us\"" notes:"Country codes, separated by |"`                                                                             // Moments
 	State       string    `form:"state" example:"state:\"Baden-Württemberg\"" notes:"State or province names, separated by |"`                                                           // Moments
@@ -141,6 +142,7 @@ func (f *SearchPhotos) ParseQueryString() error {
 		f.People = ""
 	}
 
+	// Stored album filters may hold folder names that are not valid UTF-8, whose values are dropped.
 	if f.Filter != "" {
 		if err := Unserialize(f, f.Filter); err != nil {
 			return err

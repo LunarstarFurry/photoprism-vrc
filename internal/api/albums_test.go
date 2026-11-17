@@ -5,9 +5,12 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/photoprism/photoprism/internal/config"
+	"github.com/photoprism/photoprism/internal/entity"
 	"github.com/photoprism/photoprism/internal/entity/query"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/tidwall/gjson"
 
 	"github.com/photoprism/photoprism/pkg/i18n"
@@ -28,6 +31,17 @@ func TestGetAlbum(t *testing.T) {
 		r := PerformRequest(app, "GET", "/api/v1/albums/999000")
 		val := gjson.Get(r.Body.String(), "error")
 		assert.Equal(t, "Album not found", val.String())
+		assert.Equal(t, http.StatusNotFound, r.Code)
+	})
+	t.Run("GuestDeniedNotShared", func(t *testing.T) {
+		app, router, conf := NewApiTest()
+		conf.SetAuthMode(config.AuthModePasswd)
+		defer conf.SetAuthMode(config.AuthModePublic)
+
+		GetAlbum(router)
+		sessId := AuthenticateUser(app, router, "gandalf", "Gandalf123!")
+		// An album outside the guest's shared scope is reported as not found.
+		r := AuthenticatedRequest(app, "GET", "/api/v1/albums/as6sg6bxpogaaba8", sessId)
 		assert.Equal(t, http.StatusNotFound, r.Code)
 	})
 }
@@ -78,6 +92,21 @@ func TestUpdateAlbum(t *testing.T) {
 		val2 := gjson.Get(r.Body.String(), "Favorite")
 		assert.Equal(t, "false", val2.String())
 		assert.Equal(t, http.StatusOK, r.Code)
+	})
+	t.Run("TypeIgnored", func(t *testing.T) {
+		app, router, _ := NewApiTest()
+		UpdateAlbum(router)
+
+		for _, albumType := range []string{"moment", "calendar"} {
+			r := PerformRequestWithBody(app, "PUT", "/api/v1/albums/"+uid, `{"Title": "Updated02", "Type": "`+albumType+`"}`)
+			assert.Equal(t, http.StatusOK, r.Code)
+			assert.Equal(t, "album", gjson.Get(r.Body.String(), "Type").String(), albumType)
+			assert.Equal(t, "Updated02", gjson.Get(r.Body.String(), "Title").String())
+
+			found := entity.FindAlbum(entity.Album{AlbumUID: uid})
+			require.NotNil(t, found)
+			assert.Equal(t, "album", found.AlbumType, albumType)
+		}
 	})
 	t.Run("Invalid", func(t *testing.T) {
 		app, router, _ := NewApiTest()
@@ -338,7 +367,7 @@ func TestRemovePhotosFromAlbum(t *testing.T) {
 func TestCloneAlbums(t *testing.T) {
 	app, router, _ := NewApiTest()
 	CreateAlbum(router)
-	r := PerformRequestWithBody(app, "POST", "/api/v1/albums", `{"Title": "Update", "Description": "To be updated", "Notes": "", "Favorite": true}`)
+	r := PerformRequestWithBody(app, "POST", "/api/v1/albums", `{"Title": "Clone Source", "Description": "To be cloned", "Notes": "", "Favorite": true}`)
 	assert.Equal(t, http.StatusCreated, r.Code)
 	uid := gjson.Get(r.Body.String(), "UID").String()
 

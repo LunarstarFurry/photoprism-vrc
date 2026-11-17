@@ -1,13 +1,31 @@
 package api
 
 import (
+	"archive/zip"
+	"bytes"
+	"fmt"
 	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 
+	"github.com/gin-gonic/gin"
+	"github.com/sirupsen/logrus"
+	"github.com/sirupsen/logrus/hooks/test"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/tidwall/gjson"
 
+	"github.com/photoprism/photoprism/internal/config"
+	"github.com/photoprism/photoprism/internal/config/customize"
 	"github.com/photoprism/photoprism/internal/entity"
+	"github.com/photoprism/photoprism/internal/event"
+	"github.com/photoprism/photoprism/internal/photoprism"
+	"github.com/photoprism/photoprism/pkg/fs"
+	"github.com/photoprism/photoprism/pkg/log/status"
+	"github.com/photoprism/photoprism/pkg/media"
+	"github.com/photoprism/photoprism/pkg/rnd"
 )
 
 func TestZip(t *testing.T) {
@@ -49,6 +67,41 @@ func TestZip(t *testing.T) {
 		response := PerformRequest(app, "GET", "/api/v1/zip/xxx?t="+conf.DownloadToken())
 		assert.Equal(t, http.StatusNotFound, response.Code)
 	})
+	t.Run("FailedArchiveRemoved", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("file modes do not apply to root")
+		}
+
+		resetZipDownloadFixtures(t)
+
+		// listArchives returns the names of the archives in the zip folder.
+		zipPath := filepath.Join(conf.TempPath(), fs.ZipDir)
+		listArchives := func(t *testing.T) []string {
+			t.Helper()
+			entries, err := os.ReadDir(zipPath)
+			if os.IsNotExist(err) {
+				return nil
+			}
+			require.NoError(t, err)
+			names := make([]string, 0, len(entries))
+			for _, entry := range entries {
+				names = append(names, entry.Name())
+			}
+			return names
+		}
+
+		before := listArchives(t)
+
+		fileName := photoprism.FileName(entity.RootOriginals, "Germany/bridge.jpg")
+		require.NoFileExists(t, fileName)
+		require.NoError(t, os.MkdirAll(filepath.Dir(fileName), fs.ModeDir))
+		require.NoError(t, os.WriteFile(fileName, []byte("unreadable"), 0o000))
+		t.Cleanup(func() { _ = os.Remove(fileName) })
+
+		r := PerformRequestWithBody(app, "POST", "/api/v1/zip", `{"photos": ["ps6sg6be2lvl0y11"]}`)
+		assert.Equal(t, http.StatusInternalServerError, r.Code)
+		assert.Subset(t, before, listArchives(t), "no archive may be left after a failed request")
+	})
 }
 
 // resetZipDownloadFixtures restores file rows used by TestZip/Download, making
@@ -74,7 +127,7 @@ func resetZipDownloadFixtures(t *testing.T) {
 	}
 
 	for _, file := range reset {
-		result := entity.UnscopedDb().
+		if err := entity.UnscopedDb().
 			Model(&entity.File{}).
 			Where("photo_uid = ?", file.photoUID).
 			Updates(entity.Values{
@@ -83,14 +136,194 @@ func resetZipDownloadFixtures(t *testing.T) {
 				"file_hash":    file.fileHash,
 				"file_missing": false,
 				"deleted_at":   nil,
-			})
-
-		if result.Error != nil {
-			t.Fatalf("reset fixture %s failed: %v", file.photoUID, result.Error)
+			}).Error; err != nil {
+			t.Fatalf("reset fixture %s failed: %v", file.photoUID, err)
 		}
 
-		if result.RowsAffected < 1 {
+		// The row count is verified separately, as MySQL reports the number of
+		// rows an UPDATE changed while SQLite reports the number it matched.
+		var found int64
+
+		if err := entity.UnscopedDb().
+			Model(&entity.File{}).
+			Where("photo_uid = ? AND file_name = ? AND file_missing = FALSE", file.photoUID, file.fileName).
+			Count(&found).Error; err != nil {
+			t.Fatalf("reset fixture %s failed: %v", file.photoUID, err)
+		} else if found < 1 {
 			t.Fatalf("reset fixture %s failed: no rows updated", file.photoUID)
 		}
 	}
+}
+
+func TestAuditArchiveAccess(t *testing.T) {
+	orig := event.AuditLog
+	logger, hook := test.NewNullLogger()
+	logger.SetLevel(logrus.TraceLevel)
+	event.AuditLog = logger
+
+	t.Cleanup(func() {
+		event.AuditLog = orig
+	})
+
+	// newTestContext returns a gin context backed by a request, as ClientIP requires one.
+	newTestContext := func() *gin.Context {
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		c.Request = httptest.NewRequest(http.MethodGet, "/api/v1/zip/photoprism-download-20260727-094439-zihqtuw4.zip", nil)
+		return c
+	}
+	t.Run("WithSession", func(t *testing.T) {
+		hook.Reset()
+		auditArchiveAccess(newTestContext(), &entity.Session{RefID: "sessxkkcabcd"}, "download %s", status.Succeeded, "photoprism-download-20260727-094439-zihqtuw4.zip")
+		entries := hook.AllEntries()
+
+		if len(entries) != 1 {
+			t.Fatalf("expected 1 audit entry, got %d", len(entries))
+		}
+
+		msg := entries[0].Message
+		assert.Contains(t, msg, "sessxkkcabcd")
+		assert.Contains(t, msg, "photoprism-download-20260727-094439-***.zip")
+		assert.Contains(t, msg, status.Succeeded)
+		assert.NotContains(t, msg, "zihqtuw4")
+	})
+	t.Run("WithoutSession", func(t *testing.T) {
+		hook.Reset()
+		auditArchiveAccess(newTestContext(), nil, "download %s", status.NotFound, "photoprism-download-20260727-094439-zihqtuw4.zip")
+		entries := hook.AllEntries()
+
+		if len(entries) != 1 {
+			t.Fatalf("expected 1 audit entry, got %d", len(entries))
+		}
+
+		msg := entries[0].Message
+		assert.Contains(t, msg, "photoprism-download-20260727-094439-***.zip")
+		assert.Contains(t, msg, status.NotFound)
+		assert.NotContains(t, msg, "session")
+		assert.NotContains(t, msg, "zihqtuw4")
+	})
+}
+
+// videoStillTestPhoto creates a video photo whose originals, generated still and sidecar exist on disk.
+// The download settings are restored and the file roots point to temporary folders.
+func videoStillTestPhoto(t *testing.T, conf *config.Config) *entity.Photo {
+	t.Helper()
+
+	options, settings := *conf.Options(), *conf.Settings()
+	t.Cleanup(func() {
+		*conf.Options() = options
+		*conf.Settings() = settings
+		conf.Propagate()
+	})
+	conf.Options().TempPath = t.TempDir()
+	conf.Options().OriginalsPath = t.TempDir()
+	conf.Options().SidecarPath = t.TempDir()
+	conf.Propagate()
+
+	photo := entity.NewPhoto(false)
+	photo.PhotoType = media.Video.String()
+	require.NoError(t, photo.Save())
+	t.Cleanup(func() {
+		entity.UnscopedDb().Unscoped().Delete(&entity.File{}, "photo_id = ?", photo.ID)
+		entity.UnscopedDb().Unscoped().Delete(&entity.Details{}, "photo_id = ?", photo.ID)
+		entity.UnscopedDb().Unscoped().Delete(&photo)
+	})
+
+	for _, f := range []entity.File{
+		{FileName: "still/clip.mp4", FileRoot: entity.RootOriginals, FileType: "mp4", MediaType: "video", FileVideo: true},
+		{FileName: "still/clip.jpg", FileRoot: entity.RootOriginals, FileType: "jpg", MediaType: "image"},
+		{FileName: "still/clip.xmp", FileRoot: entity.RootOriginals, FileType: "xmp", MediaType: "sidecar", FileSidecar: true},
+		{FileName: "still/clip.mp4.jpg", FileRoot: entity.RootSidecar, FileType: "jpg", MediaType: "image"},
+	} {
+		f.PhotoID, f.PhotoUID, f.FileHash = photo.ID, photo.PhotoUID, rnd.Base36(40)
+		require.NoError(t, f.Create())
+		CreateTestOriginal(t, &f)
+	}
+
+	return &photo
+}
+
+// zipEntryNames returns the names of the files in a zip archive.
+func zipEntryNames(t *testing.T, body []byte) (names []string) {
+	t.Helper()
+
+	archive, err := zip.NewReader(bytes.NewReader(body), int64(len(body)))
+	require.NoError(t, err)
+
+	for _, f := range archive.File {
+		names = append(names, f.Name)
+	}
+
+	return names
+}
+
+// TestZipCreate_VideoStills checks that selection archives skip the generated still images of videos.
+func TestZipCreate_VideoStills(t *testing.T) {
+	app, router, conf := NewApiTest()
+	ZipCreate(router)
+	ZipDownload(router)
+
+	photo := videoStillTestPhoto(t, conf)
+
+	archive := func(t *testing.T) []string {
+		r := PerformRequestWithBody(app, http.MethodPost, "/api/v1/zip", fmt.Sprintf(`{"photos": [%q]}`, photo.PhotoUID))
+		require.Equal(t, http.StatusOK, r.Code)
+		filename := gjson.Get(r.Body.String(), "filename").String()
+		response := PerformRequest(app, http.MethodGet, "/api/v1/zip/"+filename+"?t="+conf.DownloadToken())
+		require.Equal(t, http.StatusOK, response.Code)
+		return zipEntryNames(t, response.Body.Bytes())
+	}
+
+	conf.Settings().Download.Name = "file"
+	conf.Settings().Download.Originals = false
+	conf.Settings().Download.MediaRaw = true
+
+	t.Run("SidecarsOn", func(t *testing.T) {
+		conf.Settings().Download.MediaSidecar = true
+		assert.ElementsMatch(t, []string{"clip.mp4", "clip.jpg", "clip.xmp"}, archive(t))
+	})
+	t.Run("SidecarsOff", func(t *testing.T) {
+		conf.Settings().Download.MediaSidecar = false
+		assert.ElementsMatch(t, []string{"clip.mp4", "clip.jpg"}, archive(t))
+	})
+}
+
+func TestNewZipAliases(t *testing.T) {
+	n := newZipAliases()
+	assert.Empty(t, n.used)
+	assert.Empty(t, n.next)
+}
+
+func TestZipAliases_Name(t *testing.T) {
+	t.Run("Unique", func(t *testing.T) {
+		n := newZipAliases()
+		names := []string{"2019/x.jpg", "2020/x.jpg", "2021/x (1).jpg", "2022/X.JPG", "2023/a\tb.jpg", "2024/a b.jpg"}
+		expected := []string{"x.jpg", "x (1).jpg", "x (1) (1).jpg", "X (2).JPG", "a b.jpg", "a b (1).jpg"}
+
+		for i, name := range names {
+			f := entity.File{FileName: name, FileHash: "e98eb86480a72bd585d228a709f0622f90e86cbc", FileType: "jpg"}
+			assert.Equal(t, expected[i], n.Name(&f, customize.DownloadNameFile), name)
+		}
+
+		assert.Len(t, n.used, len(names))
+	})
+	t.Run("Unchanged", func(t *testing.T) {
+		f := entity.File{FileName: "2019/صورة 日本.jpg", FileHash: "e98eb86480a72bd585d228a709f0622f90e86cbc", FileType: "jpg"}
+		assert.Equal(t, "صورة 日本.jpg", newZipAliases().Name(&f, customize.DownloadNameFile))
+	})
+	t.Run("Many", func(t *testing.T) {
+		n := newZipAliases()
+		f := entity.File{FileName: "2019/x.jpg", FileHash: "e98eb86480a72bd585d228a709f0622f90e86cbc", FileType: "jpg"}
+
+		for i := range 100 {
+			alias := n.Name(&f, customize.DownloadNameFile)
+
+			if i == 0 {
+				assert.Equal(t, "x.jpg", alias)
+			} else {
+				assert.Equal(t, fmt.Sprintf("x (%d).jpg", i), alias)
+			}
+		}
+
+		assert.Equal(t, 99, n.next["x.jpg"])
+	})
 }

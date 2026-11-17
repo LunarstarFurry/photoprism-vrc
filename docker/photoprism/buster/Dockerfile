@@ -1,7 +1,7 @@
 ##################################################### BUILD STAGE ######################################################
 FROM photoprism/develop:buster AS build
 
-# Copyright © 2018 - 2025 PhotoPrism UG. All rights reserved.
+# Copyright © 2018 - 2026 PhotoPrism UG. All rights reserved.
 #
 # Questions? Email us at hello@photoprism.app or visit our website to learn
 # more about our team, products and services: https://www.photoprism.app/
@@ -36,9 +36,11 @@ ARG TARGETARCH
 ARG BUILD_TAG
 
 # Set environment variables, see https://docs.photoprism.app/getting-started/config-options/.
-ENV PHOTOPRISM_ARCH=$TARGETARCH \
+ENV DO_NOT_TRACK=true \
+    ORT_DISABLE_TELEMETRY=1 \
+    PHOTOPRISM_ARCH=$TARGETARCH \
+    PHOTOPRISM_CONTAINER="true" \
     DOCKER_TAG=$BUILD_TAG \
-    DOCKER_ENV="prod" \
     PS1="\u@$BUILD_TAG:\w\$ " \
     PATH="/usr/local/sbin:/usr/sbin:/sbin:/usr/local/bin:/usr/bin:/bin:/scripts:/opt/photoprism/bin" \
     LD_LIBRARY_PATH="/usr/local/lib:/usr/lib" \
@@ -76,7 +78,6 @@ ENV PHOTOPRISM_ARCH=$TARGETARCH \
     PHOTOPRISM_DISABLE_PLACES="false" \
     PHOTOPRISM_DISABLE_TENSORFLOW="false" \
     PHOTOPRISM_DISABLE_FACES="false" \
-    PHOTOPRISM_DISABLE_CLASSIFICATION="false" \
     PHOTOPRISM_RAW_PRESETS="false" \
     PHOTOPRISM_THUMB_UNCACHED="false" \
     PHOTOPRISM_AUTO_INDEX="300" \
@@ -84,7 +85,7 @@ ENV PHOTOPRISM_ARCH=$TARGETARCH \
     PHOTOPRISM_INIT="https"
 
 # Copy dist files, scripts, and debian backports sources list.
-COPY --from=build --chown=root:root --chmod=755 /opt/photoprism/ /opt/photoprism
+COPY --from=build --chown=root:root /opt/photoprism/ /opt/photoprism
 COPY --chown=root:root --chmod=755 /scripts/dist/ /scripts/
 COPY --chown=root:root --chmod=644 /docker/develop/buster/sources.list /etc/apt/sources.list.d/buster.list
 
@@ -117,11 +118,9 @@ RUN echo 'APT::Acquire::Retries "3";' > /etc/apt/apt.conf.d/80retries && \
       libavcodec-extra \
     && \
     /scripts/install-darktable.sh && \
-    echo 'alias ll="ls -alh"' >> /etc/skel/.bashrc && \
-    echo 'export PS1="\u@$DOCKER_TAG:\w\$ "' >> /etc/skel/.bashrc && \
-    echo "ALL ALL=(ALL) NOPASSWD:SETENV: /scripts/entrypoint-init.sh" >> /etc/sudoers.d/init && \
+    /scripts/install-bashrc.sh && \
+    /scripts/install-sudoers.sh --image ce && \
     /scripts/install-dircolors.sh && \
-    cp /etc/skel/.bashrc /root/.bashrc && \
     /scripts/create-users.sh && \
     install -d -m 0777 -o 1000 -g 1000 \
       /photoprism/originals \

@@ -88,6 +88,9 @@ func TestPhoto_IdenticalIdentical(t *testing.T) {
 func TestPhoto_Merge(t *testing.T) {
 	t.Run("Success", func(t *testing.T) {
 		photo := PhotoFixtures.Get("Photo23")
+		actual := FindPhoto(Photo{ID: photo.ID})
+		assert.Equal(t, 1, len(actual.Labels))
+
 		original, merged, err := photo.Merge(true, false)
 
 		if err != nil {
@@ -95,6 +98,9 @@ func TestPhoto_Merge(t *testing.T) {
 		}
 		assert.EqualValues(t, 1000023, original.ID)
 		assert.EqualValues(t, 1000024, merged[0].ID)
+
+		actual = FindPhoto(Photo{ID: original.ID})
+		assert.Equal(t, 2, len(actual.Labels))
 	})
 	t.Run("SyncVideoTypeFromMergedFiles", func(t *testing.T) {
 		takenAt := time.Date(2026, 1, 21, 12, 34, 56, 0, time.UTC)
@@ -140,9 +146,9 @@ func TestPhoto_Merge(t *testing.T) {
 		t.Cleanup(func() {
 			photoIDs := []uint{imagePhoto.ID, videoPhoto.ID}
 
-			_ = UnscopedDb().Where("photo_id IN (?)", photoIDs).Delete(File{}).Error
-			_ = UnscopedDb().Where("photo_id IN (?)", photoIDs).Delete(Details{}).Error
-			_ = UnscopedDb().Where("id IN (?)", photoIDs).Delete(Photo{}).Error
+			_ = UnscopedDb().Where("photo_id IN (?)", photoIDs).Delete(&File{}).Error
+			_ = UnscopedDb().Where("photo_id IN (?)", photoIDs).Delete(&Details{}).Error
+			_ = UnscopedDb().Where("id IN (?)", photoIDs).Delete(&Photo{}).Error
 		})
 
 		imageFile := File{
@@ -218,9 +224,9 @@ func TestPhoto_SyncMediaTypeFromFiles(t *testing.T) {
 		}
 
 		t.Cleanup(func() {
-			_ = UnscopedDb().Where("photo_id = ?", photo.ID).Delete(File{}).Error
-			_ = UnscopedDb().Where("photo_id = ?", photo.ID).Delete(Details{}).Error
-			_ = UnscopedDb().Where("id = ?", photo.ID).Delete(Photo{}).Error
+			_ = UnscopedDb().Where("photo_id = ?", photo.ID).Delete(&File{}).Error
+			_ = UnscopedDb().Where("photo_id = ?", photo.ID).Delete(&Details{}).Error
+			_ = UnscopedDb().Where("id = ?", photo.ID).Delete(&Photo{}).Error
 		})
 
 		sidecar := File{
@@ -267,9 +273,9 @@ func TestPhoto_SyncMediaTypeFromFiles(t *testing.T) {
 		}
 
 		t.Cleanup(func() {
-			_ = UnscopedDb().Where("photo_id = ?", photo.ID).Delete(File{}).Error
-			_ = UnscopedDb().Where("photo_id = ?", photo.ID).Delete(Details{}).Error
-			_ = UnscopedDb().Where("id = ?", photo.ID).Delete(Photo{}).Error
+			_ = UnscopedDb().Where("photo_id = ?", photo.ID).Delete(&File{}).Error
+			_ = UnscopedDb().Where("photo_id = ?", photo.ID).Delete(&Details{}).Error
+			_ = UnscopedDb().Where("id = ?", photo.ID).Delete(&Photo{}).Error
 		})
 
 		video := File{

@@ -15,8 +15,6 @@ export default class Link extends Model {
       Expires: 0,
       Views: 0,
       MaxViews: 0,
-      Password: "",
-      HasPassword: false,
       Comment: "",
       Perm: 0,
       CreatedAt: "",
@@ -26,6 +24,19 @@ export default class Link extends Model {
 
   getToken() {
     return this.Token.toLowerCase().trim();
+  }
+
+  // validateToken checks a custom share token and returns true or an error message.
+  // It mirrors the character set and length limits the server applies when resolving a share link,
+  // so the field reports a value the server would reject.
+  static validateToken(value) {
+    const token = value ? String(value).toLowerCase().trim() : "";
+
+    if (!token) {
+      return true;
+    }
+
+    return token.length >= 6 && token.length <= 160 && /^[0-9a-z\-_:]+$/.test(token) ? true : $gettext("Invalid");
   }
 
   siteUrl() {

@@ -77,33 +77,65 @@ func TestMediaFile_SidecarJsonName(t *testing.T) {
 func TestMediaFile_NeedsExifToolJson(t *testing.T) {
 	c := config.TestConfig()
 
-	t.Run("False", func(t *testing.T) {
+	// needsJson reports the result for a sample after discarding any cached export.
+	// Other tests in this package import the same samples and leave one behind, and
+	// the result is derived from whether that file exists.
+	needsJson := func(t *testing.T, sampleName string) bool {
+		t.Helper()
 
-		mediaFile, err := NewMediaFile(c.SamplesPath() + "/beach_sand.jpg")
+		mediaFile, err := NewMediaFile(filepath.Join(c.SamplesPath(), sampleName))
+		require.NoError(t, err)
 
-		if err != nil {
-			t.Fatal(err)
+		if jsonName, nameErr := mediaFile.ExifToolJsonName(); nameErr == nil {
+			require.NoError(t, os.RemoveAll(jsonName))
 		}
 
-		assert.True(t, mediaFile.NeedsExifToolJson())
+		return mediaFile.NeedsExifToolJson()
+	}
+
+	t.Run("Image", func(t *testing.T) {
+		assert.True(t, needsJson(t, "beach_sand.jpg"))
 	})
-	t.Run("True", func(t *testing.T) {
-		mediaFile, err := NewMediaFile(c.SamplesPath() + "/blue-go-video.mp4")
-
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		assert.True(t, mediaFile.NeedsExifToolJson())
+	t.Run("Video", func(t *testing.T) {
+		assert.True(t, needsJson(t, "blue-go-video.mp4"))
 	})
-	t.Run("True", func(t *testing.T) {
-		mediaFile, err := NewMediaFile(c.SamplesPath() + "/blue-go-video.mp4.json")
-
-		if err != nil {
-			t.Fatal(err)
+	t.Run("JsonSidecar", func(t *testing.T) {
+		assert.False(t, needsJson(t, "blue-go-video.mp4.json"))
+	})
+	t.Run("Insta360LensNotVideo", func(t *testing.T) {
+		if !c.FFmpegEnabled() {
+			t.Skip("FFmpeg must be available to create synthetic capture files")
 		}
 
-		assert.False(t, mediaFile.NeedsExifToolJson())
+		dir := t.TempDir()
+		writeInsta360StackMedia(t, c, dir, insta360StackLeft)
+		writeInsta360LensContent(t, c, filepath.Join(dir, insta360StackRight), "text")
+
+		for name, want := range map[string]bool{insta360StackLeft: true, insta360StackRight: false} {
+			mediaFile, err := NewMediaFile(filepath.Join(dir, name))
+			require.NoError(t, err)
+			if jsonName, nameErr := mediaFile.ExifToolJsonName(); nameErr == nil {
+				require.NoError(t, os.RemoveAll(jsonName))
+			}
+			assert.Equal(t, want, mediaFile.NeedsExifToolJson(), name)
+		}
+	})
+	t.Run("Cached", func(t *testing.T) {
+		if !c.ExifToolEnabled() {
+			t.Skip("ExifTool must be enabled")
+		}
+
+		mediaFile, err := NewMediaFile(filepath.Join(c.SamplesPath(), "beach_sand.jpg"))
+		require.NoError(t, err)
+		jsonName, err := mediaFile.ExifToolJsonName()
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = os.Remove(jsonName) })
+		require.NoError(t, fs.MkdirAll(filepath.Dir(jsonName)))
+
+		for data, needed := range map[string]bool{"": true, "[{\"SourceFile\":": true, "[{}]\n": false} {
+			require.NoError(t, os.WriteFile(jsonName, []byte(data), fs.ModeFile))
+			assert.Equal(t, needed, mediaFile.NeedsExifToolJson(), data)
+		}
 	})
 }
 
@@ -263,6 +295,65 @@ func TestMediaFile_CreateExifToolJson(t *testing.T) {
 		if err = os.Remove(jsonName); err != nil {
 			t.Error(err)
 		}
+	})
+	t.Run("MetaDataReadFirst", func(t *testing.T) {
+		// Checking the type reads the metadata of a video before its JSON exists, which the JSON then completes.
+		mediaFile, err := NewMediaFile(uniqueGopherVideo(t))
+		require.NoError(t, err)
+
+		jsonName, err := mediaFile.ExifToolJsonName()
+		require.NoError(t, err)
+		_ = os.Remove(jsonName)
+		t.Cleanup(func() { _ = os.Remove(jsonName) })
+
+		require.NoError(t, mediaFile.CheckType())
+		require.Error(t, mediaFile.MetaData().Error)
+		require.NoError(t, mediaFile.CreateExifToolJson(NewConvert(c)))
+
+		data := mediaFile.MetaData()
+		assert.NoError(t, data.Error)
+		assert.Equal(t, time.Duration(2410000000), data.Duration)
+		assert.Equal(t, video.CodecAvc1, data.Codec)
+		assert.Equal(t, 270, data.Width)
+	})
+	t.Run("InvalidExportKeepsError", func(t *testing.T) {
+		// A cached error stays when the ExifTool output cannot be read.
+		bin := filepath.Join(t.TempDir(), "exiftool")
+		require.NoError(t, os.WriteFile(bin, []byte("#!/bin/sh\necho '[1]'\n"), 0o700)) //nolint:gosec // G306: test executable
+
+		prevBin := c.Options().ExifToolBin
+		c.Options().ExifToolBin = bin
+		t.Cleanup(func() { c.Options().ExifToolBin = prevBin })
+
+		mediaFile, err := NewMediaFile(uniqueGopherVideo(t))
+		require.NoError(t, err)
+
+		jsonName, err := mediaFile.ExifToolJsonName()
+		require.NoError(t, err)
+		_ = os.Remove(jsonName)
+		t.Cleanup(func() { _ = os.Remove(jsonName) })
+
+		require.NoError(t, mediaFile.CheckType())
+		assert.Error(t, mediaFile.CreateExifToolJson(NewConvert(c)))
+		assert.Error(t, mediaFile.MetaData().Error)
+	})
+	t.Run("FailedExportKeepsError", func(t *testing.T) {
+		// A cached error stays when the ExifTool export fails.
+		prevBin := c.Options().ExifToolBin
+		c.Options().ExifToolBin = "/bin/false"
+		t.Cleanup(func() { c.Options().ExifToolBin = prevBin })
+
+		mediaFile, err := NewMediaFile(uniqueGopherVideo(t))
+		require.NoError(t, err)
+
+		jsonName, err := mediaFile.ExifToolJsonName()
+		require.NoError(t, err)
+		_ = os.Remove(jsonName)
+		t.Cleanup(func() { _ = os.Remove(jsonName) })
+
+		require.NoError(t, mediaFile.CheckType())
+		require.NoError(t, mediaFile.CreateExifToolJson(NewConvert(c)))
+		assert.Error(t, mediaFile.MetaData().Error)
 	})
 }
 
@@ -518,4 +609,18 @@ func TestMediaFile_VideoInfo(t *testing.T) {
 			assert.Equal(t, media.Image, info.MediaType)
 		},
 	)
+}
+
+// uniqueGopherVideo returns a copy of the gopher video sample with its own hash, so that its cached
+// ExifTool JSON is not shared with other tests.
+func uniqueGopherVideo(t *testing.T) string {
+	t.Helper()
+
+	data, err := os.ReadFile(filepath.Join(Config().SamplesPath(), "gopher-video.mp4"))
+	require.NoError(t, err)
+
+	fileName := filepath.Join(t.TempDir(), "gopher-video.mp4")
+	require.NoError(t, os.WriteFile(fileName, append(data, []byte(t.Name())...), 0o600)) //nolint:gosec // G703: test-owned path
+
+	return fileName
 }

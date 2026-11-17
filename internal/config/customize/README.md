@@ -1,6 +1,6 @@
 ## PhotoPrism — Customize Package
 
-**Last Updated:** November 21, 2025
+**Last Updated:** October 23, 2026
 
 ### Overview
 
@@ -8,7 +8,8 @@ The `customize` package defines user-facing configuration defaults for PhotoPris
 
 ### Feature Defaults
 
-- Feature flags live in `FeatureSettings` and are initialized via the new `DefaultFeatures` variable.  
+- Feature flags live in `FeatureSettings` and are initialized via `DefaultFeatures`.
+- `Export` (the Lightbox Export dialog) is enabled by default and can be turned off under Settings > General. Missing YAML fields keep the default; explicit `Export: false` and `Export: true` values survive save/load. It is independent of the Download setting and its content filters.
 - `NewFeatures()` returns a copy of `DefaultFeatures`, letting callers mutate per-request or per-user state without modifying the shared defaults.
 
 ### Environment Overrides
@@ -16,6 +17,12 @@ The `customize` package defines user-facing configuration defaults for PhotoPris
 - Set `PHOTOPRISM_DISABLE_FEATURES` to disable specific features at startup.  
 - The value may be comma- or space-separated (case-insensitive); hyphens/underscores are ignored.  
 - Tokens are inflected so singular/plural variants match (for example, `albums`, `album`, or `Album` all disable the Albums flag).
+
+### Per-Role & Per-Scope Gating
+
+- `Settings.ApplyACL(rules, role)` and `Settings.ApplyScope(scope)` filter selected feature flags for each session. Export requires both `photos.access_all` and `photos.download` grants and the `photos` scope, and the frontend's `canExport(config)` reads the resulting `features.export` flag. The downloads the dialog starts are authorized by the download and thumbnail endpoints like any other.
+- The `Account` and `AppPasswords` flags require permission (and scope) to update the password (`ResourcePassword`/`ActionUpdate`), so a share-token visitor without an account does not see the account or app-password affordances.
+- This per-session gating shapes only the client config the Web UI reads; server-side enforcement of disabled app passwords uses the global `AppPasswords` flag via `Config.DisableAppPasswords()`.
 
 ### Settings Lifecycle
 

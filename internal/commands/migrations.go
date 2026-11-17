@@ -11,7 +11,6 @@ import (
 	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli/v2"
 
-	"github.com/photoprism/photoprism/internal/config"
 	"github.com/photoprism/photoprism/internal/entity/migrate"
 	"github.com/photoprism/photoprism/pkg/txt/report"
 )
@@ -54,6 +53,7 @@ var MigrationsCommands = &cli.Command{
 	Subcommands: []*cli.Command{
 		MigrationsStatusCommand,
 		MigrationsRunCommand,
+		MigrationsTransferCommand,
 	},
 }
 
@@ -148,12 +148,12 @@ func migrationsRunAction(ctx *cli.Context) error {
 
 	start := time.Now()
 
-	conf := config.NewConfig(ctx)
+	conf, err := InitConfig(ctx)
 
 	_, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	if err := conf.Init(); err != nil {
+	if err != nil {
 		return err
 	}
 
@@ -180,7 +180,9 @@ func migrationsRunAction(ctx *cli.Context) error {
 	log.Infoln("migrating database schema...")
 
 	// Run migrations.
-	conf.MigrateDb(runFailed, ids)
+	if err := conf.MigrateDb(runFailed, ids); err != nil {
+		return err
+	}
 
 	elapsed := time.Since(start)
 

@@ -1,10 +1,107 @@
 package query
 
 import (
+	"database/sql"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/photoprism/photoprism/internal/entity"
+	"github.com/photoprism/photoprism/pkg/dsn"
+	"github.com/photoprism/photoprism/pkg/rnd"
 )
+
+func TestAlbumHasThumb(t *testing.T) {
+	// Other tests assign covers through UpdateCovers(), so the fixture value is set explicitly
+	// and restored afterwards. The direct update bypasses the hooks that clear the album cache.
+	setAlbumThumb := func(t *testing.T, uid, hash string) {
+		var current []string
+
+		if err := Db().Model(&entity.Album{}).Where("album_uid = ?", uid).Limit(1).Pluck("thumb", &current).Error; err != nil {
+			t.Fatal(err)
+		} else if err = Db().Model(&entity.Album{}).Where("album_uid = ?", uid).Update("thumb", hash).Error; err != nil {
+			t.Fatal(err)
+		}
+
+		entity.FlushAlbumCache()
+
+		t.Cleanup(func() {
+			restore := ""
+
+			if len(current) > 0 {
+				restore = current[0]
+			}
+
+			_ = Db().Model(&entity.Album{}).Where("album_uid = ?", uid).Update("thumb", restore).Error
+			entity.FlushAlbumCache()
+		})
+	}
+
+	// setFileError sets the error column of a file fixture and restores it afterwards. Writing a
+	// NULL takes a map update, since a typed zero value is skipped as unset.
+	setFileError := func(t *testing.T, fileHash string, value any) {
+		var current []sql.NullString
+
+		if err := Db().Model(&entity.File{}).Where("file_hash = ?", fileHash).Limit(1).Pluck("file_error", &current).Error; err != nil {
+			t.Fatal(err)
+		}
+
+		require.Len(t, current, 1)
+
+		setValue := func(v any) error {
+			return Db().Model(&entity.File{}).Where("file_hash = ?", fileHash).
+				Updates(entity.Values{"file_error": v}).Error
+		}
+
+		if err := setValue(value); err != nil {
+			t.Fatal(err)
+		}
+
+		t.Cleanup(func() {
+			if current[0].Valid {
+				_ = setValue(current[0].String)
+			} else {
+				_ = setValue(nil)
+			}
+		})
+	}
+
+	t.Run("NoThumb", func(t *testing.T) {
+		setAlbumThumb(t, "as6sg6bxpogaaba7", "")
+		assert.False(t, AlbumHasThumb("as6sg6bxpogaaba7"))
+	})
+	t.Run("HasThumb", func(t *testing.T) {
+		setAlbumThumb(t, "as6sg6bxpogaaba7", "2cad9168fa6acc5c5c2965ddf6ec465ca42fd818")
+		assert.True(t, AlbumHasThumb("as6sg6bxpogaaba7"))
+	})
+	t.Run("StaleThumb", func(t *testing.T) {
+		// A hash no client can resolve must not gate the cover query.
+		setAlbumThumb(t, "as6sg6bxpogaaba7", "0000000000000000000000000000000000000000")
+		assert.False(t, AlbumHasThumb("as6sg6bxpogaaba7"))
+	})
+	t.Run("NullFileError", func(t *testing.T) {
+		// The join compares the column to an empty string, which a NULL does not satisfy, so the
+		// fail-safe direction is a cover query rather than a placeholder clients cannot resolve.
+		setFileError(t, "2cad9168fa6acc5c5c2965ddf6ec465ca42fd818", nil)
+
+		var stored []sql.NullString
+		require.NoError(t, Db().Model(&entity.File{}).Where("file_hash = ?", "2cad9168fa6acc5c5c2965ddf6ec465ca42fd818").
+			Limit(1).Pluck("file_error", &stored).Error)
+		require.Len(t, stored, 1)
+		require.False(t, stored[0].Valid, "the column must be NULL for this case to mean anything")
+
+		setAlbumThumb(t, "as6sg6bxpogaaba7", "2cad9168fa6acc5c5c2965ddf6ec465ca42fd818")
+		assert.False(t, AlbumHasThumb("as6sg6bxpogaaba7"))
+	})
+	t.Run("NotFound", func(t *testing.T) {
+		assert.False(t, AlbumHasThumb("as6sg6bxpog00007"))
+	})
+	t.Run("InvalidUID", func(t *testing.T) {
+		assert.False(t, AlbumHasThumb("3765"))
+	})
+}
 
 func TestAlbumByUID(t *testing.T) {
 	t.Run("Success", func(t *testing.T) {
@@ -68,13 +165,253 @@ func TestAlbumCoverByUID(t *testing.T) {
 		assert.EqualError(t, err, "no cover found", err)
 		assert.Equal(t, "", file.FileName)
 	})
+	t.Run("EmptyManualAlbum", func(t *testing.T) {
+		album := entity.Album{AlbumUID: rnd.GenerateUID(entity.AlbumUID), AlbumType: entity.AlbumManual,
+			AlbumTitle: "Empty Cover", AlbumSlug: "empty-cover", ThumbSrc: entity.SrcAuto}
+		require.NoError(t, entity.UnscopedDb().Create(&album).Error)
+		t.Cleanup(func() { _ = entity.UnscopedDb().Delete(&album).Error })
+
+		file, err := AlbumCoverByUID(album.AlbumUID, true)
+		assert.EqualError(t, err, "no cover found")
+		assert.Equal(t, "", file.FileName)
+
+		// Updating the cover of an album without pictures is not an error.
+		assert.NoError(t, UpdateAlbumCovers(album))
+	})
 }
 
 func TestUpdateAlbumDates(t *testing.T) {
 	t.Run("Success", func(t *testing.T) {
-		if err := UpdateAlbumDates(); err != nil {
-			t.Fatal(err)
+		album := entity.FindAlbum(entity.Album{AlbumUID: entity.AlbumFixtures.Get("april-1990").AlbumUID})
+		assert.Equal(t, 11, album.AlbumDay)
+		defer func() {
+			require.NoError(t, entity.Db().Save(entity.AlbumFixtures.Pointer("april-1990")).Error)
+		}()
+
+		actual, err := UpdateAlbumDates()
+		require.NoError(t, err)
+		assert.Equal(t, 1, actual)
+		album = entity.FindAlbum(entity.Album{AlbumUID: entity.AlbumFixtures.Get("april-1990").AlbumUID})
+		assert.Equal(t, 17, album.AlbumDay)
+		actual, err = UpdateAlbumDates()
+		require.NoError(t, err)
+		assert.Equal(t, 0, actual)
+	})
+	t.Run("ZeroDay", func(t *testing.T) {
+		// A stored day of 0 must be repaired even when it would resolve to the newest
+		// picture date if the components were normalized rather than rejected.
+		album := entity.Album{
+			AlbumUID: "as6sg6bxpogaabz1", AlbumType: entity.AlbumFolder,
+			AlbumTitle: "Zero Day", AlbumSlug: "zero-day-album", AlbumPath: "1990/03",
+			AlbumYear: 1990, AlbumMonth: 4, AlbumDay: 0,
 		}
+		require.NoError(t, entity.UnscopedDb().Create(&album).Error)
+		photo := entity.Photo{
+			PhotoUID:     "ps6sg6bxpogaabz1",
+			PhotoName:    "zerodayalbum",
+			PhotoPath:    "1990/03",
+			TakenAt:      time.Date(1990, 3, 31, 9, 0, 0, 0, time.UTC),
+			TakenAtLocal: time.Date(1990, 3, 31, 9, 0, 0, 0, time.UTC),
+			TakenSrc:     entity.SrcMeta,
+			PhotoQuality: 3,
+		}
+		require.NoError(t, entity.UnscopedDb().Create(&photo).Error)
+		defer func() {
+			require.NoError(t, entity.UnscopedDb().Exec("DELETE FROM albums WHERE album_uid = ?", "as6sg6bxpogaabz1").Error)
+			require.NoError(t, entity.UnscopedDb().Exec("DELETE FROM photos WHERE photo_uid = ?", "ps6sg6bxpogaabz1").Error)
+			require.NoError(t, entity.UnscopedDb().Save(entity.AlbumFixtures.Pointer("april-1990")).Error)
+		}()
+		_, err := UpdateAlbumDates()
+		require.NoError(t, err)
+		actual := entity.FindAlbum(entity.Album{AlbumUID: "as6sg6bxpogaabz1"})
+		assert.Equal(t, 1990, actual.AlbumYear)
+		assert.Equal(t, 3, actual.AlbumMonth)
+		assert.Equal(t, 31, actual.AlbumDay)
+	})
+	t.Run("ModifiedSource", func(t *testing.T) {
+		// A modify time dates the album, a date parsed from the file name does not.
+		album := entity.Album{
+			AlbumUID: "as6sg6bxpogaabz7", AlbumType: entity.AlbumFolder,
+			AlbumTitle: "Modified Source", AlbumSlug: "modified-source-album", AlbumPath: "1990/02",
+		}
+		require.NoError(t, entity.UnscopedDb().Create(&album).Error)
+		modified := entity.Photo{
+			PhotoUID:     "ps6sg6bxpogaabz5",
+			PhotoName:    "modifiedsourcealbum",
+			PhotoPath:    "1990/02",
+			TakenAt:      time.Date(1990, 2, 14, 9, 0, 0, 0, time.UTC),
+			TakenAtLocal: time.Date(1990, 2, 14, 9, 0, 0, 0, time.UTC),
+			TakenSrc:     entity.SrcModified,
+			PhotoQuality: 3,
+		}
+		require.NoError(t, entity.UnscopedDb().Create(&modified).Error)
+		name := entity.Photo{
+			PhotoUID:     "ps6sg6bxpogaabz6",
+			PhotoName:    "namesourcealbum",
+			PhotoPath:    "1990/02",
+			TakenAt:      time.Date(1990, 2, 27, 9, 0, 0, 0, time.UTC),
+			TakenAtLocal: time.Date(1990, 2, 27, 9, 0, 0, 0, time.UTC),
+			TakenSrc:     entity.SrcName,
+			PhotoQuality: 3,
+		}
+		require.NoError(t, entity.UnscopedDb().Create(&name).Error)
+		defer func() {
+			require.NoError(t, entity.UnscopedDb().Exec("DELETE FROM albums WHERE album_uid = ?", "as6sg6bxpogaabz7").Error)
+			require.NoError(t, entity.UnscopedDb().Exec("DELETE FROM photos WHERE photo_uid IN (?, ?)", "ps6sg6bxpogaabz5", "ps6sg6bxpogaabz6").Error)
+			require.NoError(t, entity.UnscopedDb().Save(entity.AlbumFixtures.Pointer("april-1990")).Error)
+		}()
+		_, err := UpdateAlbumDates()
+		require.NoError(t, err)
+		actual := entity.FindAlbum(entity.Album{AlbumUID: "as6sg6bxpogaabz7"})
+		assert.Equal(t, 1990, actual.AlbumYear)
+		assert.Equal(t, 2, actual.AlbumMonth)
+		assert.Equal(t, 14, actual.AlbumDay)
+	})
+	t.Run("MaxWithTimeOffset", func(t *testing.T) {
+		album := entity.FindAlbum(entity.Album{AlbumUID: entity.AlbumFixtures.Get("april-1990").AlbumUID})
+		assert.Equal(t, 11, album.AlbumDay)
+		defer func() {
+			require.NoError(t, entity.Db().Save(entity.AlbumFixtures.Pointer("april-1990")).Error)
+		}()
+		photoPhoto17 := entity.PhotoFixtures.Get("Photo17")
+		// Set a timestamp that would sort (by string) BEFORE 1990-04-18 01:00:00+08:00 in SQLite, but is actually a GREATER date.
+		photoPhoto17.TakenAtLocal = time.Date(1990, 4, 18, 1, 0, 0, 0, time.UTC)
+		photoPhoto17.TakenSrc = entity.SrcMeta
+		photoPhoto17.PhotoQuality = 4
+
+		entity.Db().Save(&photoPhoto17)
+		defer func() {
+			require.NoError(t, entity.UnscopedDb().Save(entity.PhotoFixtures.Pointer("Photo17")).Error)
+		}()
+
+		actual, err := UpdateAlbumDates()
+		require.NoError(t, err)
+		assert.Equal(t, 1, actual)
+		album = entity.FindAlbum(entity.Album{AlbumUID: entity.AlbumFixtures.Get("april-1990").AlbumUID})
+		assert.Equal(t, 18, album.AlbumDay)
+		actual, err = UpdateAlbumDates()
+		require.NoError(t, err)
+		assert.Equal(t, 0, actual)
+	})
+	t.Run("TwoAlbums", func(t *testing.T) {
+		album := entity.FindAlbum(entity.Album{AlbumUID: entity.AlbumFixtures.Get("april-1990").AlbumUID})
+		assert.Equal(t, 11, album.AlbumDay)
+		defer func() {
+			require.NoError(t, entity.Db().Save(entity.AlbumFixtures.Pointer("april-1990")).Error)
+		}()
+		album.AlbumDay = 0
+		album.AlbumMonth = 0
+		album.AlbumYear = 0
+		require.NoError(t, entity.Db().Save(&album).Error)
+		album2 := entity.FindAlbum(entity.Album{AlbumUID: entity.AlbumFixtures.Get("2016-04").AlbumUID})
+		assert.Equal(t, 0, album2.AlbumDay)
+		defer func() {
+			require.NoError(t, entity.Db().Save(entity.AlbumFixtures.Pointer("2016-04")).Error)
+		}()
+		photoPhoto12 := entity.PhotoFixtures.Get("Photo12")
+		photoPhoto12.TakenAtLocal = time.Date(2016, 4, 18, 1, 0, 0, 0, time.UTC)
+		photoPhoto12.TakenSrc = entity.SrcMeta
+		photoPhoto12.PhotoQuality = 4
+		photoPhoto12.PhotoPath = "2016/04"
+
+		entity.Db().Save(&photoPhoto12)
+		defer func() {
+			require.NoError(t, entity.UnscopedDb().Save(entity.PhotoFixtures.Pointer("Photo12")).Error)
+		}()
+
+		actual, err := UpdateAlbumDates()
+		require.NoError(t, err)
+		assert.Equal(t, 2, actual)
+		album = entity.FindAlbum(entity.Album{AlbumUID: entity.AlbumFixtures.Get("april-1990").AlbumUID})
+		assert.Equal(t, 17, album.AlbumDay)
+		album2 = entity.FindAlbum(entity.Album{AlbumUID: entity.AlbumFixtures.Get("2016-04").AlbumUID})
+		assert.Equal(t, 18, album2.AlbumDay)
+		actual, err = UpdateAlbumDates()
+		require.NoError(t, err)
+		assert.Equal(t, 0, actual)
+	})
+	t.Run("BlankAlbumPath", func(t *testing.T) {
+		album := entity.FindAlbum(entity.Album{AlbumUID: entity.AlbumFixtures.Get("april-1990").AlbumUID})
+		assert.Equal(t, 11, album.AlbumDay)
+		defer func() {
+			require.NoError(t, entity.Db().Save(entity.AlbumFixtures.Pointer("april-1990")).Error)
+		}()
+		album.AlbumPath = ""
+		album.AlbumDay = 0
+		album.AlbumMonth = 0
+		album.AlbumYear = 0
+		require.NoError(t, entity.Db().Save(&album).Error)
+		photoPhoto17 := entity.PhotoFixtures.Get("Photo17")
+		// Set a timestamp that would sort (by string) BEFORE 1990-04-18 01:00:00+08:00 in SQLite, but is actually a GREATER date.
+		photoPhoto17.TakenAtLocal = time.Date(1990, 4, 18, 1, 0, 0, 0, time.UTC)
+		photoPhoto17.TakenSrc = entity.SrcMeta
+		photoPhoto17.PhotoQuality = 4
+		photoPhoto17.PhotoPath = ""
+
+		entity.Db().Save(&photoPhoto17)
+		defer func() {
+			require.NoError(t, entity.UnscopedDb().Save(entity.PhotoFixtures.Pointer("Photo17")).Error)
+		}()
+
+		actual, err := UpdateAlbumDates()
+		require.NoError(t, err)
+		assert.Equal(t, 0, actual)
+		album = entity.FindAlbum(entity.Album{AlbumUID: entity.AlbumFixtures.Get("april-1990").AlbumUID})
+		assert.Equal(t, 0, album.AlbumDay)
+		assert.Equal(t, 0, album.AlbumMonth)
+		assert.Equal(t, 0, album.AlbumYear)
+		actual, err = UpdateAlbumDates()
+		require.NoError(t, err)
+		assert.Equal(t, 0, actual)
+	})
+	t.Run("DeleteRecord", func(t *testing.T) {
+		album := entity.FindAlbum(entity.Album{AlbumUID: entity.AlbumFixtures.Get("april-1990").AlbumUID})
+		assert.Equal(t, 11, album.AlbumDay)
+		defer func() {
+			require.NoError(t, entity.Db().Save(entity.AlbumFixtures.Pointer("april-1990")).Error)
+		}()
+		photoPhoto17 := entity.PhotoFixtures.Get("Photo17")
+		// Set a timestamp that would sort (by string) BEFORE 1990-04-18 01:00:00+08:00 in SQLite, but is actually a GREATER date.
+		photoPhoto17.TakenAtLocal = time.Date(1990, 4, 18, 1, 0, 0, 0, time.UTC)
+		photoPhoto17.TakenSrc = entity.SrcMeta
+		photoPhoto17.PhotoQuality = 4
+
+		entity.Db().Save(&photoPhoto17)
+		defer func() {
+			require.NoError(t, entity.UnscopedDb().Save(entity.PhotoFixtures.Pointer("Photo17")).Error)
+		}()
+
+		actual, err := UpdateAlbumDates()
+		require.NoError(t, err)
+		assert.Equal(t, 1, actual)
+		album = entity.FindAlbum(entity.Album{AlbumUID: entity.AlbumFixtures.Get("april-1990").AlbumUID})
+		assert.Equal(t, 18, album.AlbumDay)
+		require.NoError(t, photoPhoto17.Archive())
+		actual, err = UpdateAlbumDates()
+		album = entity.FindAlbum(entity.Album{AlbumUID: entity.AlbumFixtures.Get("april-1990").AlbumUID})
+		assert.Equal(t, 17, album.AlbumDay)
+		require.NoError(t, err)
+		assert.Equal(t, 1, actual)
+	})
+	t.Run("InvalidDateFromAlbum", func(t *testing.T) {
+		album := entity.FindAlbum(entity.Album{AlbumUID: entity.AlbumFixtures.Get("april-1990").AlbumUID})
+		assert.Equal(t, 11, album.AlbumDay)
+		defer func() {
+			require.NoError(t, entity.Db().Save(entity.AlbumFixtures.Pointer("april-1990")).Error)
+		}()
+		album.AlbumDay = 0
+		album.AlbumMonth = 0
+		album.AlbumYear = 0
+		require.NoError(t, album.Save())
+
+		actual, err := UpdateAlbumDates()
+		require.NoError(t, err)
+		assert.Equal(t, 1, actual)
+		album = entity.FindAlbum(entity.Album{AlbumUID: entity.AlbumFixtures.Get("april-1990").AlbumUID})
+		assert.Equal(t, 17, album.AlbumDay)
+		actual, err = UpdateAlbumDates()
+		require.NoError(t, err)
+		assert.Equal(t, 0, actual)
 	})
 }
 
@@ -124,5 +461,58 @@ func TestAlbumsByUID(t *testing.T) {
 		}
 
 		assert.Len(t, results, 2)
+	})
+}
+
+func TestAlbumsByType(t *testing.T) {
+	t.Run("AlbumFolder", func(t *testing.T) {
+		actual, err := AlbumsByType(entity.AlbumFolder, false)
+		require.NoError(t, err)
+		assert.Len(t, actual, 4)
+	})
+	t.Run("AlbumManual", func(t *testing.T) {
+		actual, err := AlbumsByType(entity.AlbumManual, true)
+		require.NoError(t, err)
+		assert.Len(t, actual, 22)
+
+		m := entity.AlbumFixtures.Pointer("christmas2030")
+		require.NoError(t, m.Delete())
+		defer func() {
+			require.NoError(t, m.Restore())
+		}()
+		actual, err = AlbumsByType(entity.AlbumManual, false)
+		require.NoError(t, err)
+		assert.Len(t, actual, 21)
+	})
+}
+
+// TestAlbums_NoMatchFilter checks that a stored filter with nothing usable left gives an empty album.
+func TestAlbums_NoMatchFilter(t *testing.T) {
+	// PostgreSQL text columns cannot store invalid UTF-8, so such a filter only exists in MariaDB and SQLite.
+	if DbDialect() == dsn.DialectPostgreSQL {
+		t.Skip("PostgreSQL cannot store a filter with invalid UTF-8")
+	}
+
+	a := entity.NewMonthAlbum("No Match Filter", "no-match-filter", 2020, 1)
+	a.AlbumFilter = "\xff"
+	require.NoError(t, a.Create())
+	t.Cleanup(func() { _ = a.DeletePermanently() })
+
+	t.Run("AlbumsPhotoUIDs", func(t *testing.T) {
+		expected, err := AlbumsPhotoUIDs([]string{"as6sg6bipogaaba1"}, false, true)
+		require.NoError(t, err)
+		require.NotEmpty(t, expected)
+
+		uids, err := AlbumsPhotoUIDs([]string{a.AlbumUID, "as6sg6bipogaaba1"}, false, true)
+		require.NoError(t, err)
+		assert.ElementsMatch(t, expected, uids)
+	})
+	t.Run("AlbumCoverByUID", func(t *testing.T) {
+		_, err := AlbumCoverByUID(a.AlbumUID, true)
+		assert.EqualError(t, err, "no cover found")
+
+		found, err := AlbumByUID(a.AlbumUID)
+		require.NoError(t, err)
+		assert.False(t, found.Deleted())
 	})
 }

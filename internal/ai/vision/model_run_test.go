@@ -1,6 +1,17 @@
 package vision
 
-import "testing"
+import (
+	"strings"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/photoprism/photoprism/internal/ai/classify"
+	"github.com/photoprism/photoprism/internal/ai/nsfw"
+	"github.com/photoprism/photoprism/internal/ai/onnx"
+	"github.com/photoprism/photoprism/internal/ai/tensorflow"
+)
 
 func TestParseRunType(t *testing.T) {
 	cases := []struct {
@@ -74,7 +85,7 @@ func TestModel_RunType(t *testing.T) {
 }
 
 func TestModel_ShouldRun_AutoDefault(t *testing.T) {
-	model := NasnetModel.Clone()
+	model := DefaultLabelModel.Clone()
 	model.Run = ""
 
 	assertShouldRun(t, model, RunManual, true)
@@ -95,6 +106,77 @@ func TestModel_ShouldRun_AutoCustom(t *testing.T) {
 	assertShouldRun(t, model, RunAlways, false)
 	assertShouldRun(t, model, RunOnIndex, false)
 	assertShouldRun(t, model, RunNewlyIndexed, true)
+}
+
+// TestModel_ShouldRun_LocalLabels verifies that only the default local classifier runs during indexing.
+func TestModel_ShouldRun_LocalLabels(t *testing.T) {
+	t.Run("NamedDefault", func(t *testing.T) {
+		model := &Model{Type: ModelTypeLabels, Name: string(classify.ModelEfficientFormerV2S2)}
+		assertShouldRun(t, model, RunOnIndex, true)
+		assertShouldRun(t, model, RunNewlyIndexed, false)
+		assertShouldRun(t, model, RunOnSchedule, true)
+	})
+	t.Run("DefaultSpelling", func(t *testing.T) {
+		for _, name := range []string{"EfficientFormerV2_S2", " efficientformerv2-s2 ", "efficientformerv2.s2"} {
+			t.Run(strings.TrimSpace(name), func(t *testing.T) {
+				model := &Model{Type: ModelTypeLabels, Name: name}
+				assertShouldRun(t, model, RunOnIndex, true)
+				assertShouldRun(t, model, RunNewlyIndexed, false)
+			})
+		}
+	})
+	t.Run("UnresolvedUri", func(t *testing.T) {
+		resetUnresolvedUriWarnings(t)
+		model := &Model{Type: ModelTypeLabels, Name: string(classify.ModelEfficientFormerV2S2), Service: Service{Uri: "${VISION_TEST_MISSING_URI}"}}
+		assertShouldRun(t, model, RunOnIndex, false)
+		assertShouldRun(t, model, RunNewlyIndexed, true)
+	})
+	t.Run("TensorFlow", func(t *testing.T) {
+		model := &Model{Type: ModelTypeLabels, Name: string(classify.ModelEfficientFormerV2S2), TensorFlow: &tensorflow.ModelInfo{}}
+		assertShouldRun(t, model, RunOnIndex, false)
+		assertShouldRun(t, model, RunNewlyIndexed, true)
+	})
+	t.Run("GlobalServiceUri", func(t *testing.T) {
+		previous := ServiceUri
+		ServiceUri = "http://photoprism-vision:5000/api/v1/vision"
+		t.Cleanup(func() { ServiceUri = previous })
+		named := &Model{Type: ModelTypeLabels, Name: string(classify.ModelEfficientFormerV2S2)}
+		assertShouldRun(t, named, RunOnIndex, false)
+		assertShouldRun(t, named, RunNewlyIndexed, true)
+		disabled := &Model{Type: ModelTypeLabels, Name: string(classify.ModelEfficientFormerV2S2), Service: Service{Uri: "http://localhost:5000", Disabled: true}}
+		assertShouldRun(t, disabled, RunOnIndex, false)
+		assertShouldRun(t, disabled, RunNewlyIndexed, true)
+	})
+	t.Run("RegisteredAlternative", func(t *testing.T) {
+		model := NewLabelModel(classify.ModelRepViTM10)
+		require.NotNil(t, model)
+		assertShouldRun(t, model, RunOnIndex, false)
+		assertShouldRun(t, model, RunNewlyIndexed, true)
+	})
+	t.Run("SelectedAlternative", func(t *testing.T) {
+		model := NewLabelModel(classify.ModelRepViTM10)
+		require.NotNil(t, model)
+		model.Default = true
+		assertShouldRun(t, model, RunOnIndex, false)
+		assertShouldRun(t, model, RunNewlyIndexed, true)
+	})
+	t.Run("ExplicitOnIndex", func(t *testing.T) {
+		model := NewLabelModel(classify.ModelRepViTM10)
+		require.NotNil(t, model)
+		model.Run = RunOnIndex
+		assertShouldRun(t, model, RunOnIndex, true)
+		assertShouldRun(t, model, RunNewlyIndexed, false)
+	})
+	t.Run("Remote", func(t *testing.T) {
+		model := &Model{Type: ModelTypeLabels, Name: string(classify.ModelEfficientFormerV2S2), Engine: "ollama", Service: Service{Uri: "http://ollama:11434/api/generate"}}
+		assertShouldRun(t, model, RunOnIndex, false)
+		assertShouldRun(t, model, RunNewlyIndexed, true)
+	})
+	t.Run("RemoteDefault", func(t *testing.T) {
+		model := &Model{Type: ModelTypeLabels, Name: "custom", Default: true, Service: Service{Uri: "http://photoprism-vision:5000/api/v1/vision/labels"}}
+		assertShouldRun(t, model, RunOnIndex, true)
+		assertShouldRun(t, model, RunNewlyIndexed, false)
+	})
 }
 
 func TestModel_ShouldRun_RunNewlyIndexed(t *testing.T) {
@@ -160,4 +242,131 @@ func assertShouldRun(t *testing.T, m *Model, when RunType, want bool) {
 	if got := m.ShouldRun(when); got != want {
 		t.Fatalf("ShouldRun(%q) = %v, want %v (model run=%q)", when, got, want, m.RunType())
 	}
+}
+
+func TestRunTypeUsageString(t *testing.T) {
+	usage := RunTypeUsageString()
+
+	t.Run("NamesTheCanonicalTypes", func(t *testing.T) {
+		for _, run := range []RunType{RunAlways, RunOnIndex, RunNewlyIndexed, RunOnSchedule, RunOnDemand, RunManual, RunNever} {
+			assert.Contains(t, usage, run)
+		}
+
+		assert.True(t, strings.HasPrefix(usage, "auto, "))
+	})
+	t.Run("OmitsAliases", func(t *testing.T) {
+		// The aliases add no choice and would make the list unreadable in a help listing.
+		assert.NotContains(t, usage, "after-index")
+		assert.NotContains(t, usage, "manually")
+	})
+	t.Run("EveryNameParses", func(t *testing.T) {
+		for _, name := range strings.Split(usage, ", ") {
+			assert.True(t, KnownRunType(name), name)
+		}
+	})
+}
+
+// TestShouldRunAt pins the one table every caller shares, and that RunAuto is not decided in it.
+func TestShouldRunAt(t *testing.T) {
+	t.Run("AutoIsLeftToTheCaller", func(t *testing.T) {
+		// A vision model asks whether it is the default one and face detection whether the host is
+		// fast enough, so a decision here would have to be wrong for one of them.
+		for _, when := range []RunType{RunAuto, RunAlways, RunOnIndex, RunNewlyIndexed, RunOnSchedule, RunOnDemand, RunManual, RunNever} {
+			_, decided := ShouldRunAt(RunAuto, when)
+			assert.False(t, decided, when)
+		}
+	})
+	t.Run("OnDemandCoversTheScheduledPass", func(t *testing.T) {
+		// Its own definition names the scheduled run, and a second copy of this table dropped that
+		// term, which left FACE_RUN=on-demand behaving exactly like newly-indexed.
+		for _, when := range []RunType{RunManual, RunNewlyIndexed, RunOnSchedule, RunOnDemand} {
+			should, decided := ShouldRunAt(RunOnDemand, when)
+			assert.True(t, decided, when)
+			assert.True(t, should, when)
+		}
+
+		should, _ := ShouldRunAt(RunOnDemand, RunOnIndex)
+		assert.False(t, should, "on-demand does not detect inline")
+	})
+	t.Run("EveryRunTypeIsDistinct", func(t *testing.T) {
+		// Two options that decide alike everywhere are one option and a choice nobody can act on.
+		contexts := []RunType{RunOnIndex, RunNewlyIndexed, RunOnSchedule, RunManual}
+		seen := make(map[string]RunType, 7)
+
+		for _, run := range []RunType{RunNever, RunManual, RunAlways, RunNewlyIndexed, RunOnDemand, RunOnSchedule, RunOnIndex} {
+			key := ""
+
+			for _, when := range contexts {
+				should, _ := ShouldRunAt(run, when)
+				key += map[bool]string{true: "1", false: "0"}[should]
+			}
+
+			assert.NotContains(t, seen, key, run)
+			seen[key] = run
+		}
+	})
+	t.Run("Unknown", func(t *testing.T) {
+		_, decided := ShouldRunAt("nonexistent", RunManual)
+		assert.False(t, decided, "an unknown value asks for auto, which is not decided here")
+	})
+}
+
+// TestKnownRunType pins what ParseRunType cannot answer: it returns RunAuto both for the values
+// that ask for it and for the ones it does not recognize, so a typo could not be reported.
+func TestKnownRunType(t *testing.T) {
+	t.Run("Known", func(t *testing.T) {
+		assert.True(t, KnownRunType("auto"))
+		assert.True(t, KnownRunType(""))
+		assert.True(t, KnownRunType("On-Schedule"))
+		assert.True(t, KnownRunType("after-index"))
+		// Underscores and spaces normalize to dashes, as they do for model and detector names.
+		assert.True(t, KnownRunType("on_schedule"))
+		assert.True(t, KnownRunType("on schedule"))
+	})
+	t.Run("Unknown", func(t *testing.T) {
+		// ParseRunType answers RunAuto for these as well as for "auto", which is why the report
+		// of an unsupported value could never fire while it was derived from the parsed result.
+		assert.False(t, KnownRunType("whenever"))
+		assert.False(t, KnownRunType("bogus"))
+		assert.Equal(t, RunAuto, ParseRunType("whenever"))
+	})
+}
+
+// TestLocalNSFWScheduling verifies every local detector runs inline unless explicitly scheduled.
+func TestLocalNSFWScheduling(t *testing.T) {
+	for name := range nsfw.Models {
+		t.Run(string(name), func(t *testing.T) {
+			model := NewNsfwModel(name)
+			assertShouldRun(t, model, RunOnIndex, true)
+			assertShouldRun(t, model, RunNewlyIndexed, false)
+			model.Run = RunOnSchedule
+			assertShouldRun(t, model, RunOnIndex, false)
+			assertShouldRun(t, model, RunOnSchedule, true)
+		})
+	}
+	t.Run("Custom", func(t *testing.T) {
+		model := &Model{Type: ModelTypeNsfw, Name: "custom", ONNX: &onnx.ModelInfo{}}
+		assertShouldRun(t, model, RunOnIndex, true)
+		model.Run = RunNever
+		assertShouldRun(t, model, RunOnIndex, false)
+	})
+	t.Run("Remote", func(t *testing.T) {
+		model := &Model{Type: ModelTypeNsfw, Name: "custom", Service: Service{Uri: "https://example.com", Method: "POST"}}
+		assertShouldRun(t, model, RunOnIndex, false)
+		assertShouldRun(t, model, RunNewlyIndexed, true)
+	})
+	t.Run("RegisteredName", func(t *testing.T) {
+		model := &Model{Type: ModelTypeNsfw, Name: string(nsfw.ModelFalconsai)}
+		assertShouldRun(t, model, RunOnIndex, true)
+	})
+}
+
+// TestAutomaticAlternativeLabels verifies automatic selection preserves background label scheduling.
+func TestAutomaticAlternativeLabels(t *testing.T) {
+	model := NewLabelModel(classify.ModelRepViTM10)
+	model.Default = true
+	assertShouldRun(t, model, RunOnIndex, false)
+	assertShouldRun(t, model, RunNewlyIndexed, true)
+	model.Run = RunOnIndex
+	assertShouldRun(t, model, RunOnIndex, true)
 }

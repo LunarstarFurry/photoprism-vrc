@@ -30,7 +30,7 @@ func (m *Photo) GetTitle() string {
 // SetTitle updates the photo title when the supplied source outranks the current one.
 // The title is normalized, quotes are unified, and the final value is clipped to 300 characters.
 func (m *Photo) SetTitle(title, source string) {
-	title = strings.Trim(title, "_&|{}<>: \n\r\t\\")
+	title = strings.Trim(clean.StripControl(title), "_&|{}<>: \n\r\t\\")
 	title = strings.ReplaceAll(title, "\"", "'")
 	title = txt.Shorten(title, txt.ClipLongName, txt.Ellipsis)
 
@@ -53,20 +53,21 @@ func (m *Photo) SetTitle(title, source string) {
 }
 
 // GenerateTitle sets the photo title to the taken-at timestamp in "YYYY-MM-DD HH-MM-SS" format
-// when the current title source allows auto-generation.
-// This VRChat-specific branch uses the taken time as the title instead of deriving one from
-// locations, labels, or filenames, which produce unhelpful results for VRChat screenshots.
+// when the current title source allows auto-generation. It also refreshes an automatic caption,
+// which is resolved from people and so is kept current even for a picture whose title somebody typed.
 func (m *Photo) GenerateTitle(labels classify.Labels) error {
+	// Resolved once, above the title guard: the caption derives from the same list and has its own
+	// source to answer for, so a manual title must not leave a generated caption behind.
+	people := m.SubjectNames()
+
+	m.GenerateCaption(people)
+
 	if m.TitleSrc != SrcAuto {
 		return fmt.Errorf("photo: %s keeps existing %s title", m.String(), SrcString(m.TitleSrc))
 	}
 
 	start := time.Now()
 	oldTitle := m.PhotoTitle
-
-	// Find people in the picture and generate a caption.
-	people := m.SubjectNames()
-	m.GenerateCaption(people)
 
 	// Use the local taken-at time as the title in "YYYY-MM-DD HH-MM-SS" format.
 	if !m.TakenAtLocal.IsZero() {
@@ -105,11 +106,7 @@ func (m *Photo) GenerateAndSaveTitle() error {
 		log.Errorf("photo: %s", err.Error())
 	}
 
-	if err := m.Save(); err != nil {
-		return err
-	}
-
-	return nil
+	return m.Save()
 }
 
 // FileTitle returns a photo title based on the file name and/or path.

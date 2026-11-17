@@ -14,6 +14,8 @@ var ResourceNames = []Resource{
 	ResourcePeople,
 	ResourcePlaces,
 	ResourceLabels,
+	ResourceCameras,
+	ResourceLenses,
 	ResourceConfig,
 	ResourceSettings,
 	ResourcePasscode,
@@ -21,6 +23,7 @@ var ResourceNames = []Resource{
 	ResourceServices,
 	ResourceUsers,
 	ResourceSessions,
+	ResourceClients,
 	ResourceLogs,
 	ResourceApi,
 	ResourceWebDAV,
@@ -29,5 +32,6 @@ var ResourceNames = []Resource{
 	ResourceVision,
 	ResourceCluster,
 	ResourceFeedback,
+	ResourceMCP,
 	ResourceDefault,
 }

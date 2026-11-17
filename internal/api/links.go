@@ -9,11 +9,46 @@ import (
 	"github.com/photoprism/photoprism/internal/auth/acl"
 	"github.com/photoprism/photoprism/internal/entity"
 	"github.com/photoprism/photoprism/internal/entity/query"
+	"github.com/photoprism/photoprism/internal/event"
 	"github.com/photoprism/photoprism/internal/form"
 	"github.com/photoprism/photoprism/pkg/clean"
 	"github.com/photoprism/photoprism/pkg/i18n"
-	"github.com/photoprism/photoprism/pkg/txt"
+	"github.com/photoprism/photoprism/pkg/log/status"
 )
+
+// findRequestLink returns the share link named in the request path when it belongs to the resource
+// that path addresses, and nil otherwise. The parent UID must be well formed.
+func findRequestLink(c *gin.Context) *entity.Link {
+	uid := clean.UID(c.Param("uid"))
+
+	if uid == "" {
+		return nil
+	}
+
+	link := entity.FindLink(clean.Token(c.Param("link")))
+
+	if link == nil || link.ShareUID != uid {
+		return nil
+	}
+
+	return link
+}
+
+// LinkTokenMinLength is the shortest custom share link token that may be set, as the token is the
+// only credential a share URL carries. Generated tokens are longer.
+const LinkTokenMinLength = 6
+
+// linkToken normalizes a request-supplied share link token and returns an empty string when the
+// value cannot be used as one, given its length and the characters it contains.
+func linkToken(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+
+	if len(s) < LinkTokenMinLength || clean.ShareToken(s) != s {
+		return ""
+	}
+
+	return s
+}
 
 // UpdateLink updates a share link and return it as JSON.
 //
@@ -41,31 +76,40 @@ func UpdateLink(c *gin.Context) {
 		return
 	}
 
-	link := entity.FindLink(clean.Token(c.Param("link")))
+	link := findRequestLink(c)
+
+	if link == nil {
+		event.AuditWarn([]string{ClientIP(c), "session %s", "share link %s", "update", status.NotFound}, s.RefID, clean.Log(c.Param("link")))
+		AbortEntityNotFound(c)
+		return
+	}
+
+	if frm.LinkToken != "" && frm.LinkToken != link.LinkToken {
+		token := linkToken(frm.LinkToken)
+
+		if token == "" {
+			event.AuditWarn([]string{ClientIP(c), "session %s", "share link %s", "invalid token", status.Denied}, s.RefID, clean.Log(link.LinkUID))
+			AbortBadRequest(c)
+			return
+		}
+
+		link.LinkToken = token
+	}
 
 	link.SetSlug(frm.ShareSlug)
 	link.MaxViews = frm.MaxViews
 	link.LinkExpires = frm.LinkExpires
 
-	if frm.LinkToken != "" {
-		link.LinkToken = strings.TrimSpace(strings.ToLower(frm.LinkToken))
-	}
-
-	if frm.Password != "" {
-		if err := link.SetPassword(frm.Password); err != nil {
-			c.AbortWithStatusJSON(http.StatusConflict, gin.H{"error": txt.UpperFirst(err.Error())})
-			return
-		}
-	}
-
 	if err := link.Save(); err != nil {
-		c.AbortWithStatusJSON(http.StatusConflict, gin.H{"error": txt.UpperFirst(err.Error())})
+		Abort(c, http.StatusConflict, i18n.ErrSaveFailed)
 		return
 	}
 
+	event.AuditInfo([]string{ClientIP(c), "session %s", "share link %s", "updated", status.Succeeded}, s.RefID, clean.Log(link.LinkUID))
+
 	UpdateClientConfig()
 
-	PublishAlbumEvent(StatusUpdated, link.ShareUID, c)
+	PublishAlbumEvent(StatusUpdated, link.ShareUID)
 
 	c.JSON(http.StatusOK, link)
 }
@@ -81,16 +125,24 @@ func DeleteLink(c *gin.Context) {
 		return
 	}
 
-	link := entity.FindLink(clean.Token(c.Param("link")))
+	link := findRequestLink(c)
 
-	if err := link.Delete(); err != nil {
-		c.AbortWithStatusJSON(http.StatusConflict, gin.H{"error": txt.UpperFirst(err.Error())})
+	if link == nil {
+		event.AuditWarn([]string{ClientIP(c), "session %s", "share link %s", "delete", status.NotFound}, s.RefID, clean.Log(c.Param("link")))
+		AbortEntityNotFound(c)
 		return
 	}
 
+	if err := link.Delete(); err != nil {
+		Abort(c, http.StatusConflict, i18n.ErrDeleteFailed)
+		return
+	}
+
+	event.AuditInfo([]string{ClientIP(c), "session %s", "share link %s", "deleted", status.Succeeded}, s.RefID, clean.Log(link.LinkUID))
+
 	UpdateClientConfig()
 
-	PublishAlbumEvent(StatusUpdated, link.ShareUID, c)
+	PublishAlbumEvent(StatusUpdated, link.ShareUID)
 
 	c.JSON(http.StatusOK, link)
 }
@@ -133,36 +185,31 @@ func CreateLink(c *gin.Context) {
 	link.MaxViews = frm.MaxViews
 	link.LinkExpires = frm.LinkExpires
 
-	if frm.Password != "" {
-		if err := link.SetPassword(frm.Password); err != nil {
-			c.AbortWithStatusJSON(http.StatusConflict, gin.H{"error": txt.UpperFirst(err.Error())})
-			return
-		}
-	}
-
 	if err := link.Save(); err != nil {
-		c.AbortWithStatusJSON(http.StatusConflict, gin.H{"error": txt.UpperFirst(err.Error())})
+		Abort(c, http.StatusConflict, i18n.ErrSaveFailed)
 		return
 	}
 
+	event.AuditInfo([]string{ClientIP(c), "session %s", "share link %s", "created", status.Succeeded}, s.RefID, clean.Log(link.LinkUID))
+
 	UpdateClientConfig()
 
-	PublishAlbumEvent(StatusUpdated, link.ShareUID, c)
+	PublishAlbumEvent(StatusUpdated, link.ShareUID)
 
 	c.JSON(http.StatusOK, link)
 }
 
-// CreateAlbumLink adds a new album share link and return it as JSON.
+// CreateAlbumLink adds a new album share link and returns it as JSON.
 //
-//	@Summary	adds a new album share link and return it as JSON
+//	@Summary	adds a new album share link and returns it as JSON
 //	@Id			CreateAlbumLink
 //	@Tags		Links, Albums
 //	@Accept		json
 //	@Produce	json
-//	@Success	200						{object}	entity.Link
-//	@Failure	400,401,403,404,409,429	{object}	i18n.Response
-//	@Param		uid						path		string		true	"album uid"
-//	@Param		link					body		form.Link	true	"link properties (currently supported: slug, expires)"
+//	@Success	200							{object}	entity.Link
+//	@Failure	400,401,403,404,409,413,429	{object}	i18n.Response
+//	@Param		uid							path		string		true	"album uid"
+//	@Param		link						body		form.Link	true	"link settings: slug and expires (seconds, 0 = never); max views is reserved and should be 0"
 //	@Router		/api/v1/albums/{uid}/links [post]
 func CreateAlbumLink(router *gin.RouterGroup) {
 	router.POST("/albums/:uid/links", func(c *gin.Context) {
@@ -181,18 +228,18 @@ func CreateAlbumLink(router *gin.RouterGroup) {
 	})
 }
 
-// UpdateAlbumLink updates an album share link and return it as JSON.
+// UpdateAlbumLink updates an album share link and returns it as JSON.
 //
-//	@Summary	updates an album share link and return it as JSON
+//	@Summary	updates an album share link and returns it as JSON
 //	@Id			UpdateAlbumLink
 //	@Tags		Links, Albums
 //	@Accept		json
 //	@Produce	json
-//	@Success	200						{object}	entity.Link
-//	@Failure	400,401,403,429,409,500	{object}	i18n.Response
-//	@Param		uid						path		string		true	"album uid"
-//	@Param		linkuid					path		string		true	"link uid"
-//	@Param		link					body		form.Link	true	"properties to be updated (currently supported: slug, expires, token)"
+//	@Success	200							{object}	entity.Link
+//	@Failure	400,401,403,404,409,413,429	{object}	i18n.Response
+//	@Param		uid							path		string		true	"album uid"
+//	@Param		linkuid						path		string		true	"link uid"
+//	@Param		link						body		form.Link	true	"link settings: slug, expires, and max views are replaced as sent, an empty token keeps the current one; max views is reserved and should be 0"
 //	@Router		/api/v1/albums/{uid}/links/{linkuid} [put]
 func UpdateAlbumLink(router *gin.RouterGroup) {
 	router.PUT("/albums/:uid/links/:link", func(c *gin.Context) {
@@ -213,10 +260,10 @@ func UpdateAlbumLink(router *gin.RouterGroup) {
 //	@Tags		Links, Albums
 //	@Accept		json
 //	@Produce	json
-//	@Success	200				{object}	entity.Link
-//	@Failure	401,403,429,409	{object}	i18n.Response
-//	@Param		uid				path		string	true	"album"
-//	@Param		linkuid			path		string	true	"link uid"
+//	@Success	200					{object}	entity.Link
+//	@Failure	401,403,404,409,429	{object}	i18n.Response
+//	@Param		uid					path		string	true	"album uid"
+//	@Param		linkuid				path		string	true	"link uid"
 //	@Router		/api/v1/albums/{uid}/links/{linkuid} [delete]
 func DeleteAlbumLink(router *gin.RouterGroup) {
 	router.DELETE("/albums/:uid/links/:link", func(c *gin.Context) {
@@ -236,7 +283,7 @@ func DeleteAlbumLink(router *gin.RouterGroup) {
 //	@Id			GetAlbumLinks
 //	@Tags		Links, Albums
 //	@Produce	json
-//	@Success	200				{object}	entity.Link
+//	@Success	200				{array}		entity.Link
 //	@Failure	401,403,404,429	{object}	i18n.Response
 //	@Param		uid				path		string	true	"album uid"
 //	@Router		/api/v1/albums/{uid}/links [get]

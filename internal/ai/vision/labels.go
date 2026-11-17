@@ -53,16 +53,21 @@ func labelsInternal(images Files, mediaSrc media.Src, labelSrc entity.Src) (resu
 			}
 		}
 
+		// Refuse a model whose own service URI does not resolve.
+		if err = model.unresolvedUriErr(); err != nil {
+			return result, err
+		}
+
 		// Use remote service API if a server endpoint has been configured.
 		if uri, method := model.Endpoint(); uri != "" && method != "" {
 			var apiRequest *ApiRequest
 			var apiResponse *ApiResponse
 
 			if engine, ok := EngineFor(model.EndpointRequestFormat()); ok && engine.Builder != nil {
-				if apiRequest, err = engine.Builder.Build(context.Background(), model, images); err != nil {
+				if apiRequest, err = engine.Builder.Build(context.Background(), model, images, mediaSrc); err != nil {
 					return result, err
 				}
-			} else if apiRequest, err = NewApiRequest(model.EndpointRequestFormat(), images, model.EndpointFileScheme()); err != nil {
+			} else if apiRequest, err = NewApiRequest(model.EndpointRequestFormat(), images, model.EndpointFileScheme(), mediaSrc); err != nil {
 				return result, err
 			}
 
@@ -99,6 +104,8 @@ func labelsInternal(images Files, mediaSrc media.Src, labelSrc entity.Src) (resu
 				}
 			}
 
+			apiRequest.Normalize = model.GetNormalize()
+
 			apiRequest.WriteLog()
 
 			if apiResponse, err = PerformApiRequest(apiRequest, uri, method, model.EndpointKey()); err != nil {
@@ -109,7 +116,7 @@ func labelsInternal(images Files, mediaSrc media.Src, labelSrc entity.Src) (resu
 				result = append(result, label.ToClassify(labelSrc))
 			}
 		} else if tf := model.ClassifyModel(); tf != nil {
-			// Predict labels with local TensorFlow model.
+			// Predict labels with a local ONNX model.
 			for i := range images {
 				var labels classify.Labels
 

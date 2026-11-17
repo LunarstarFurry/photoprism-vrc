@@ -3,7 +3,6 @@ package api
 import (
 	_ "embed" // required for go:embed video placeholder
 	"net/http"
-	"strings"
 
 	"github.com/gin-gonic/gin"
 
@@ -23,9 +22,9 @@ func Abort(c *gin.Context, code int, id i18n.Message, params ...any) {
 	resp := i18n.NewResponse(code, id, params...)
 
 	if code >= 400 {
-		log.Debugf("api: aborting request with error code %d (%s)", code, strings.ToLower(resp.String()))
+		log.Debugf("api: aborting request with error code %d (%s)", code, i18n.Lower(id, params...))
 	} else {
-		log.Debugf("api: aborting request with response code %d (%s)", code, strings.ToLower(resp.String()))
+		log.Debugf("api: aborting request with response code %d (%s)", code, i18n.Lower(id, params...))
 	}
 
 	c.AbortWithStatusJSON(code, resp)
@@ -39,9 +38,9 @@ func Error(c *gin.Context, code int, err error, id i18n.Message, params ...any) 
 		resp.Details = err.Error()
 
 		if reqPath := c.FullPath(); reqPath == "" {
-			log.Errorf("api: error %d %s (%s)", code, clean.Error(err), strings.ToLower(resp.String()))
+			log.Errorf("api: error %d %s (%s)", code, clean.Error(err), i18n.Lower(id, params...))
 		} else {
-			log.Errorf("api: error %d %s in %s (%s)", code, clean.Error(err), clean.Log(reqPath), strings.ToLower(resp.String()))
+			log.Errorf("api: error %d %s in %s (%s)", code, clean.Error(err), clean.Log(reqPath), i18n.Lower(id, params...))
 		}
 	}
 
@@ -149,6 +148,12 @@ func AbortQuotaExceeded(c *gin.Context) {
 	Abort(c, http.StatusForbidden, i18n.ErrQuotaExceeded)
 }
 
+// AbortMigrationInProgress responds with HTTP 409 while a migration holds the rows a request
+// would write.
+func AbortMigrationInProgress(c *gin.Context) {
+	Abort(c, http.StatusConflict, i18n.ErrMigrationInProgress)
+}
+
 // AbortBusy responds with HTTP 429 to signal temporary overload.
 func AbortBusy(c *gin.Context) {
 	Abort(c, http.StatusTooManyRequests, i18n.ErrBusy)
@@ -160,9 +165,11 @@ func AbortInvalidName(c *gin.Context) {
 }
 
 // AbortInvalidCredentials responds with HTTP 401 for failed authentication attempts.
+// The message carries messageId so the Web UI can render it in the user's UI language;
+// error/code keep their shape for OAuth2 clients and the frontend's code-based handling.
 func AbortInvalidCredentials(c *gin.Context) {
 	if c != nil {
-		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": authn.ErrInvalidCredentials.Error(), "code": i18n.ErrInvalidCredentials, "message": i18n.Msg(i18n.ErrInvalidCredentials)})
+		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": authn.ErrInvalidCredentials.Error(), "code": i18n.ErrInvalidCredentials, "message": i18n.Msg(i18n.ErrInvalidCredentials), "messageId": i18n.Source(i18n.ErrInvalidCredentials)})
 	}
 }
 

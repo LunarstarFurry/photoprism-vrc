@@ -3,22 +3,32 @@ package api
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/sirupsen/logrus"
+	"github.com/sirupsen/logrus/hooks/test"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/time/rate"
 
 	"github.com/photoprism/photoprism/internal/ai/vision"
 	"github.com/photoprism/photoprism/internal/auth/acl"
 	clusterjwt "github.com/photoprism/photoprism/internal/auth/jwt"
 	"github.com/photoprism/photoprism/internal/auth/session"
 	"github.com/photoprism/photoprism/internal/config"
+	"github.com/photoprism/photoprism/internal/entity"
+	"github.com/photoprism/photoprism/internal/event"
 	"github.com/photoprism/photoprism/internal/photoprism/get"
+	"github.com/photoprism/photoprism/internal/server/limiter"
 	"github.com/photoprism/photoprism/internal/service/cluster"
 	"github.com/photoprism/photoprism/pkg/authn"
+	"github.com/photoprism/photoprism/pkg/clean"
 	"github.com/photoprism/photoprism/pkg/http/header"
 	"github.com/photoprism/photoprism/pkg/rnd"
 )
@@ -97,6 +107,255 @@ func TestAuthAny(t *testing.T) {
 		assert.Equal(t, http.StatusOK, s.HttpStatus())
 		assert.False(t, s.Abort(c))
 	})
+}
+
+func TestAuthAny_AppPasswordsDisabled(t *testing.T) {
+	conf := config.TestConfig()
+	conf.SetAuthMode(config.AuthModePasswd)
+	defer conf.SetAuthMode(config.AuthModePublic)
+	defer func() { conf.Settings().Features.AppPasswords = true }()
+
+	user := entity.FindUserByName("alice")
+	require.NotNil(t, user)
+
+	// App passwords are minted with different grant types (password for local users,
+	// session for OIDC-only users, cli for "auth add"); the gate must reject all of them.
+	for _, grant := range []authn.GrantType{authn.GrantPassword, authn.GrantSession, authn.GrantCLI} {
+		t.Run(grant.String(), func(t *testing.T) {
+			sess, err := entity.AddClientSession("alice-app-"+grant.String(), conf.SessionMaxAge(), "*", grant, user)
+			require.NoError(t, err)
+			require.True(t, sess.IsApplication())
+			token := sess.AuthToken()
+
+			authPhotos := func() *entity.Session {
+				gin.SetMode(gin.TestMode)
+				w := httptest.NewRecorder()
+				c, _ := gin.CreateTestContext(w)
+				req, _ := http.NewRequest(http.MethodGet, "/api/v1/photos", nil)
+				header.SetAuthorization(req, token)
+				req.RemoteAddr = "10.9.8.7:4321"
+				c.Request = req
+				return AuthAny(c, acl.ResourcePhotos, acl.Permissions{acl.ActionView})
+			}
+
+			// Enabled: the app password authorizes within its scope.
+			conf.Settings().Features.AppPasswords = true
+			s := authPhotos()
+			require.NotNil(t, s)
+			assert.Equal(t, http.StatusOK, s.HttpStatus())
+
+			// Disabled: the same app password is rejected before any ACL check.
+			conf.Settings().Features.AppPasswords = false
+			s2 := authPhotos()
+			require.NotNil(t, s2)
+			assert.Equal(t, http.StatusForbidden, s2.HttpStatus())
+		})
+	}
+
+	// Negative control: the gate keys on IsApplication(), so a non-application
+	// session (here a client-credentials grant) must keep authorizing whether or
+	// not app passwords are disabled, proving the flag does not over-reject.
+	t.Run("NonApplicationSessionUnaffected", func(t *testing.T) {
+		sess, err := entity.AddClientSession("alice-client-cred", conf.SessionMaxAge(), "*", authn.GrantClientCredentials, nil)
+		require.NoError(t, err)
+		require.False(t, sess.IsApplication())
+		token := sess.AuthToken()
+
+		authPhotos := func() *entity.Session {
+			gin.SetMode(gin.TestMode)
+			w := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(w)
+			req, _ := http.NewRequest(http.MethodGet, "/api/v1/photos", nil)
+			header.SetAuthorization(req, token)
+			req.RemoteAddr = "10.9.8.7:4321"
+			c.Request = req
+			return AuthAny(c, acl.ResourcePhotos, acl.Permissions{acl.ActionView})
+		}
+
+		conf.Settings().Features.AppPasswords = true
+		s := authPhotos()
+		require.NotNil(t, s)
+		assert.Equal(t, http.StatusOK, s.HttpStatus())
+
+		conf.Settings().Features.AppPasswords = false
+		s2 := authPhotos()
+		require.NotNil(t, s2)
+		assert.Equal(t, http.StatusOK, s2.HttpStatus(), "disabling app passwords must not reject non-application sessions")
+	})
+}
+
+func TestAuthAny_AppPasswordWebLoginDisabled(t *testing.T) {
+	conf := config.TestConfig()
+	conf.SetAuthMode(config.AuthModePasswd)
+	defer conf.SetAuthMode(config.AuthModePublic)
+
+	// Use a non-super-admin account; super admins keep web login regardless of CanLogin.
+	user := entity.FindUserByName("bob")
+	require.NotNil(t, user)
+	require.False(t, user.SuperAdmin)
+
+	sess, err := entity.AddClientSession("bob-app-pw", conf.SessionMaxAge(), "*", authn.GrantPassword, user)
+	require.NoError(t, err)
+	require.True(t, sess.IsApplication())
+	token := sess.AuthToken()
+
+	authPhotos := func() *entity.Session {
+		gin.SetMode(gin.TestMode)
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		req, _ := http.NewRequest(http.MethodGet, "/api/v1/photos", nil)
+		header.SetAuthorization(req, token)
+		req.RemoteAddr = "10.9.8.7:4321"
+		c.Request = req
+		return AuthAny(c, acl.ResourcePhotos, acl.Permissions{acl.ActionView})
+	}
+
+	// Restore the fixture's web login state after the test.
+	defer func() {
+		if m := entity.FindLocalUser("bob"); m != nil {
+			m.CanLogin = true
+			_ = m.Save()
+		}
+		entity.FlushSessionCache()
+	}()
+
+	// Web login enabled: the app password authorizes within its scope.
+	s := authPhotos()
+	require.NotNil(t, s)
+	assert.Equal(t, http.StatusOK, s.HttpStatus())
+
+	// Web login disabled: the same app password is rejected on the REST API. WebDAV
+	// access stays governed by CanUseWebDAV (verified in the entity tests).
+	m := entity.FindLocalUser("bob")
+	require.NotNil(t, m)
+	m.CanLogin = false
+	require.NoError(t, m.Save())
+	entity.FlushSessionCache()
+
+	s2 := authPhotos()
+	require.NotNil(t, s2)
+	assert.Equal(t, http.StatusForbidden, s2.HttpStatus())
+}
+
+func TestAuthAny_AppPasswordDeactivated(t *testing.T) {
+	conf := config.TestConfig()
+	conf.SetAuthMode(config.AuthModePasswd)
+	defer conf.SetAuthMode(config.AuthModePublic)
+
+	user := entity.FindUserByName("bob")
+	require.NotNil(t, user)
+
+	sess, err := entity.AddClientSession("bob-app-deact", conf.SessionMaxAge(), "*", authn.GrantPassword, user)
+	require.NoError(t, err)
+	require.True(t, sess.IsApplication())
+	token := sess.AuthToken()
+
+	authPhotos := func() *entity.Session {
+		gin.SetMode(gin.TestMode)
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		req, _ := http.NewRequest(http.MethodGet, "/api/v1/photos", nil)
+		header.SetAuthorization(req, token)
+		req.RemoteAddr = "10.9.8.7:4321"
+		c.Request = req
+		return AuthAny(c, acl.ResourcePhotos, acl.Permissions{acl.ActionView})
+	}
+
+	// Restore the fixture's auth provider after the test. FindUserByName is used instead
+	// of FindLocalUser because a disabled account (provider none) is excluded from the
+	// local-provider lookup, which would otherwise skip the restore and leak the disabled
+	// state into later tests that sign in as bob.
+	defer func() {
+		if m := entity.FindUserByName("bob"); m != nil {
+			m.SetProvider(authn.ProviderLocal)
+			m.CanLogin = true
+			_ = m.Save()
+		}
+		entity.FlushSessionCache()
+	}()
+
+	// Active account: the app password authorizes within its scope.
+	s := authPhotos()
+	require.NotNil(t, s)
+	assert.Equal(t, http.StatusOK, s.HttpStatus())
+
+	// Deactivated (auth provider set to none): the app password is rejected on the REST
+	// API by the per-request DenyLogIn gate, even though the record is not revoked.
+	m := entity.FindLocalUser("bob")
+	require.NotNil(t, m)
+	m.SetProvider(authn.ProviderNone)
+	require.NoError(t, m.Save())
+	entity.FlushSessionCache()
+
+	s2 := authPhotos()
+	require.NotNil(t, s2)
+	assert.Equal(t, http.StatusForbidden, s2.HttpStatus())
+
+	// The app password record itself is preserved, so reactivating the account restores
+	// access without reconfiguring devices.
+	rec, err := entity.FindSession(sess.ID)
+	require.NoError(t, err)
+	assert.NotNil(t, rec)
+}
+
+func TestAuthAny_AppPasswordOidcUserDisabled(t *testing.T) {
+	conf := config.TestConfig()
+	conf.SetAuthMode(config.AuthModePasswd)
+	defer conf.SetAuthMode(config.AuthModePublic)
+
+	user := entity.FindUserByName("bob")
+	require.NotNil(t, user)
+	require.False(t, user.SuperAdmin)
+
+	// GrantSession is the grant type app passwords are minted with for OIDC-only users,
+	// who have no local password. This mirrors the #5647 user story: such an app password
+	// must be rejected once an admin disables the account, even though no real IdP is
+	// involved. The DenyLogIn gate keys on the account's login state, not the grant type.
+	sess, err := entity.AddClientSession("bob-app-oidc-disabled", conf.SessionMaxAge(), "*", authn.GrantSession, user)
+	require.NoError(t, err)
+	require.True(t, sess.IsApplication())
+	token := sess.AuthToken()
+
+	authPhotos := func() *entity.Session {
+		gin.SetMode(gin.TestMode)
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		req, _ := http.NewRequest(http.MethodGet, "/api/v1/photos", nil)
+		header.SetAuthorization(req, token)
+		req.RemoteAddr = "10.9.8.7:4321"
+		c.Request = req
+		return AuthAny(c, acl.ResourcePhotos, acl.Permissions{acl.ActionView})
+	}
+
+	// Restore the fixture's auth provider after the test. FindUserByName is used instead
+	// of FindLocalUser because a disabled account (provider none) is excluded from the
+	// local-provider lookup, which would otherwise skip the restore and leak the disabled
+	// state into later tests that sign in as bob.
+	defer func() {
+		if m := entity.FindUserByName("bob"); m != nil {
+			m.SetProvider(authn.ProviderLocal)
+			m.CanLogin = true
+			_ = m.Save()
+		}
+		entity.FlushSessionCache()
+	}()
+
+	// Active account: the OIDC-minted app password authorizes within its scope.
+	s := authPhotos()
+	require.NotNil(t, s)
+	assert.Equal(t, http.StatusOK, s.HttpStatus())
+
+	// Admin disables the account (auth provider set to none): the per-request DenyLogIn
+	// gate rejects the app password on the REST API regardless of its grant type.
+	m := entity.FindLocalUser("bob")
+	require.NotNil(t, m)
+	m.SetProvider(authn.ProviderNone)
+	require.NoError(t, m.Save())
+	entity.FlushSessionCache()
+
+	s2 := authPhotos()
+	require.NotNil(t, s2)
+	assert.Equal(t, http.StatusForbidden, s2.HttpStatus())
 }
 
 func TestAuthToken(t *testing.T) {
@@ -228,6 +487,36 @@ func TestAuthAnyVisionServiceKey(t *testing.T) {
 	assert.True(t, rnd.IsRefID(s.RefID))
 }
 
+// TestAuthAnyVisionServiceKeyScope checks that the vision service key is accepted only for using the Vision API.
+func TestAuthAnyVisionServiceKeyScope(t *testing.T) {
+	origAPI, origKey := vision.ServiceApi, vision.ServiceKey
+	t.Cleanup(func() { vision.ServiceApi, vision.ServiceKey = origAPI, origKey })
+	vision.ServiceApi = true
+	vision.ServiceKey = "vision-service-key-abc123"
+
+	for _, tc := range []struct {
+		name     string
+		resource acl.Resource
+		perms    acl.Permissions
+	}{
+		{"OtherResource", acl.ResourcePhotos, acl.Permissions{acl.ActionUse}},
+		{"OtherPermission", acl.ResourceVision, acl.Permissions{acl.ActionView}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			gin.SetMode(gin.TestMode)
+			c, _ := gin.CreateTestContext(httptest.NewRecorder())
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/vision/labels", nil)
+			header.SetAuthorization(req, vision.ServiceKey)
+			c.Request = req
+
+			s := AuthAny(c, tc.resource, tc.perms)
+			require.NotNil(t, s)
+			assert.NotEqual(t, rnd.SessionID(vision.ServiceKey), s.ID)
+			assert.NotEqual(t, acl.ResourceVision.String(), s.Scope())
+		})
+	}
+}
+
 func TestAuthAnyPortalJWT(t *testing.T) {
 	fx := newPortalJWTFixture(t, "ok")
 
@@ -285,6 +574,28 @@ func TestAuthAnyPortalJWT_MissingScope(t *testing.T) {
 	assert.True(t, s.Abort(c))
 }
 
+func TestAuthAnyPortalJWT_ClientsScope(t *testing.T) {
+	fx := newPortalJWTFixture(t, "clients-scope")
+	spec := fx.defaultClaimsSpec()
+	spec.Scope = []string{"cluster", "clients"}
+	token := fx.issue(t, spec)
+
+	gin.SetMode(gin.TestMode)
+
+	for _, perm := range []acl.Permission{acl.ActionSearch, acl.ActionView, acl.ActionManage} {
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		req, _ := http.NewRequest(http.MethodGet, "/api/v1/clients", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.RemoteAddr = "10.0.0.5:1234"
+		c.Request = req
+
+		// The default JWT scope allowlist does not include clients.
+		s := AuthAny(c, acl.ResourceClients, acl.Permissions{perm})
+		require.NotNil(t, s)
+		assert.True(t, s.Abort(c), perm)
+	}
+}
+
 func TestAuthAnyPortalJWT_InvalidIssuer(t *testing.T) {
 	fx := newPortalJWTFixture(t, "invalid-issuer")
 	spec := fx.defaultClaimsSpec()
@@ -332,17 +643,20 @@ type portalJWTFixture struct {
 	issuer      *clusterjwt.Issuer
 	clusterUUID string
 	nodeUUID    string
-	preview     string
-	download    string
 }
 
+// newPortalJWTFixture builds portal credentials with isolated test databases.
 func newPortalJWTFixture(t *testing.T, suffix string) portalJWTFixture {
 	t.Helper()
 
 	origConf := get.Config()
-	t.Cleanup(func() { get.SetConfig(origConf) })
+	t.Cleanup(func() {
+		get.SetConfig(origConf)
+		entity.SetDbProvider(origConf)
+	})
 
 	nodeConf := config.NewMinimalTestConfigWithDb("auth-any-portal-jwt-"+suffix, t.TempDir())
+	closeConfigDb(t, nodeConf)
 
 	nodeConf.Options().NodeRole = cluster.RoleInstance
 	nodeConf.Options().Public = false
@@ -352,6 +666,7 @@ func newPortalJWTFixture(t *testing.T, suffix string) portalJWTFixture {
 	nodeConf.Options().PortalUrl = "https://portal.example.test"
 
 	portalConf := config.NewMinimalTestConfigWithDb("auth-any-portal-jwt-issuer-"+suffix, t.TempDir())
+	closeConfigDb(t, portalConf)
 
 	enablePortalAPIs(t, portalConf)
 	portalConf.Options().ClusterUUID = clusterUUID
@@ -378,9 +693,22 @@ func newPortalJWTFixture(t *testing.T, suffix string) portalJWTFixture {
 		issuer:      clusterjwt.NewIssuer(mgr),
 		clusterUUID: clusterUUID,
 		nodeUUID:    nodeUUID,
-		preview:     nodeConf.PreviewToken(),
-		download:    nodeConf.DownloadToken(),
 	}
+}
+
+// TestPortalJWTFixtureRestoresProvider checks that the shared database resumes and the fixture database is closed.
+func TestPortalJWTFixtureRestoresProvider(t *testing.T) {
+	original := get.Config()
+	var fixture *config.Config
+
+	t.Run("Fixture", func(t *testing.T) {
+		fixture = newPortalJWTFixture(t, "provider-restore").nodeConf
+		require.True(t, fixture.IsDbOpen())
+	})
+
+	require.Same(t, original, get.Config())
+	require.Same(t, original.Db(), entity.Db())
+	assert.False(t, fixture.IsDbOpen())
 }
 
 func (fx portalJWTFixture) defaultClaimsSpec() clusterjwt.ClaimsSpec {
@@ -397,4 +725,455 @@ func (fx portalJWTFixture) issue(t *testing.T, spec clusterjwt.ClaimsSpec) strin
 	token, err := fx.issuer.Issue(spec)
 	require.NoError(t, err)
 	return token
+}
+
+func TestAuthorizeSuperAdmin(t *testing.T) {
+	t.Run("SuperAdminSession", func(t *testing.T) {
+		s := entity.SessionFixtures.Pointer("alice")
+		require.True(t, s.GetUser().IsSuperAdmin(), "alice fixture must be a super admin")
+		assert.True(t, AuthorizeSuperAdmin(s))
+	})
+	t.Run("NonSuperAdminSession", func(t *testing.T) {
+		s := entity.SessionFixtures.Pointer("bob")
+		require.False(t, s.GetUser().IsSuperAdmin(), "bob fixture must not be a super admin")
+		assert.False(t, AuthorizeSuperAdmin(s))
+	})
+	t.Run("NilSession", func(t *testing.T) {
+		assert.False(t, AuthorizeSuperAdmin(nil))
+	})
+}
+
+// TestAuthAnyVisionServiceKeyLimit checks that the authentication rate limit applies to service keys in the formats Session() counts.
+func TestAuthAnyVisionServiceKeyLimit(t *testing.T) {
+	conf := get.Config()
+	origAPI, origKey, origLimit, origAuthMode := vision.ServiceApi, vision.ServiceKey, limiter.Auth, conf.AuthMode()
+	t.Cleanup(func() {
+		vision.ServiceApi, vision.ServiceKey, limiter.Auth = origAPI, origKey, origLimit
+		conf.SetAuthMode(origAuthMode)
+	})
+	conf.SetAuthMode(config.AuthModePasswd)
+	vision.ServiceApi = true
+	vision.ServiceKey = "vision-service-key-abc123"
+
+	// Returns the HTTP status of a Vision API authorization with the specified token and client address.
+	authVision := func(token, remoteAddr string) int {
+		gin.SetMode(gin.TestMode)
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/vision/labels", nil)
+		if token != "" {
+			header.SetAuthorization(req, token)
+		}
+		req.RemoteAddr = remoteAddr
+		c.Request = req
+		return AuthAny(c, acl.ResourceVision, acl.Permissions{acl.ActionUse}).HttpStatus()
+	}
+
+	// Replaces the authentication rate limit with one that allows three failures.
+	resetLimit := func() { limiter.Auth = limiter.NewLimit(rate.Every(24*time.Hour), 3) }
+
+	// Checks that failed attempts with a key in a format Session() counts are counted, and that a client over the limit is refused.
+	limited := func(t *testing.T, newKey func() string, addr string) {
+		t.Helper()
+
+		resetLimit()
+		prev := vision.ServiceKey
+		vision.ServiceKey = newKey()
+		t.Cleanup(func() { vision.ServiceKey = prev })
+		for range 3 {
+			assert.False(t, limiter.Auth.Reject(addr))
+			assert.Equal(t, http.StatusUnauthorized, authVision(newKey(), addr+":1234"))
+		}
+		assert.True(t, limiter.Auth.Reject(addr))
+		assert.Equal(t, http.StatusTooManyRequests, authVision(vision.ServiceKey, addr+":1234"), "refused over the limit")
+		assert.Equal(t, http.StatusTooManyRequests, authVision(newKey(), addr+":1234"))
+		assert.Greater(t, limiter.Auth.IP(addr).Tokens(), -0.5, "not counted over the limit")
+		assert.False(t, limiter.Auth.Reject("198.51.100.32"), "other address")
+		assert.Equal(t, http.StatusOK, authVision(vision.ServiceKey, "198.51.100.32:1234"))
+	}
+
+	t.Run("TokenKey", func(t *testing.T) {
+		limited(t, rnd.AuthToken, "198.51.100.31")
+	})
+	t.Run("AppPasswordKey", func(t *testing.T) {
+		limited(t, rnd.AppPassword, "198.51.100.30")
+	})
+	t.Run("RightKey", func(t *testing.T) {
+		resetLimit()
+		prev := vision.ServiceKey
+		vision.ServiceKey = rnd.AuthToken()
+		t.Cleanup(func() { vision.ServiceKey = prev })
+		for range 5 {
+			assert.Equal(t, http.StatusOK, authVision(vision.ServiceKey, "198.51.100.33:1234"))
+		}
+		assert.False(t, limiter.Auth.Reject("198.51.100.33"))
+	})
+	t.Run("AppPasswordFormat", func(t *testing.T) {
+		// A wrong key that has the format of an app password is counted once.
+		resetLimit()
+		for range 2 {
+			assert.Equal(t, http.StatusUnauthorized, authVision(rnd.AppPassword(), "198.51.100.38:1234"))
+		}
+		assert.False(t, limiter.Auth.Reject("198.51.100.38"))
+		assert.Equal(t, http.StatusUnauthorized, authVision(rnd.AppPassword(), "198.51.100.38:1234"))
+		assert.True(t, limiter.Auth.Reject("198.51.100.38"))
+	})
+	t.Run("OtherFormat", func(t *testing.T) {
+		// Failed attempts with a key in another format are not counted, but a client over the limit is refused.
+		resetLimit()
+		for range 5 {
+			assert.Equal(t, http.StatusUnauthorized, authVision("vision-service-key-abc124", "198.51.100.34:1234"))
+		}
+		assert.False(t, limiter.Auth.Reject("198.51.100.34"))
+		for range 3 {
+			assert.Equal(t, http.StatusUnauthorized, authVision(rnd.AuthToken(), "198.51.100.34:1234"))
+		}
+		assert.True(t, limiter.Auth.Reject("198.51.100.34"))
+		assert.Equal(t, http.StatusTooManyRequests, authVision(vision.ServiceKey, "198.51.100.34:1234"), "refused over the limit")
+	})
+	t.Run("JwtFormat", func(t *testing.T) {
+		// Without a JWKS URL, no JWT is checked, so a key in JWT format is not counted.
+		resetLimit()
+		origJwks := conf.JWKSUrl()
+		conf.SetJWKSUrl("")
+		t.Cleanup(func() { conf.SetJWKSUrl(origJwks) })
+		for range 5 {
+			assert.Equal(t, http.StatusUnauthorized, authVision("eyJhbGciOiJFZERTQSJ9.eyJzdWIiOiJ0ZXN0In0.c2ln", "198.51.100.39:1234"))
+		}
+		assert.False(t, limiter.Auth.Reject("198.51.100.39"))
+	})
+	t.Run("JwtFormatWithJwks", func(t *testing.T) {
+		// With a JWKS URL, a token in JWT format without a key id is counted by authAnyJWT.
+		resetLimit()
+		origJwks := conf.JWKSUrl()
+		conf.SetJWKSUrl("https://portal.example.test/.well-known/jwks.json")
+		t.Cleanup(func() { conf.SetJWKSUrl(origJwks) })
+		for range 3 {
+			assert.Equal(t, http.StatusUnauthorized, authVision("eyJhbGciOiJFZERTQSJ9.eyJzdWIiOiJ0ZXN0In0.c2ln", "198.51.100.40:1234"))
+		}
+		assert.True(t, limiter.Auth.Reject("198.51.100.40"))
+	})
+	t.Run("SessionRefused", func(t *testing.T) {
+		// A valid session without permission to use the Vision API is refused, but not counted.
+		resetLimit()
+		sess, err := entity.AddClientSession("vision-limit-metrics", conf.SessionMaxAge(), "metrics", authn.GrantClientCredentials, nil)
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = sess.Delete() })
+		for range 5 {
+			assert.Equal(t, http.StatusForbidden, authVision(sess.AuthToken(), "198.51.100.41:1234"))
+		}
+		assert.False(t, limiter.Auth.Reject("198.51.100.41"))
+	})
+	t.Run("OtherResource", func(t *testing.T) {
+		resetLimit()
+		for range 5 {
+			gin.SetMode(gin.TestMode)
+			c, _ := gin.CreateTestContext(httptest.NewRecorder())
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/photos", nil)
+			header.SetAuthorization(req, "vision-service-key-abc124")
+			req.RemoteAddr = "198.51.100.42:1234"
+			c.Request = req
+			assert.Equal(t, http.StatusUnauthorized, AuthAny(c, acl.ResourcePhotos, acl.Permissions{acl.ActionView}).HttpStatus())
+		}
+		assert.False(t, limiter.Auth.Reject("198.51.100.42"))
+	})
+	t.Run("Session", func(t *testing.T) {
+		resetLimit()
+		sess, err := entity.AddClientSession("vision-limit-client", conf.SessionMaxAge(), "vision", authn.GrantClientCredentials, nil)
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = sess.Delete() })
+		for range 5 {
+			assert.NotEqual(t, http.StatusUnauthorized, authVision(sess.AuthToken(), "198.51.100.35:1234"))
+		}
+		assert.False(t, limiter.Auth.Reject("198.51.100.35"))
+	})
+	t.Run("SessionOverLimit", func(t *testing.T) {
+		// A client over the limit is refused with any credential and resource.
+		resetLimit()
+		sess, err := entity.AddClientSession("vision-limit-over", conf.SessionMaxAge(), "*", authn.GrantClientCredentials, nil)
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = sess.Delete() })
+		for range 3 {
+			authVision(rnd.AuthToken(), "198.51.100.43:1234")
+		}
+		require.True(t, limiter.Auth.Reject("198.51.100.43"))
+
+		gin.SetMode(gin.TestMode)
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/photos", nil)
+		header.SetAuthorization(req, sess.AuthToken())
+		req.RemoteAddr = "198.51.100.43:1234"
+		c.Request = req
+
+		logHook, systemHook := captureLog(t), captureSystemLog(t)
+		origAudit := event.AuditLog
+		auditLogger, auditHook := test.NewNullLogger()
+		auditLogger.SetLevel(logrus.TraceLevel)
+		event.AuditLog = auditLogger
+		t.Cleanup(func() { event.AuditLog = origAudit })
+
+		assert.Equal(t, http.StatusTooManyRequests, AuthAny(c, acl.ResourcePhotos, acl.Permissions{acl.ActionView}).HttpStatus())
+		assert.Empty(t, logHook.AllEntries())
+		assert.Empty(t, systemHook.AllEntries())
+		assert.Empty(t, auditHook.AllEntries())
+	})
+	t.Run("NoToken", func(t *testing.T) {
+		resetLimit()
+		for range 5 {
+			assert.Equal(t, http.StatusUnauthorized, authVision("", "198.51.100.36:1234"))
+		}
+		assert.False(t, limiter.Auth.Reject("198.51.100.36"))
+	})
+	t.Run("ServiceApiOff", func(t *testing.T) {
+		// An instance that does not serve the Vision API does not compare the key.
+		resetLimit()
+		vision.ServiceApi = false
+		t.Cleanup(func() { vision.ServiceApi = true })
+		for range 5 {
+			assert.Equal(t, http.StatusUnauthorized, authVision(vision.ServiceKey, "198.51.100.37:1234"))
+		}
+		assert.False(t, limiter.Auth.Reject("198.51.100.37"))
+	})
+}
+
+// scopedSessionToken creates a session with the specified scope for the user, or for a user-less
+// client if user is nil, and returns its auth token.
+func scopedSessionToken(t *testing.T, conf *config.Config, scope string, user *entity.User) string {
+	t.Helper()
+
+	grant := authn.GrantPassword
+
+	if user == nil {
+		grant = authn.GrantClientCredentials
+	}
+
+	s, err := entity.AddClientSession("scoped-session-test", conf.SessionMaxAge(), scope, grant, user)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = s.Delete() })
+
+	return s.AuthToken()
+}
+
+// scopedUserSessionToken creates a user session (not a client session) with the specified scope and
+// returns its auth token.
+func scopedUserSessionToken(t *testing.T, conf *config.Config, scope string, user *entity.User) string {
+	t.Helper()
+
+	s := entity.NewSession(conf.SessionMaxAge(), conf.SessionTimeout()).SetUser(user).SetScope(scope)
+	require.NoError(t, s.Create())
+	t.Cleanup(func() { _ = s.Delete() })
+
+	return s.AuthToken()
+}
+
+func TestAuthAccess(t *testing.T) {
+	_, _, conf := NewApiTest()
+
+	// authAccess runs AuthAccess for the calendar with the specified auth token.
+	authAccess := func(authToken string) *entity.Session {
+		gin.SetMode(gin.TestMode)
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		c.Request = &http.Request{Header: make(http.Header)}
+
+		if authToken != "" {
+			header.SetAuthorization(c.Request, authToken)
+		}
+
+		return AuthAccess(c, acl.ResourceCalendar, acl.ActionSearch, acl.Permissions{acl.AccessAll, acl.AccessLibrary})
+	}
+
+	t.Run("Public", func(t *testing.T) {
+		s := authAccess(session.PublicAuthToken)
+		assert.Equal(t, http.StatusOK, s.HttpStatus())
+		assert.Equal(t, session.PublicID, s.ID)
+	})
+
+	conf.SetAuthMode(config.AuthModePasswd)
+	t.Cleanup(func() { conf.SetAuthMode(config.AuthModePublic) })
+
+	t.Run("Success", func(t *testing.T) {
+		s := authAccess(scopedSessionToken(t, conf, "*", entity.UserFixtures.Pointer("alice")))
+		assert.Equal(t, http.StatusOK, s.HttpStatus())
+		assert.Equal(t, "alice", s.GetUserName())
+	})
+	t.Run("Unauthorized", func(t *testing.T) {
+		assert.Equal(t, http.StatusUnauthorized, authAccess("").HttpStatus())
+	})
+	t.Run("AccessDenied", func(t *testing.T) {
+		token := scopedSessionToken(t, conf, "*", entity.UserFixtures.Pointer("guest"))
+
+		origAudit := event.AuditLog
+		auditLogger, auditHook := test.NewNullLogger()
+		auditLogger.SetLevel(logrus.TraceLevel)
+		event.AuditLog = auditLogger
+		t.Cleanup(func() { event.AuditLog = origAudit })
+
+		// Guests may search the calendar, but only for shared content.
+		s := authAccess(token)
+		assert.Equal(t, http.StatusForbidden, s.HttpStatus())
+		assert.Empty(t, s.ID)
+
+		// The refusal is the only event at warning level or above, which Pro stores by default.
+		var denied []string
+
+		for _, entry := range auditHook.AllEntries() {
+			if entry.Level <= logrus.WarnLevel {
+				assert.Equal(t, logrus.ErrorLevel, entry.Level)
+				denied = append(denied, entry.Message)
+			}
+		}
+
+		require.Len(t, denied, 1)
+		assert.Contains(t, denied[0], " › client scoped-session-test › ")
+		assert.Contains(t, denied[0], " › access all, access library calendar as 'guest' › denied")
+	})
+	t.Run("ActionOutOfScope", func(t *testing.T) {
+		s := authAccess(scopedSessionToken(t, conf, "calendar write", entity.UserFixtures.Pointer("alice")))
+		assert.Equal(t, http.StatusForbidden, s.HttpStatus())
+	})
+}
+
+// TestAuthAccess_ScopeModifiers checks that the handlers using AuthAccess accept a scope limited to
+// read or write operations only if it matches what the handler does.
+func TestAuthAccess_ScopeModifiers(t *testing.T) {
+	app, router, conf := NewApiTest()
+	conf.SetAuthMode(config.AuthModePasswd)
+	t.Cleanup(func() { conf.SetAuthMode(config.AuthModePublic) })
+
+	GetConfigOptions(router)
+	GetPhotoYaml(router)
+	GetSettings(router)
+	GetMetrics(router)
+	SearchFoldersOriginals(router)
+	GetMomentsTime(router)
+	BatchPhotosEdit(router)
+	BatchPhotosPrivate(router)
+
+	alice := entity.UserFixtures.Pointer("alice")
+	photoUid := entity.PhotoFixtures.Get("19800101_000002_D640C559").PhotoUID
+
+	// The write requests send an empty selection, so a request that passes authorization ends with 400.
+	cases := []struct {
+		name, method, path, body, resource string
+		allowed                            string
+		status                             int
+	}{
+		{"ConfigOptions", http.MethodGet, "/api/v1/config/options", "", "config", "read", http.StatusOK},
+		{"PhotoYaml", http.MethodGet, "/api/v1/photos/" + photoUid + "/yaml", "", "photos", "read", http.StatusOK},
+		{"Settings", http.MethodGet, "/api/v1/settings", "", "settings", "read", http.StatusOK},
+		{"Metrics", http.MethodGet, "/api/v1/metrics", "", "metrics", "read", http.StatusOK},
+		{"Folders", http.MethodGet, "/api/v1/folders/originals", "", "files", "read", http.StatusOK},
+		{"MomentsTime", http.MethodGet, "/api/v1/moments/time", "", "calendar", "read", http.StatusOK},
+		{"BatchPhotosEdit", http.MethodPost, "/api/v1/batch/photos/edit", `{"photos":[]}`, "photos", "write", http.StatusBadRequest},
+		{"BatchPhotosPrivate", http.MethodPost, "/api/v1/batch/photos/private", `{"photos":[]}`, "photos", "write", http.StatusBadRequest},
+	}
+
+	t.Run("SettingsOwn", func(t *testing.T) {
+		// Guests may read their own settings with a scope limited to read operations.
+		token := scopedUserSessionToken(t, conf, "settings read", entity.UserFixtures.Pointer("guest"))
+		assert.Equal(t, http.StatusOK, AuthenticatedRequest(app, http.MethodGet, "/api/v1/settings", token).Code)
+	})
+	t.Run("BatchPhotosEditClient", func(t *testing.T) {
+		// A client without an owner is authorized by its client role.
+		token := scopedSessionToken(t, conf, "photos", nil)
+		r := AuthenticatedRequestWithBody(app, http.MethodPost, "/api/v1/batch/photos/edit", `{"photos":[]}`, token)
+		assert.Equal(t, http.StatusBadRequest, r.Code)
+	})
+
+	for _, tc := range cases {
+		denied := "write"
+
+		if tc.allowed == "write" {
+			denied = "read"
+		}
+
+		// request uses a recorder that supports streamed responses, as the metrics endpoint requires.
+		request := func(scope string) int {
+			var body io.Reader
+
+			if tc.body != "" {
+				body = strings.NewReader(tc.body)
+			}
+
+			req, _ := http.NewRequest(tc.method, tc.path, body)
+			header.SetAuthorization(req, scopedUserSessionToken(t, conf, scope, alice))
+			w := &CloseableResponseRecorder{httptest.NewRecorder(), make(chan bool, 1)}
+			app.ServeHTTP(w, req)
+
+			return w.Code
+		}
+
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.status, request(tc.resource+" "+tc.allowed), "%s %s", tc.resource, tc.allowed)
+			assert.Equal(t, tc.status, request(tc.resource), tc.resource)
+			assert.Equal(t, http.StatusForbidden, request(tc.resource+" "+denied), "%s %s", tc.resource, denied)
+		})
+	}
+}
+
+func TestAuditAccessDenied(t *testing.T) {
+	access := acl.Permissions{acl.AccessAll, acl.AccessLibrary}
+	guest := entity.UserFixtures.Pointer("guest")
+	alice := entity.UserFixtures.Pointer("alice")
+
+	// audit returns the messages auditAccessDenied logs for the session.
+	audit := func(t *testing.T, s *entity.Session) []string {
+		t.Helper()
+
+		origAudit := event.AuditLog
+		auditLogger, auditHook := test.NewNullLogger()
+		auditLogger.SetLevel(logrus.TraceLevel)
+		event.AuditLog = auditLogger
+		t.Cleanup(func() { event.AuditLog = origAudit })
+
+		auditAccessDenied("198.51.100.80", s, acl.ResourceCalendar, access)
+
+		var messages []string
+
+		for _, entry := range auditHook.AllEntries() {
+			assert.Equal(t, logrus.ErrorLevel, entry.Level)
+			messages = append(messages, entry.Message)
+		}
+
+		return messages
+	}
+
+	t.Run("User", func(t *testing.T) {
+		s := entity.NewSession(3600, 0).SetUser(guest)
+		messages := audit(t, s)
+		require.Len(t, messages, 1)
+		assert.Equal(t, "audit: 198.51.100.80 › session "+s.RefID+" › access all, access library calendar as guest › denied", messages[0])
+	})
+	t.Run("Client", func(t *testing.T) {
+		s := entity.NewClientSession("audit-client", 3600, "*", authn.GrantClientCredentials, nil)
+		messages := audit(t, s)
+		require.Len(t, messages, 1)
+		assert.Equal(t, "audit: 198.51.100.80 › client audit-client › session "+s.RefID+" › access all, access library calendar › denied", messages[0])
+	})
+	t.Run("ClientOwner", func(t *testing.T) {
+		// The client role allows access, but its owner's role does not.
+		s := entity.NewClientSession("audit-app", 3600, "*", authn.GrantPassword, guest)
+		messages := audit(t, s)
+		require.Len(t, messages, 1)
+		assert.Equal(t, "audit: 198.51.100.80 › client audit-app › session "+s.RefID+" › access all, access library calendar as 'guest' › denied", messages[0])
+	})
+	t.Run("ClientRole", func(t *testing.T) {
+		// The owner's role allows access, but the client role does not.
+		client := entity.NewClient()
+		client.ClientName = "Audit Portal"
+		client.ClientRole = acl.RolePortal.String()
+		client.UserUID = alice.UserUID
+		client.UserName = alice.UserName
+		require.NoError(t, entity.Save(client))
+		t.Cleanup(func() { entity.UnscopedDb().Unscoped().Delete(client) })
+
+		s := entity.NewClientSession(client.ClientName, 3600, "*", authn.GrantClientCredentials, alice)
+		s.ClientUID = client.ClientUID
+		require.Equal(t, acl.RolePortal, s.GetClientRole())
+		require.Equal(t, "alice", s.GetUserName())
+		require.False(t, acl.Rules.DenyAll(acl.ResourceCalendar, s.GetUserRole(), access))
+
+		messages := audit(t, s)
+		require.Len(t, messages, 1)
+		assert.Equal(t, "audit: 198.51.100.80 › client "+clean.Log(s.GetClientInfo())+" › session "+s.RefID+" › access all, access library calendar › denied", messages[0])
+	})
 }

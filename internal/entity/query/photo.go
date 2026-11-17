@@ -1,14 +1,16 @@
 package query
 
 import (
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/dustin/go-humanize/english"
-	"github.com/jinzhu/gorm"
+	"gorm.io/gorm"
 
 	"github.com/photoprism/photoprism/internal/entity"
 	"github.com/photoprism/photoprism/internal/mutex"
+	"github.com/photoprism/photoprism/pkg/dsn"
 )
 
 // PhotoByID returns a Photo based on the ID.
@@ -17,9 +19,9 @@ func PhotoByID(photoID uint64) (photo entity.Photo, err error) {
 		Preload("Labels", func(db *gorm.DB) *gorm.DB {
 			return db.Order("photos_labels.uncertainty ASC, photos_labels.label_id DESC")
 		}).
-		Preload("Labels.Label").
-		Preload("Camera").
-		Preload("Lens").
+		Preload("Labels.Label", "deleted_at IS NULL").
+		Preload("Camera", "deleted_at IS NULL").
+		Preload("Lens", "deleted_at IS NULL").
 		Preload("Details").
 		Preload("Place").
 		Preload("Cell").
@@ -37,9 +39,9 @@ func PhotoByUID(photoUID string) (photo entity.Photo, err error) {
 		Preload("Labels", func(db *gorm.DB) *gorm.DB {
 			return db.Order("photos_labels.uncertainty ASC, photos_labels.label_id DESC")
 		}).
-		Preload("Labels.Label").
-		Preload("Camera").
-		Preload("Lens").
+		Preload("Labels.Label", "deleted_at IS NULL").
+		Preload("Camera", "deleted_at IS NULL").
+		Preload("Lens", "deleted_at IS NULL").
 		Preload("Details").
 		Preload("Place").
 		Preload("Cell").
@@ -90,14 +92,15 @@ func PhotoPreloadByUIDs(photoUIDs []string) (entity.Photos, error) {
 }
 
 // preloadPhotoAssociations applies the eager-load scope that keeps PhotoPreload helpers consistent.
+// Preloads of an unscoped query are unscoped too, so they exclude soft-deleted rows themselves.
 func preloadPhotoAssociations(db *gorm.DB) *gorm.DB {
 	return db.
 		Preload("Labels", func(db *gorm.DB) *gorm.DB {
 			return db.Order("photos_labels.uncertainty ASC, photos_labels.label_id DESC")
 		}).
-		Preload("Labels.Label").
-		Preload("Camera").
-		Preload("Lens").
+		Preload("Labels.Label", "deleted_at IS NULL").
+		Preload("Camera", "deleted_at IS NULL").
+		Preload("Lens", "deleted_at IS NULL").
 		Preload("Details").
 		Preload("Place").
 		Preload("Cell").
@@ -127,11 +130,12 @@ func uniqueUIDs(uids []string) []string {
 	return result
 }
 
-// MissingPhotos returns photo entities without existing files.
+// MissingPhotos returns active and archived photo entities without existing files, excluding removed photos.
 func MissingPhotos(limit int, offset int) (entities entity.Photos, err error) {
-	err = Db().
+	err = UnscopedDb().
 		Select("photos.*").
-		Where("id NOT IN (SELECT photo_id FROM files WHERE file_missing = 0 AND file_root = '/' AND deleted_at IS NULL)").
+		Where("id NOT IN (SELECT photo_id FROM files WHERE file_missing = FALSE AND file_root = '/' AND deleted_at IS NULL)").
+		Where("deleted_at IS NULL OR photo_quality > -1").
 		Order("photos.id").
 		Limit(limit).Offset(offset).Find(&entities).Error
 
@@ -150,15 +154,31 @@ func ArchivedPhotos(limit int, offset int) (entities entity.Photos, err error) {
 	return entities, err
 }
 
+// ArchivedPhoto returns the current row of the photo with the given ID if it is archived and not removed,
+// using the same condition as ArchivedPhotos, or nil if it is not.
+func ArchivedPhoto(id uint) (*entity.Photo, error) {
+	result := &entity.Photo{}
+
+	if err := UnscopedDb().
+		Where("id = ? AND photo_quality > -1 AND deleted_at IS NOT NULL", id).
+		First(result).Error; errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil
+	} else if err != nil {
+		return nil, err
+	}
+
+	return result, nil
+}
+
 // PhotosMetadataUpdate returns photos selected for metadata maintenance.
 func PhotosMetadataUpdate(limit, offset int, delay, interval time.Duration) (photos entity.Photos, err error) {
 	err = Db().
 		Preload("Labels", func(db *gorm.DB) *gorm.DB {
 			return db.Order("photos_labels.uncertainty ASC, photos_labels.label_id DESC")
 		}).
-		Preload("Labels.Label").
-		Preload("Camera").
-		Preload("Lens").
+		Preload("Labels.Label", "deleted_at IS NULL").
+		Preload("Camera", "deleted_at IS NULL").
+		Preload("Lens", "deleted_at IS NULL").
 		Preload("Details").
 		Preload("Place").
 		Preload("Cell").
@@ -191,10 +211,11 @@ func FixPrimaries() error {
 
 	var photos entity.Photos
 
-	// Remove primary file flag from broken or missing files.
+	// Remove primary file flag from broken, missing, or deleted files so a photo whose primary is no
+	// longer valid is treated as having none and gets a present file promoted below.
 	if err := UnscopedDb().Table(entity.File{}.TableName()).
-		Where("(file_error <> '' OR file_missing = 1) AND file_primary <> 0").
-		UpdateColumn("file_primary", 0).Error; err != nil {
+		Where("(file_error <> '' OR file_missing = TRUE OR deleted_at IS NOT NULL) AND file_primary <> FALSE").
+		UpdateColumn("file_primary", false).Error; err != nil {
 		return err
 	}
 
@@ -202,7 +223,7 @@ func FixPrimaries() error {
 	if err := UnscopedDb().
 		Raw(`SELECT * FROM photos 
 			WHERE deleted_at IS NULL 
-			AND id NOT IN (SELECT photo_id FROM files WHERE file_primary = 1)`).
+			AND id NOT IN (SELECT photo_id FROM files WHERE file_primary = TRUE)`).
 		Find(&photos).Error; err != nil {
 		return err
 	}
@@ -226,7 +247,8 @@ func FixPrimaries() error {
 	return nil
 }
 
-// FlagHiddenPhotos sets the quality score of photos without valid primary file to -1.
+// FlagHiddenPhotos sets the quality score of active photos without valid primary file to -1.
+// Archived photos keep their score, since -1 marks an archived photo as removed.
 func FlagHiddenPhotos() (err error) {
 	mutex.Index.Lock()
 	defer mutex.Index.Unlock()
@@ -238,8 +260,8 @@ func FlagHiddenPhotos() (err error) {
 	affected := 0
 
 	ids := Db().Select("id").
-		Where("id NOT IN (SELECT photo_id FROM files WHERE file_primary = 1 AND file_missing = 0 AND file_error = '' AND deleted_at IS NULL) AND photo_quality > -1").
-		Table(entity.Photo{}.TableName()).SubQuery()
+		Where("id NOT IN (SELECT photo_id FROM files WHERE file_primary = TRUE AND file_missing = FALSE AND file_error = '' AND deleted_at IS NULL) AND photo_quality > -1 AND deleted_at IS NULL").
+		Table(entity.Photo{}.TableName())
 	if result := UnscopedDb().Table(entity.Photo{}.TableName()).
 		Where("id IN (?) AND photo_quality > -1", ids).
 		UpdateColumn("photo_quality", -1); result.Error != nil {
@@ -256,4 +278,52 @@ func FlagHiddenPhotos() (err error) {
 	}
 
 	return nil
+}
+
+// photoPathMaxDates returns the maximum TakenAtLocal DATE for each PhotoPath as a map.
+// Paths whose maximum is NULL are omitted rather than mapped to a placeholder, so callers
+// skip them instead of stamping a date that was never indexed.
+func photoPathMaxDates() (photoPathDates map[string]time.Time, err error) {
+	photoPathDates = make(map[string]time.Time)
+	type pathMaxDate struct {
+		PhotoPath string
+		TakenMax  *string
+	}
+	var pathDates []pathMaxDate
+	// Get all the paths and dates.
+	if err = entity.Db().Raw(`SELECT photo_path, MAX(DATE(taken_at_local)) AS taken_max
+	 			FROM photos WHERE taken_src IN ('meta', 'modified') AND photos.photo_quality >= 3 AND photos.deleted_at IS NULL
+	 			GROUP BY photo_path`).Scan(&pathDates).Error; err != nil {
+		log.Errorf("photo: get photo dates (%v)", err)
+		return photoPathDates, err
+	}
+	var takenMax time.Time
+	for _, photoPath := range pathDates {
+		// Null max dates are not to be written to database.
+		if photoPath.TakenMax != nil {
+			var parseFormat string
+			switch entity.DbDialect() {
+			case dsn.DialectSQLite:
+				parseFormat = "2006-01-02"
+			case dsn.DialectMySQL, dsn.DialectPostgreSQL:
+				parseFormat = time.RFC3339
+			default:
+				log.Errorf("photo: dialect %s is not supported", entity.DbDialect())
+				return photoPathDates, fmt.Errorf("photo: dialect %s is not supported", entity.DbDialect())
+			}
+			// Parsed into its own error, because err is the named return: assigning to it here
+			// aborts the caller's whole date refresh on a row this loop deliberately skips.
+			parsed, parseErr := time.Parse(parseFormat, *photoPath.TakenMax)
+
+			if parseErr != nil {
+				log.Errorf("photo: get photo dates unable to parse %s (%v)", *photoPath.TakenMax, parseErr)
+				// Don't abort, as the MAX(DATE(taken_at_local)) has already forced the data into a date within Go's limitations, so this shouldn't happen.
+				continue
+			}
+
+			takenMax = parsed
+			photoPathDates[photoPath.PhotoPath] = takenMax
+		}
+	}
+	return photoPathDates, err
 }

@@ -5,8 +5,10 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/photoprism/photoprism/internal/entity"
+	"github.com/photoprism/photoprism/pkg/dsn"
 	"github.com/photoprism/photoprism/pkg/rnd"
 )
 
@@ -58,6 +60,54 @@ func TestPreloadPhotoByUID(t *testing.T) {
 	})
 }
 
+func TestPhotoPreloads_DeletedAssociations(t *testing.T) {
+	photo := entity.NewPhoto(false)
+	require.NoError(t, photo.Save())
+	label := entity.NewLabel("Deleted Query Preload "+rnd.GenerateUID('l'), 0)
+	require.NoError(t, label.Create())
+	require.NoError(t, entity.NewPhotoLabel(photo.ID, label.ID, 10, entity.SrcManual).Create())
+	t.Cleanup(func() {
+		entity.UnscopedDb().Delete(&entity.PhotoLabel{}, "photo_id = ?", photo.ID)
+		entity.UnscopedDb().Delete(&entity.Details{}, "photo_id = ?", photo.ID)
+		entity.UnscopedDb().Delete(&photo)
+		entity.UnscopedDb().Delete(label)
+	})
+	require.NoError(t, entity.UnscopedDb().Model(label).UpdateColumn("deleted_at", entity.Now()).Error)
+
+	camera := entity.NewCamera("Deleted Preload", "Camera "+rnd.GenerateUID('c'))
+	require.NoError(t, entity.UnscopedDb().Create(camera).Error)
+	lens := entity.NewLens("Deleted Preload", "Lens "+rnd.GenerateUID('l'))
+	require.NoError(t, entity.UnscopedDb().Create(lens).Error)
+	t.Cleanup(func() {
+		entity.UnscopedDb().Delete(camera)
+		entity.UnscopedDb().Delete(lens)
+	})
+	require.NoError(t, entity.UnscopedDb().Model(&photo).UpdateColumns(entity.Values{"camera_id": camera.ID, "lens_id": lens.ID}).Error)
+	require.NoError(t, entity.UnscopedDb().Model(camera).UpdateColumn("deleted_at", entity.Now()).Error)
+	require.NoError(t, entity.UnscopedDb().Model(lens).UpdateColumn("deleted_at", entity.Now()).Error)
+
+	t.Run("PhotoByID", func(t *testing.T) {
+		found, err := PhotoByID(uint64(photo.ID))
+		require.NoError(t, err)
+		require.Len(t, found.Labels, 1)
+		assert.Nil(t, found.Labels[0].Label)
+		assert.Nil(t, found.Camera)
+		assert.Nil(t, found.Lens)
+	})
+	t.Run("PhotoByUID", func(t *testing.T) {
+		found, err := PhotoByUID(photo.PhotoUID)
+		require.NoError(t, err)
+		require.Len(t, found.Labels, 1)
+		assert.Nil(t, found.Labels[0].Label)
+	})
+	t.Run("PhotoPreloadByUID", func(t *testing.T) {
+		found, err := PhotoPreloadByUID(photo.PhotoUID)
+		require.NoError(t, err)
+		require.Len(t, found.Labels, 1)
+		assert.Nil(t, found.Labels[0].Label)
+	})
+}
+
 // TestPhotoPreloadByUIDs validates photo query behavior.
 func TestPhotoPreloadByUIDs(t *testing.T) {
 	t.Run("Multiple", func(t *testing.T) {
@@ -103,13 +153,42 @@ func TestPhotoPreloadByUIDs(t *testing.T) {
 
 // TestMissingPhotos validates photo query behavior.
 func TestMissingPhotos(t *testing.T) {
-	result, err := MissingPhotos(15, 0)
+	t.Run("Success", func(t *testing.T) {
+		result, err := MissingPhotos(15, 0)
 
-	if err != nil {
-		t.Fatal(err)
-	}
+		if err != nil {
+			t.Fatal(err)
+		}
 
-	assert.LessOrEqual(t, 1, len(result))
+		assert.LessOrEqual(t, 1, len(result))
+	})
+	t.Run("ArchivedNotRemoved", func(t *testing.T) {
+		deletedAt := time.Date(2021, 1, 1, 0, 0, 0, 0, time.UTC)
+		active := entity.Photo{PhotoUID: rnd.GenerateUID(entity.PhotoUID), PhotoName: "MissingActive", PhotoQuality: 3}
+		archived := entity.Photo{PhotoUID: rnd.GenerateUID(entity.PhotoUID), PhotoName: "MissingArchived", PhotoQuality: 3, DeletedAt: entity.DeletedAtTime(deletedAt)}
+		removed := entity.Photo{PhotoUID: rnd.GenerateUID(entity.PhotoUID), PhotoName: "MissingRemoved", PhotoQuality: -1, DeletedAt: entity.DeletedAtTime(deletedAt)}
+
+		for _, photo := range []*entity.Photo{&active, &archived, &removed} {
+			require.NoError(t, UnscopedDb().Create(photo).Error)
+		}
+
+		t.Cleanup(func() {
+			require.NoError(t, UnscopedDb().Where("id IN (?)", []uint{active.ID, archived.ID, removed.ID}).Delete(&entity.Photo{}).Error)
+		})
+
+		result, err := MissingPhotos(100000, 0)
+		require.NoError(t, err)
+
+		found := make(map[uint]bool, len(result))
+
+		for _, photo := range result {
+			found[photo.ID] = true
+		}
+
+		assert.True(t, found[active.ID])
+		assert.True(t, found[archived.ID])
+		assert.False(t, found[removed.ID])
+	})
 }
 
 // TestArchivedPhotos validates photo query behavior.
@@ -152,7 +231,6 @@ func TestOrphanPhotos(t *testing.T) {
 	assert.IsType(t, entity.Photos{}, result)
 }
 
-// TODO How to verify?
 // TestFixPrimaries validates photo query behavior.
 func TestFixPrimaries(t *testing.T) {
 	t.Run("Success", func(t *testing.T) {
@@ -161,10 +239,84 @@ func TestFixPrimaries(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
+	t.Run("PromotesPresentFileWhenPrimaryDeleted", func(t *testing.T) {
+		taken := time.Date(2017, 5, 5, 12, 0, 0, 0, time.UTC)
+		p := entity.Photo{
+			PhotoUID:        rnd.GenerateUID(entity.PhotoUID),
+			PhotoType:       entity.MediaImage,
+			TakenAt:         taken,
+			TakenAtLocal:    taken,
+			TakenSrc:        entity.SrcMeta,
+			PhotoName:       "fixprim-" + rnd.GenerateUID(entity.PhotoUID),
+			PhotoQuality:    -1,
+			PhotoResolution: 3,
+		}
+		if err := Db().Create(&p).Error; err != nil {
+			t.Fatal(err)
+		}
+		defer func() {
+			require.NoError(t, UnscopedDb().Delete(&p).Error)
+		}()
+		// Primary file that has since been soft-deleted but still carries the primary flag.
+		deletedPrimary := entity.File{
+			PhotoID:     p.ID,
+			PhotoUID:    p.PhotoUID,
+			FileUID:     rnd.GenerateUID(entity.FileUID),
+			FileName:    "fixprim/" + p.PhotoUID + "-old.jpg",
+			FileRoot:    entity.RootOriginals,
+			FileHash:    rnd.GenerateUID(entity.FileUID),
+			FilePrimary: true,
+			FileType:    "jpg",
+			DeletedAt:   entity.DeletedAtTime(*entity.TimeStamp()),
+		}
+		if err := Db().Create(&deletedPrimary).Error; err != nil {
+			t.Fatal(err)
+		}
+		defer func() {
+			require.NoError(t, UnscopedDb().Delete(&deletedPrimary).Error)
+		}()
+		// Present preview file that is not yet flagged primary.
+		present := entity.File{
+			PhotoID:  p.ID,
+			PhotoUID: p.PhotoUID,
+			FileUID:  rnd.GenerateUID(entity.FileUID),
+			FileName: "fixprim/" + p.PhotoUID + ".jpg",
+			FileRoot: entity.RootOriginals,
+			FileHash: rnd.GenerateUID(entity.FileUID),
+			FileType: "jpg",
+		}
+		if err := Db().Create(&present).Error; err != nil {
+			t.Fatal(err)
+		}
+		defer func() {
+			require.NoError(t, UnscopedDb().Delete(&present).Error)
+		}()
+
+		if err := FixPrimaries(); err != nil {
+			t.Fatal(err)
+		}
+
+		var gotFile entity.File
+		if err := Db().Where("file_uid = ?", present.FileUID).First(&gotFile).Error; err != nil {
+			t.Fatal(err)
+		}
+		assert.True(t, gotFile.FilePrimary, "present file must be promoted to primary")
+
+		var gotPhoto entity.Photo
+		if err := UnscopedDb().Select("photo_quality").Where("photo_uid = ?", p.PhotoUID).First(&gotPhoto).Error; err != nil {
+			t.Fatal(err)
+		}
+		assert.Greater(t, gotPhoto.PhotoQuality, -1, "photo must recover once a valid primary is set")
+	})
 }
 
 // TestFlagHiddenPhotos validates photo query behavior.
 func TestFlagHiddenPhotos(t *testing.T) {
+	defer func() {
+		for _, photo := range entity.PhotoFixtures {
+			require.NoError(t, UnscopedDb().Model(&entity.Photo{}).Where("id = ?", photo.ID).UpdateColumn("photo_quality", photo.PhotoQuality).Error)
+		}
+	}()
 	t.Run("Success", func(t *testing.T) {
 		// Set photo quality scores to -1 if files are missing.
 		if err := FlagHiddenPhotos(); err != nil {
@@ -173,9 +325,10 @@ func TestFlagHiddenPhotos(t *testing.T) {
 	})
 	t.Run("SuccessWith1000", func(t *testing.T) {
 		var checkedTime = time.Date(2021, 1, 1, 0, 0, 0, 0, time.UTC)
-		// Load 1000 photos that need to be hidden
+		// Load 1000 photos that need to be hidden, in batches so the inserts stay cheap on SQLite.
+		photos := make([]entity.Photo, 0, 1000)
 		for range 1000 {
-			newPhoto := entity.Photo{ //JPG, Geo from metadata, indexed
+			newPhoto := entity.Photo{ // JPG, Geo from metadata, indexed
 				//ID:               1000049,
 				PhotoUID:         rnd.GenerateUID(entity.PhotoUID),
 				TakenAt:          time.Date(2020, 11, 11, 9, 7, 18, 0, time.UTC),
@@ -224,14 +377,14 @@ func TestFlagHiddenPhotos(t *testing.T) {
 				UpdatedAt:        time.Date(2021, 1, 1, 0, 0, 0, 0, time.UTC),
 				EditedAt:         nil,
 				CheckedAt:        &checkedTime,
-				DeletedAt:        nil,
 				PhotoColor:       14,
 				PhotoStack:       0,
 				PhotoFaces:       0,
 			}
-			if err := Db().Create(&newPhoto).Error; err != nil {
-				t.Fatal(err)
-			}
+			photos = append(photos, newPhoto)
+		}
+		if err := Db().CreateInBatches(&photos, 250).Error; err != nil {
+			t.Fatal(err)
 		}
 		// Set photo quality scores to -1 if files are missing.
 		if err := FlagHiddenPhotos(); err != nil {
@@ -250,4 +403,154 @@ func TestFlagHiddenPhotos(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
+	t.Run("SkipArchived", func(t *testing.T) {
+		archivedAt := time.Date(2021, 1, 1, 0, 0, 0, 0, time.UTC)
+		archived := entity.Photo{
+			PhotoUID:     rnd.GenerateUID(entity.PhotoUID),
+			PhotoName:    "FlagHiddenArchived",
+			PhotoQuality: 3,
+			DeletedAt:    entity.DeletedAtTime(archivedAt),
+		}
+		active := entity.Photo{
+			PhotoUID:     rnd.GenerateUID(entity.PhotoUID),
+			PhotoName:    "FlagHiddenActive",
+			PhotoQuality: 3,
+		}
+
+		require.NoError(t, UnscopedDb().Create(&archived).Error)
+		require.NoError(t, UnscopedDb().Create(&active).Error)
+
+		t.Cleanup(func() {
+			require.NoError(t, UnscopedDb().Where("id IN (?)", []uint{archived.ID, active.ID}).Delete(&entity.Photo{}).Error)
+		})
+
+		require.NoError(t, FlagHiddenPhotos())
+
+		var result entity.Photo
+		require.NoError(t, UnscopedDb().Where("id = ?", archived.ID).First(&result).Error)
+		assert.Equal(t, 3, result.PhotoQuality)
+		require.True(t, result.DeletedAt.Valid)
+
+		result = entity.Photo{}
+		require.NoError(t, UnscopedDb().Where("id = ?", active.ID).First(&result).Error)
+		assert.Equal(t, -1, result.PhotoQuality)
+	})
+}
+
+// qualifyingPhotoPaths returns the distinct photo paths photoPathMaxDates is expected to
+// report, so the assertions below track the fixtures instead of a hard-coded total.
+func qualifyingPhotoPaths() map[string]bool {
+	paths := make(map[string]bool)
+
+	for _, photo := range entity.PhotoFixtures {
+		if !photo.DeletedAt.Valid && photo.PhotoQuality >= 3 && photo.TakenSrc == entity.SrcMeta && !photo.TakenAtLocal.IsZero() {
+			paths[photo.PhotoPath] = true
+		}
+	}
+
+	return paths
+}
+
+// reportedPaths returns the key set of a photoPathMaxDates result for comparison.
+func reportedPaths(m map[string]time.Time) map[string]bool {
+	paths := make(map[string]bool, len(m))
+
+	for path := range m {
+		paths[path] = true
+	}
+
+	return paths
+}
+
+func TestPhotoPathMaxDates(t *testing.T) {
+	t.Run("Success", func(t *testing.T) {
+		p, err := photoPathMaxDates()
+		require.NoError(t, err)
+		assert.Equal(t, qualifyingPhotoPaths(), reportedPaths(p))
+		minDate := entity.PhotoFixtures.Get("Photo03").TakenAtLocal
+		maxDate := entity.PhotoFixtures.Get("Photo55").TakenAtLocal
+		for path, d := range p {
+			assert.LessOrEqual(t, d.UTC().Format(time.DateOnly), maxDate.UTC().Format(time.DateOnly), path)
+			assert.GreaterOrEqual(t, d.UTC().Format(time.DateOnly), minDate.UTC().Format(time.DateOnly), path)
+		}
+		for _, photo := range entity.PhotoFixtures {
+			if (!photo.DeletedAt.Valid && photo.PhotoQuality >= 3 && photo.TakenSrc == entity.SrcMeta && photo.TakenAtLocal != time.Time{}) {
+				_, ok := p[photo.PhotoPath]
+				assert.True(t, ok, photo.PhotoPath)
+			}
+		}
+	})
+	t.Run("ForcedBadDate", func(t *testing.T) {
+		if entity.DbDialect() != dsn.DialectSQLite {
+			t.Skip("This test is only for SQLite")
+		}
+		bp := entity.PhotoFixtures.Pointer("Photo18")
+		bp.PhotoQuality = 4
+		bp.DeletedAt = entity.DeletedAt{}
+		require.NoError(t, entity.UnscopedDb().Save(bp).Error)
+
+		// Saving Photo18 above adds its path to the reported set; the unreadable date below
+		// removes it again, since no other qualifying picture shares that path.
+		withoutPhoto18 := qualifyingPhotoPaths()
+		promoted := qualifyingPhotoPaths()
+		promoted[bp.PhotoPath] = true
+
+		p, err := photoPathMaxDates()
+		require.NoError(t, err)
+		assert.Equal(t, promoted, reportedPaths(p))
+
+		// Force the taken_at_local to return a NULL from MAX(DATE('RUBBISH'))
+		require.NoError(t, entity.UnscopedDb().Exec("UPDATE photos SET taken_at_local = 'RUBBISH' WHERE id = ?", bp.ID).Error)
+		defer func() {
+			require.NoError(t, entity.UnscopedDb().Save(entity.PhotoFixtures.Pointer("Photo18")).Error)
+		}()
+
+		p, err = photoPathMaxDates()
+		require.NoError(t, err)
+		assert.Equal(t, withoutPhoto18, reportedPaths(p))
+
+		minDate := entity.PhotoFixtures.Get("Photo03").TakenAtLocal
+		maxDate := entity.PhotoFixtures.Get("Photo55").TakenAtLocal
+		for path, d := range p {
+			assert.LessOrEqual(t, d.UTC().Format(time.DateOnly), maxDate.UTC().Format(time.DateOnly), path)
+			assert.GreaterOrEqual(t, d.UTC().Format(time.DateOnly), minDate.UTC().Format(time.DateOnly), path)
+		}
+		for _, photo := range entity.PhotoFixtures {
+			if (!photo.DeletedAt.Valid && photo.PhotoQuality >= 3 && photo.TakenSrc == entity.SrcMeta && photo.TakenAtLocal != time.Time{}) {
+				_, ok := p[photo.PhotoPath]
+				assert.True(t, ok, photo.PhotoPath)
+			}
+		}
+	})
+}
+
+func TestArchivedPhoto(t *testing.T) {
+	photo := likeTestPhoto(t, "zz-archived-"+rnd.Base36(6), "photo")
+
+	result, err := ArchivedPhoto(photo.ID)
+	require.NoError(t, err)
+	assert.Nil(t, result)
+
+	require.NoError(t, photo.Archive())
+	result, err = ArchivedPhoto(photo.ID)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, photo.PhotoUID, result.PhotoUID)
+
+	// The row is read again, so later changes are returned.
+	require.NoError(t, photo.Update("photo_name", "renamed"))
+	require.NoError(t, photo.Update("photo_quality", 0))
+	result, err = ArchivedPhoto(photo.ID)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, "renamed", result.PhotoName)
+
+	require.NoError(t, photo.Update("photo_quality", -1))
+	result, err = ArchivedPhoto(photo.ID)
+	require.NoError(t, err)
+	assert.Nil(t, result)
+
+	result, err = ArchivedPhoto(0)
+	require.NoError(t, err)
+	assert.Nil(t, result)
 }

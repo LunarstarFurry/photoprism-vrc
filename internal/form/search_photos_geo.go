@@ -42,6 +42,7 @@ type SearchPhotosGeo struct {
 	Scan        string    `form:"scan" example:"scan:true scan:false" notes:"Finds scanned photos and documents"`
 	Mp          string    `form:"mp" example:"mp:3-6" notes:"Resolution in Megapixels (MP)"`
 	Panorama    bool      `form:"panorama" notes:"Finds panorama pictures only (aspect ratio 1.9:1 or more)"`
+	Fisheye     bool      `form:"fisheye" notes:"Finds fisheye 360° originals (e.g. Insta360 .insv/.insp)"`
 	Portrait    bool      `form:"portrait" notes:"Finds portrait pictures only"`
 	Landscape   bool      `form:"landscape" notes:"Finds landscape pictures only"`
 	Square      bool      `form:"square" notes:"Finds square pictures only (aspect ratio 1:1)"`
@@ -67,14 +68,14 @@ type SearchPhotosGeo struct {
 	F           string    `form:"f" example:"f:2.8-4.5" notes:"Aperture (F-Number)"`
 	Color       string    `form:"color"`
 	Codec       string    `form:"codec" example:"codec:avc1" notes:"Media codec types separated by |, e.g. jpeg, avc1, or hvc1"`
-	Chroma      int16     `form:"chroma" example:"chroma:70" notes:"Chroma (0-100)"`
+	Chroma      int16     `form:"chroma" example:"chroma:70" notes:"Chroma (1-100)"`
 	Mono        bool      `form:"mono" notes:"Finds pictures with few or no colors"`
 	Person      string    `form:"person" example:"person:\"Jane Doe & John Doe\"" notes:"Subject names, will be matched exactly and can be combined using & or |"` // Alias for Subject
 	Subject     string    `form:"subject" example:"subject:\"Jane Doe & John Doe\"" notes:"Alias for person"`
 	People      string    `form:"people" example:"people:\"Jane & John\"" notes:"Subject names, combinable with & or |"`
 	Subjects    string    `form:"subjects" example:"subjects:\"Jane & John\"" notes:"Alias for people"` // Alias for People
 	Keywords    string    `form:"keywords" example:"keywords:\"sand&water\"" notes:"Keywords, combinable with & or |"`
-	Label       string    `form:"label" example:"label:cat|dog" notes:"Label names, separated by |"`
+	Label       string    `form:"label" example:"label:\"cat|dog&!blurry\"" notes:"Label names: | is OR within a group, & is AND between groups (every positive group must match), leading ! negates a group (e.g. !rejected). Category expansion applies to both positive and negative terms. Escape a literal &, |, or leading ! with \\"`
 	Category    string    `form:"category" example:"category:airport" notes:"Location category type"`
 	Album       string    `form:"album" example:"album:berlin" notes:"Album UID or name, supports * wildcards"`
 	Albums      string    `form:"albums" example:"albums:\"South Africa & Birds\"" notes:"Album names, combinable with & or |"`
@@ -123,9 +124,10 @@ func (f *SearchPhotosGeo) ParseQueryString() error {
 		f.People = ""
 	}
 
+	// Stored album filters may hold folder names that are not valid UTF-8, whose values are dropped.
 	if f.Filter != "" {
-		if err = Unserialize(f, f.Filter); err != nil {
-			return err
+		if filterErr := Unserialize(f, f.Filter); filterErr != nil {
+			return filterErr
 		}
 	}
 

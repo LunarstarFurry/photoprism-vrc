@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -16,10 +17,12 @@ import (
 	"github.com/urfave/cli/v2"
 
 	"github.com/photoprism/photoprism/internal/config"
+	"github.com/photoprism/photoprism/internal/event"
 	"github.com/photoprism/photoprism/internal/service/cluster"
 	"github.com/photoprism/photoprism/pkg/clean"
 	"github.com/photoprism/photoprism/pkg/fs"
 	"github.com/photoprism/photoprism/pkg/http/header"
+	"github.com/photoprism/photoprism/pkg/txt/report"
 )
 
 // ClusterThemePullCommand downloads the Portal theme and installs it.
@@ -45,7 +48,7 @@ var ClusterThemePullCommand = &cli.Command{
 }
 
 func clusterThemePullAction(ctx *cli.Context) error {
-	return CallWithDependencies(ctx, func(conf *config.Config) error {
+	return CallWithCoreDependencies(ctx, func(conf *config.Config) error {
 		portalURL := ""
 
 		if ctx.IsSet("portal-url") && ctx.String("portal-url") != "" {
@@ -89,7 +92,7 @@ func clusterThemePullAction(ctx *cli.Context) error {
 			// OAuth client_credentials
 			t, err := obtainOAuthToken(portalURL, clientID, clientSecret)
 			if err != nil {
-				log.Warnf("cluster: oauth token failed, falling back to join token (%s)", clean.Error(err))
+				event.SystemWarn([]string{"cluster", "oauth token failed, falling back to join token", "%s"}, clean.ErrorFull(err))
 			} else {
 				token = t
 			}
@@ -179,7 +182,7 @@ func clusterThemePullAction(ctx *cli.Context) error {
 		}
 		defer func() {
 			if closeErr := resp.Body.Close(); closeErr != nil {
-				log.Debugf("cluster: %s (close theme response body)", clean.Error(closeErr))
+				log.Debugf("cluster: %s (close theme response body)", clean.ErrorFull(closeErr))
 			}
 		}()
 		if resp.StatusCode != http.StatusOK {
@@ -210,7 +213,13 @@ func clusterThemePullAction(ctx *cli.Context) error {
 		}
 
 		if ctx.Bool("json") {
-			fmt.Printf("{\"installed\":\"%s\"}\n", clean.Log(dest))
+			b, jsonErr := report.MarshalJSON(map[string]string{"installed": dest})
+
+			if jsonErr != nil {
+				return jsonErr
+			}
+
+			fmt.Println(string(b))
 		} else {
 			log.Infof("installed theme files to %s", clean.Log(dest))
 			fmt.Println(dest)
@@ -246,7 +255,7 @@ func obtainOAuthToken(portalURL, clientID, clientSecret string) (string, error) 
 
 	defer func() {
 		if closeErr := resp.Body.Close(); closeErr != nil {
-			log.Debugf("cluster: %s (close oauth response body)", clean.Error(closeErr))
+			log.Debugf("cluster: %s (close oauth response body)", clean.ErrorFull(closeErr))
 		}
 	}()
 
@@ -301,6 +310,14 @@ func removeDirContents(dir string) error {
 	return nil
 }
 
+// Theme archive bounds, the same limits as for theme installs at node bootstrap.
+var (
+	themeFileSizeLimit  int64 = 32 * fs.MB
+	themeTotalSizeLimit int64 = 512 * fs.MB
+)
+
+// unzipSafe extracts a theme archive into dest, skipping hidden names and entries outside dest. New files get
+// fs.ModeFile, and a file over themeFileSizeLimit or the themeTotalSizeLimit budget is removed with an error.
 func unzipSafe(zipPath, dest string) error {
 	r, err := zip.OpenReader(zipPath)
 
@@ -310,7 +327,7 @@ func unzipSafe(zipPath, dest string) error {
 
 	defer func() {
 		if closeErr := r.Close(); closeErr != nil {
-			log.Debugf("cluster: %s (close theme archive)", clean.Error(closeErr))
+			log.Debugf("cluster: %s (close theme archive)", clean.ErrorFull(closeErr))
 		}
 	}()
 
@@ -319,6 +336,8 @@ func unzipSafe(zipPath, dest string) error {
 	if err != nil {
 		return err
 	}
+
+	var total int64
 
 	// Empty theme archives are valid; install succeeds without files.
 	for _, f := range r.File {
@@ -334,7 +353,7 @@ func unzipSafe(zipPath, dest string) error {
 		}
 
 		// Skip entries that look like hidden files or directories.
-		if fs.FileNameHidden(path.Base(name)) {
+		if fs.FileNameSystem(path.Base(name)) {
 			continue
 		}
 
@@ -372,18 +391,24 @@ func unzipSafe(zipPath, dest string) error {
 		}
 
 		// Create/truncate target.
-		out, err := os.OpenFile(targetAbs, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, f.Mode()) //nolint:gosec // paths derived from zip entries validated earlier
+		out, err := os.OpenFile(targetAbs, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, fs.ModeFile) //nolint:gosec // paths derived from zip entries validated earlier
 
 		if err != nil {
 			_ = rc.Close()
 			return err
 		}
 
-		_, copyErr := io.Copy(out, rc) //nolint:gosec // zip entries size is bounded by upstream
+		// Copy one byte more than the remaining budget allows, so that an oversized file is detected.
+		limit := min(themeFileSizeLimit, themeTotalSizeLimit-total)
+		n, copyErr := io.CopyN(out, rc, limit+1)
+		total += n
 		closeOutErr := out.Close()
 		closeRcErr := rc.Close()
 
-		if copyErr != nil {
+		if n > limit {
+			_ = os.Remove(targetAbs)
+			return fmt.Errorf("theme file %s exceeds the size limit", clean.Log(name))
+		} else if copyErr != nil && !errors.Is(copyErr, io.EOF) {
 			return copyErr
 		}
 

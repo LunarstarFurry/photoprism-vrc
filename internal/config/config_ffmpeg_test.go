@@ -6,7 +6,10 @@ import (
 	"github.com/photoprism/photoprism/internal/ffmpeg/encode"
 	"github.com/photoprism/photoprism/internal/thumb"
 
+	"github.com/sirupsen/logrus"
+	logtest "github.com/sirupsen/logrus/hooks/test"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestConfig_FFmpegEncoder(t *testing.T) {
@@ -18,6 +21,8 @@ func TestConfig_FFmpegEncoder(t *testing.T) {
 	assert.Equal(t, encode.SoftwareAvc, c.FFmpegEncoder())
 	c.options.FFmpegEncoder = "intel"
 	assert.Equal(t, encode.IntelAvc, c.FFmpegEncoder())
+	c.options.FFmpegEncoder = "vulkan"
+	assert.Equal(t, encode.VulkanAvc, c.FFmpegEncoder())
 	c.options.FFmpegEncoder = "xxx"
 	assert.Equal(t, encode.SoftwareAvc, c.FFmpegEncoder())
 	c.options.FFmpegEncoder = ""
@@ -49,6 +54,23 @@ func TestConfig_FFmpegBitrate(t *testing.T) {
 	assert.Equal(t, 800, c.FFmpegBitrate())
 }
 
+func TestConfig_FFmpegFisheyeFov(t *testing.T) {
+	c := NewConfig(CliTestContext())
+	assert.Equal(t, encode.DefaultFisheyeFov, c.FFmpegFisheyeFov())
+
+	c.options.FFmpegFisheyeFov = 0
+	assert.Equal(t, encode.DefaultFisheyeFov, c.FFmpegFisheyeFov())
+
+	c.options.FFmpegFisheyeFov = 10
+	assert.Equal(t, encode.MinFisheyeFov, c.FFmpegFisheyeFov())
+
+	c.options.FFmpegFisheyeFov = 500
+	assert.Equal(t, encode.MaxFisheyeFov, c.FFmpegFisheyeFov())
+
+	c.options.FFmpegFisheyeFov = 190
+	assert.Equal(t, 190, c.FFmpegFisheyeFov())
+}
+
 func TestConfig_FFmpegSize(t *testing.T) {
 	c := NewConfig(CliTestContext())
 	assert.Equal(t, 4096, c.FFmpegSize())
@@ -57,7 +79,7 @@ func TestConfig_FFmpegSize(t *testing.T) {
 	assert.Equal(t, 4096, c.FFmpegSize())
 
 	c.options.FFmpegSize = -1
-	assert.Equal(t, 7680, c.FFmpegSize())
+	assert.Equal(t, 15360, c.FFmpegSize())
 
 	c.options.FFmpegSize = 10
 	assert.Equal(t, 720, c.FFmpegSize())
@@ -73,6 +95,9 @@ func TestConfig_FFmpegSize(t *testing.T) {
 
 	c.options.FFmpegSize = 8640
 	assert.Equal(t, thumb.Sizes[thumb.Fit7680].Width, c.FFmpegSize())
+
+	c.options.FFmpegSize = 15360
+	assert.Equal(t, thumb.Sizes[thumb.Fit15360].Width, c.FFmpegSize())
 }
 
 func TestConfig_FFmpegQuality(t *testing.T) {
@@ -120,7 +145,62 @@ func TestConfig_FFmpegPreset(t *testing.T) {
 
 	c.options.FFmpegPreset = "fast"
 	assert.Equal(t, encode.PresetFast, c.FFmpegPreset())
+}
 
+func TestConfig_FFmpegPreset_Normalize(t *testing.T) {
+	orig := log
+	logger, hook := logtest.NewNullLogger()
+	log = logger
+	t.Cleanup(func() { log = orig })
+
+	t.Run("NvencNames", func(t *testing.T) {
+		c := NewConfig(CliTestContext())
+		expected := map[string]string{
+			"p1": encode.PresetSuperFast,
+			"p2": encode.PresetVeryFast,
+			"p3": encode.PresetFaster,
+			"p4": encode.PresetFast,
+			"p5": encode.PresetMedium,
+			"p6": encode.PresetSlow,
+			"p7": encode.PresetSlower,
+		}
+
+		for name, want := range expected {
+			c.options.FFmpegPreset = name
+			assert.Equal(t, want, c.FFmpegPreset(), name)
+		}
+	})
+	t.Run("CaseAndWhitespace", func(t *testing.T) {
+		c := NewConfig(CliTestContext())
+		hook.Reset()
+		c.options.FFmpegPreset = " Slow "
+		assert.Equal(t, encode.PresetSlow, c.FFmpegPreset())
+		c.options.FFmpegPreset = "P7"
+		assert.Equal(t, encode.PresetSlower, c.FFmpegPreset())
+		c.options.FFmpegPreset = "placebo"
+		assert.Equal(t, encode.PresetVerySlow, c.FFmpegPreset())
+		assert.Empty(t, hook.AllEntries())
+	})
+	t.Run("Unknown", func(t *testing.T) {
+		c := NewConfig(CliTestContext())
+		hook.Reset()
+		c.options.FFmpegPreset = "turbo"
+
+		for range 3 {
+			assert.Equal(t, encode.PresetFast, c.FFmpegPreset())
+		}
+
+		require.Len(t, hook.AllEntries(), 1)
+		assert.Equal(t, logrus.WarnLevel, hook.LastEntry().Level)
+		assert.Contains(t, hook.LastEntry().Message, "unsupported ffmpeg preset")
+		assert.Contains(t, hook.LastEntry().Message, "turbo")
+
+		c.options.FFmpegPreset = "warp"
+		assert.Equal(t, encode.PresetFast, c.FFmpegPreset())
+		assert.Equal(t, encode.PresetFast, c.FFmpegPreset())
+		require.Len(t, hook.AllEntries(), 2)
+		assert.Contains(t, hook.LastEntry().Message, "warp")
+	})
 }
 
 func TestConfig_FFmpegDevice(t *testing.T) {
@@ -142,6 +222,24 @@ func TestConfig_FFmpegMapAudio(t *testing.T) {
 	assert.Equal(t, encode.DefaultMapAudio, c.FFmpegMapAudio())
 }
 
+func TestConfig_FFmpegExclude(t *testing.T) {
+	c := NewConfig(CliTestContext())
+	assert.Equal(t, "magy", c.FFmpegExclude().String())
+
+	// String() returns formats sorted alphabetically; codec names are canonicalized.
+	c.options.FFmpegExclude = "magicyuv, hap"
+	assert.Equal(t, "hap, magy", c.FFmpegExclude().String())
+
+	excluded := c.FFmpegExclude()
+	assert.True(t, excluded.Contains("magicyuv"))
+	assert.True(t, excluded.Contains("hap"))
+	assert.False(t, excluded.Contains("avc1"))
+
+	c.options.FFmpegExclude = ""
+	assert.Equal(t, "", c.FFmpegExclude().String())
+	assert.False(t, c.FFmpegExclude().Contains("magicyuv"))
+}
+
 func TestConfig_FFmpegOptions(t *testing.T) {
 	c := NewConfig(CliTestContext())
 	bitrate := "25M"
@@ -153,4 +251,36 @@ func TestConfig_FFmpegOptions(t *testing.T) {
 	assert.Equal(t, encode.DefaultMapAudio, opt.MapAudio)
 	assert.Equal(t, c.FFmpegMapVideo(), opt.MapVideo)
 	assert.Equal(t, c.FFmpegMapAudio(), opt.MapAudio)
+	assert.Equal(t, 25, opt.MaxBitrate)
+}
+
+func TestConfig_FFmpegOptions_MaxBitrate(t *testing.T) {
+	c := NewConfig(CliTestContext())
+
+	t.Run("Limit", func(t *testing.T) {
+		c.options.FFmpegBitrate = 0
+		opt, err := c.FFmpegOptions(encode.NvidiaAvc, "60M")
+		assert.NoError(t, err)
+		assert.Equal(t, 60, opt.MaxBitrate)
+	})
+	t.Run("NoBitrateLimit", func(t *testing.T) {
+		t.Cleanup(func() { c.options.FFmpegBitrate = 0 })
+		c.options.FFmpegBitrate = -1
+		opt, err := c.FFmpegOptions(encode.NvidiaAvc, "25M")
+		assert.NoError(t, err)
+		assert.Equal(t, 0, opt.MaxBitrate)
+		c.options.FFmpegBitrate = -5
+		opt, err = c.FFmpegOptions(encode.NvidiaAvc, "25M")
+		assert.NoError(t, err)
+		assert.Equal(t, 0, opt.MaxBitrate)
+	})
+	t.Run("InvalidBitrate", func(t *testing.T) {
+		opt, err := c.FFmpegOptions(encode.NvidiaAvc, "-1M")
+		assert.NoError(t, err)
+		assert.Equal(t, 0, opt.MaxBitrate)
+	})
+	t.Run("EmptyBitrate", func(t *testing.T) {
+		_, err := c.FFmpegOptions(encode.NvidiaAvc, "")
+		assert.Error(t, err)
+	})
 }

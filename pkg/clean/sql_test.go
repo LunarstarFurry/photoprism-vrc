@@ -65,20 +65,30 @@ func TestSqlSpecial(t *testing.T) {
 	})
 }
 
-func TestSqlString(t *testing.T) {
+func TestSqlClean(t *testing.T) {
 	t.Run("Empty", func(t *testing.T) {
-		assert.Equal(t, "", SqlString(""))
-	})
-	t.Run("Special", func(t *testing.T) {
-		s := "' \" \t \n %_''"
-		exp := "'' \"\"   %_''''"
-		result := SqlString(s)
-		t.Logf("String..: %s", s)
-		t.Logf("Expected: %s", exp)
-		t.Logf("Result..: %s", result)
-		assert.Equal(t, exp, result)
+		assert.Equal(t, "", SqlClean(""))
 	})
 	t.Run("Alnum", func(t *testing.T) {
-		assert.Equal(t, "123ABCabc", SqlString("123ABCabc"))
+		assert.Equal(t, "123ABCabc", SqlClean("123ABCabc"))
+	})
+	t.Run("Special", func(t *testing.T) {
+		// Quotes, backslashes and wildcards are kept; control characters are stripped.
+		s := "' \" \t \n %_'\\'"
+		exp := "' \"   %_'\\'"
+		assert.Equal(t, exp, SqlClean(s))
+	})
+	t.Run("OmitOnly", func(t *testing.T) {
+		assert.Equal(t, "", SqlClean("\x00\x01\x02\x1f"))
+	})
+	t.Run("EarlyExit", func(t *testing.T) {
+		// First byte is omittable, so the fast-path early-exit branch is skipped.
+		assert.Equal(t, "abc", SqlClean("\tabc"))
+	})
+	t.Run("Unicode", func(t *testing.T) {
+		assert.Equal(t, "Clean《MeUp✀☒ちュس", SqlClean("Clean《MeUp✀☒ちュس"))
+	})
+	t.Run("TrailingControl", func(t *testing.T) {
+		assert.Equal(t, "abc", SqlClean("abc\n"))
 	})
 }

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math/rand/v2"
 	"net/http"
 	"os"
@@ -16,14 +17,45 @@ import (
 	"time"
 
 	gojwt "github.com/golang-jwt/jwt/v5"
+	"golang.org/x/sync/singleflight"
 
 	"github.com/photoprism/photoprism/internal/config"
+	"github.com/photoprism/photoprism/pkg/clean"
 	"github.com/photoprism/photoprism/pkg/fs"
 )
 
 var (
-	errKeyNotFound = errors.New("jwt: key not found")
+	errKeyNotFound      = errors.New("jwt: key not found")
+	errMissingKid       = errors.New("jwt: missing kid header")
+	errCriticalHeader   = errors.New("jwt: unsupported critical header")
+	errRefreshThrottled = errors.New("jwt: key not found and key set refresh not due")
 )
+
+// SignatureFailed reports whether err occurred before the token's claims were checked, i.e. while
+// parsing the token, finding its key, or verifying its signature.
+func SignatureFailed(err error) bool {
+	return errors.Is(err, gojwt.ErrTokenMalformed) || errors.Is(err, gojwt.ErrTokenSignatureInvalid) || errors.Is(err, gojwt.ErrTokenUnverifiable)
+}
+
+// Unverified reports whether err shows that a token's signature could not be verified, because the
+// token is malformed, names no key or one the key set does not hold after a refresh, or has an invalid
+// signature. Claim checks, a throttled refresh, and a key set that could not be fetched are not reported.
+func Unverified(err error) bool {
+	switch {
+	case err == nil:
+		return false
+	case errors.Is(err, gojwt.ErrTokenMalformed), errors.Is(err, gojwt.ErrTokenSignatureInvalid):
+		return true
+	case errors.Is(err, gojwt.ErrTokenUnverifiable):
+		return errors.Is(err, errKeyNotFound) || errors.Is(err, errMissingKid) || errors.Is(err, errCriticalHeader)
+	default:
+		return false
+	}
+}
+
+// maxJWKSResponseBytes bounds how much of a JWKS response is read so a malicious
+// or compromised IdP endpoint cannot exhaust memory; real key sets are a few KB.
+const maxJWKSResponseBytes = 1 << 20 // 1 MiB
 
 // VerifierStatus captures diagnostic information about a verifier's JWKS cache state.
 type VerifierStatus struct {
@@ -35,6 +67,8 @@ type VerifierStatus struct {
 	CacheAgeSeconds int64     `json:"cacheAgeSeconds"`
 	CacheTTLSeconds int       `json:"cacheTtlSeconds"`
 	CacheStale      bool      `json:"cacheStale"`
+	CacheMaxAgeSecs int64     `json:"cacheMaxAgeSeconds"`
+	CacheUsable     bool      `json:"cacheUsable"`
 	CachePath       string    `json:"cachePath,omitempty"`
 	JWKSURL         string    `json:"jwksUrl,omitempty"`
 }
@@ -46,7 +80,18 @@ const (
 	jwksFetchBaseDelay = 200 * time.Millisecond
 	// jwksFetchMaxDelay is the upper bound for retry delays to prevent unbounded backoff.
 	jwksFetchMaxDelay = 2 * time.Second
+	// jwksFetchRetryAfter is how long a failed refresh is answered from memory.
+	jwksFetchRetryAfter = 30 * time.Second
+	// jwksForceRefreshAfter is the minimum interval between two forced refreshes of the same
+	// endpoint, so a rotated key is discovered promptly while refresh work stays bounded per endpoint.
+	jwksForceRefreshAfter = 30 * time.Second
+	// defaultJWKSCacheTTL applies when no cache TTL is configured.
+	defaultJWKSCacheTTL = 300 * time.Second
 )
+
+// jwksStaleWait bounds how long an ordinary verification waits for a refresh while it holds cached keys
+// that are past their TTL but still usable; a refresh that answers in time still decides the keys.
+var jwksStaleWait = 2 * time.Second
 
 // randInt63n is defined for deterministic testing of jitter (overridable in tests).
 var randInt63n = rand.Int64N
@@ -66,6 +111,16 @@ type Verifier struct {
 	mu        sync.Mutex
 	cache     cacheEntry
 	cachePath string
+
+	failedURL string
+	failedAt  int64
+	failedErr error
+
+	// forcedAt records the last forced refresh per configured JWKS endpoint.
+	forcedAt map[string]int64
+
+	// fetches coalesces concurrent refreshes of the same endpoint into one request.
+	fetches singleflight.Group
 
 	httpClient *http.Client
 	now        func() time.Time
@@ -134,19 +189,27 @@ func (v *Verifier) VerifyToken(ctx context.Context, tokenString string, expected
 		gojwt.WithValidMethods([]string{gojwt.SigningMethodEdDSA.Alg()}),
 		gojwt.WithIssuer(expected.Issuer),
 		gojwt.WithAudience(expected.Audience),
+		gojwt.WithIssuedAt(),
 	)
 
 	claims := &Claims{}
 	keyFunc := func(token *gojwt.Token) (any, error) {
+		if err := rejectCriticalHeaders(token); err != nil {
+			return nil, err
+		}
+
 		kid, _ := token.Header["kid"].(string)
 
 		if kid == "" {
-			return nil, errors.New("jwt: missing kid header")
+			return nil, errMissingKid
 		}
 
 		pk, err := v.publicKeyForKid(ctx, jwksUrl, kid, false)
 
-		if errors.Is(err, errKeyNotFound) {
+		// The cached keys were checked above, so a lookup without a due forced refresh would find the same.
+		if errors.Is(err, errKeyNotFound) && !v.forcedRefreshDue(jwksUrl) {
+			return nil, errRefreshThrottled
+		} else if errors.Is(err, errKeyNotFound) {
 			pk, err = v.publicKeyForKid(ctx, jwksUrl, kid, true)
 		}
 
@@ -161,12 +224,8 @@ func (v *Verifier) VerifyToken(ctx context.Context, tokenString string, expected
 		return nil, err
 	}
 
-	if claims.IssuedAt == nil || claims.ExpiresAt == nil {
-		return nil, errors.New("jwt: missing temporal claims")
-	}
-
-	if ttl := claims.ExpiresAt.Sub(claims.IssuedAt.Time); ttl > MaxTokenTTL {
-		return nil, errors.New("jwt: token ttl exceeds maximum")
+	if err := verifyTemporalClaims(claims); err != nil {
+		return nil, err
 	}
 
 	scopeSet := map[string]struct{}{}
@@ -223,6 +282,7 @@ func VerifyTokenWithKeys(tokenString string, expected ExpectedClaims, keys []Pub
 	options := []gojwt.ParserOption{
 		gojwt.WithLeeway(leeway),
 		gojwt.WithValidMethods([]string{gojwt.SigningMethodEdDSA.Alg()}),
+		gojwt.WithIssuedAt(),
 	}
 
 	if iss := strings.TrimSpace(expected.Issuer); iss != "" {
@@ -236,9 +296,12 @@ func VerifyTokenWithKeys(tokenString string, expected ExpectedClaims, keys []Pub
 	parser := gojwt.NewParser(options...)
 	claims := &Claims{}
 	keyFunc := func(token *gojwt.Token) (any, error) {
+		if err := rejectCriticalHeaders(token); err != nil {
+			return nil, err
+		}
 		kid, _ := token.Header["kid"].(string)
 		if kid == "" {
-			return nil, errors.New("jwt: missing kid header")
+			return nil, errMissingKid
 		}
 		pk, ok := keyMap[kid]
 		if !ok {
@@ -251,12 +314,8 @@ func VerifyTokenWithKeys(tokenString string, expected ExpectedClaims, keys []Pub
 		return nil, err
 	}
 
-	if claims.IssuedAt == nil || claims.ExpiresAt == nil {
-		return nil, errors.New("jwt: missing temporal claims")
-	}
-
-	if ttl := claims.ExpiresAt.Sub(claims.IssuedAt.Time); ttl > MaxTokenTTL {
-		return nil, errors.New("jwt: token ttl exceeds maximum")
+	if err := verifyTemporalClaims(claims); err != nil {
+		return nil, err
 	}
 
 	if len(expected.Scope) > 0 {
@@ -272,6 +331,39 @@ func VerifyTokenWithKeys(tokenString string, expected ExpectedClaims, keys []Pub
 	}
 
 	return claims, nil
+}
+
+// verifyTemporalClaims checks the time claims the cluster contract requires: iat, nbf and exp
+// present, a usable validity window, and a positive lifetime no longer than MaxTokenTTL.
+// Whether iat and nbf have passed is decided by the parser, with the configured leeway.
+func verifyTemporalClaims(claims *Claims) error {
+	switch {
+	case claims.IssuedAt == nil || claims.NotBefore == nil || claims.ExpiresAt == nil:
+		return errors.New("jwt: missing temporal claims")
+	case !claims.ExpiresAt.After(claims.NotBefore.Time):
+		return errors.New("jwt: token expires before it is valid")
+	}
+
+	switch ttl := claims.ExpiresAt.Sub(claims.IssuedAt.Time); {
+	case ttl <= 0:
+		return errors.New("jwt: token expires before it was issued")
+	case ttl > MaxTokenTTL:
+		return errors.New("jwt: token ttl exceeds maximum")
+	}
+
+	return nil
+}
+
+// rejectCriticalHeaders refuses a token that names critical header extensions, since this
+// verifier implements none (RFC 7515 §4.1.11).
+func rejectCriticalHeaders(token *gojwt.Token) error {
+	if token == nil {
+		return errors.New("jwt: token is empty")
+	} else if _, ok := token.Header["crit"]; ok {
+		return errCriticalHeader
+	}
+
+	return nil
 }
 
 // Status returns diagnostic information about the verifier's current JWKS cache.
@@ -297,11 +389,18 @@ func (v *Verifier) Status(ttl time.Duration) VerifierStatus {
 
 	result.CachePath = v.cachePath
 
+	// The age past which a refresh failure stops being survivable, so an operator can tell
+	// "serving keys that are due a refresh" from "no longer accepting tokens".
+	if ttl > 0 {
+		result.CacheMaxAgeSecs = int64((ttl + RotationOverlap()).Seconds())
+	}
+
 	if v.cache.FetchedAt > 0 {
 		fetched := time.Unix(v.cache.FetchedAt, 0).UTC()
 		result.CacheFetchedAt = fetched
-		age := time.Since(fetched)
+		age := v.now().UTC().Sub(fetched)
 		result.CacheAgeSeconds = int64(age.Seconds())
+		result.CacheUsable = len(v.cache.Keys) > 0 && v.staleKeysUsable(v.cache, ttl)
 		if ttl > 0 && age > ttl {
 			result.CacheStale = true
 		}
@@ -312,7 +411,7 @@ func (v *Verifier) Status(ttl time.Duration) VerifierStatus {
 
 // publicKeyForKid resolves the public key for the given key ID, fetching JWKS data if needed.
 func (v *Verifier) publicKeyForKid(ctx context.Context, url, kid string, force bool) (ed25519.PublicKey, error) {
-	keys, err := v.keysForURL(ctx, url, force)
+	keys, err := v.keysForKid(ctx, url, kid, force)
 
 	if err != nil {
 		return nil, err
@@ -337,14 +436,152 @@ func (v *Verifier) publicKeyForKid(ctx context.Context, url, kid string, force b
 	return nil, errKeyNotFound
 }
 
-// keysForURL returns JWKS keys for the specified endpoint, reusing cache when possible.
+// keysForURL returns JWKS keys for the specified endpoint, reusing cache when possible. Concurrent
+// callers for the same endpoint share one refresh.
 func (v *Verifier) keysForURL(ctx context.Context, url string, force bool) ([]PublicJWK, error) {
-	ttl := 300 * time.Second
+	return v.keysForKid(ctx, url, "", force)
+}
+
+// keysForKid returns the keys for url, like keysForURL. Given a key ID, an ordinary caller takes the stale
+// wait only while the cached keys contain it, since cached keys without it cannot verify the token.
+func (v *Verifier) keysForKid(ctx context.Context, url, kid string, force bool) ([]PublicJWK, error) {
+	ttl := defaultJWKSCacheTTL
 
 	if v.conf != nil && v.conf.JWKSCacheTTL() > 0 {
 		ttl = time.Duration(v.conf.JWKSCacheTTL()) * time.Second
 	}
 
+	// A caller that asked for a forced refresh looks for keys the cache lacks, so it does not take the
+	// stale wait below even when the interval turns it into an ordinary request.
+	requested := force
+
+	// A forced refresh runs at most once per interval per endpoint; beyond that the request is
+	// answered from cache.
+	if force && !v.forcedRefreshDue(url) {
+		force = false
+	}
+
+	cached := v.snapshotCache()
+
+	if keys, ok := v.cachedKeys(url, ttl, cached, force); ok {
+		return keys, nil
+	}
+
+	if !force {
+		if failure := v.recentFetchFailure(url); failure != nil {
+			return v.keysAfterFailedRefresh(url, ttl, force, cached, failure)
+		}
+	}
+
+	// Callers share the fetch, not the outcome: it is detached from any one request context, so a
+	// caller that goes away neither cancels it nor decides what the others are served.
+	ch := v.fetches.DoChan(url, func() (any, error) {
+		return v.refreshKeys(context.WithoutCancel(ctx), url, ttl, force && v.takeForcedRefresh(url))
+	})
+
+	// An ordinary caller with usable cached keys waits only briefly; the refresh continues either way.
+	var staleWait <-chan time.Time
+
+	if keys, ok := v.staleKeys(url, ttl, cached); ok && !requested && hasKid(keys, kid) {
+		timer := time.NewTimer(jwksStaleWait)
+		defer timer.Stop()
+		staleWait = timer.C
+	}
+
+	for {
+		select {
+		case res := <-ch:
+			if res.Err != nil {
+				return v.keysAfterFailedRefresh(url, ttl, force, v.snapshotCache(), res.Err)
+			}
+
+			keys, _ := res.Val.([]PublicJWK)
+
+			return append([]PublicJWK(nil), keys...), nil
+		case <-staleWait:
+			if keys, ok := v.staleKeys(url, ttl, v.snapshotCache()); ok && hasKid(keys, kid) {
+				return keys, nil
+			}
+
+			staleWait = nil
+		case <-ctx.Done():
+			return v.keysAfterFailedRefresh(url, ttl, force, v.snapshotCache(), ctx.Err())
+		}
+	}
+}
+
+// hasKid reports whether keys contain the key ID, or true if none is given.
+func hasKid(keys []PublicJWK, kid string) bool {
+	if kid == "" {
+		return true
+	}
+
+	for _, k := range keys {
+		if k.Kid == kid {
+			return true
+		}
+	}
+
+	return false
+}
+
+// keysAfterFailedRefresh applies this caller's own fallback when a refresh did not deliver keys, so a
+// shared refresh cannot strip an ordinary verification of the cached keys it may still be served. A
+// forced caller wants the error, since it is asking whether the endpoint has something new.
+func (v *Verifier) keysAfterFailedRefresh(url string, ttl time.Duration, force bool, cached cacheEntry, err error) ([]PublicJWK, error) {
+	if !force {
+		if keys, ok := v.staleKeys(url, ttl, cached); ok {
+			return keys, nil
+		}
+	}
+
+	return nil, err
+}
+
+// forcedRefreshDue reports whether a forced refresh of the endpoint is due, without recording one.
+func (v *Verifier) forcedRefreshDue(url string) bool {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+
+	return v.forcedRefreshDueLocked(url)
+}
+
+// takeForcedRefresh records a forced refresh and reports whether it was due. Only the goroutine that
+// performs the fetch calls it, so a caller joining a refresh in flight does not consume the interval.
+func (v *Verifier) takeForcedRefresh(url string) bool {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+
+	if !v.forcedRefreshDueLocked(url) {
+		return false
+	}
+
+	if v.forcedAt == nil {
+		v.forcedAt = make(map[string]int64)
+	}
+
+	v.forcedAt[url] = v.now().Unix()
+
+	return true
+}
+
+// forcedRefreshDueLocked reports whether the endpoint's forced refresh interval has elapsed; the
+// caller must hold the mutex.
+func (v *Verifier) forcedRefreshDueLocked(url string) bool {
+	last, ok := v.forcedAt[url]
+
+	if !ok {
+		return true
+	}
+
+	age := v.now().Unix() - last
+
+	return age < 0 || time.Duration(age)*time.Second >= jwksForceRefreshAfter
+}
+
+// refreshKeys fetches and caches the JWKS for the endpoint, retrying a transient error within the
+// request that hit it. It runs inside the single-flight group, so only one call per endpoint is active.
+func (v *Verifier) refreshKeys(ctx context.Context, url string, ttl time.Duration, force bool) ([]PublicJWK, error) {
 	attempts := 0
 
 	for {
@@ -354,6 +591,20 @@ func (v *Verifier) keysForURL(ctx context.Context, url string, force bool) ([]Pu
 			return keys, nil
 		}
 
+		// Only on entry: once a failure has been recorded, the retry attempts below must
+		// still run so a transient blip is ridden out within the request that hit it. An explicit
+		// refresh still tries, so priming is never blocked; allowForcedRefresh is what bounds how
+		// often it may.
+		if attempts == 0 && !force {
+			if failure := v.recentFetchFailure(url); failure != nil {
+				if keys, ok := v.staleKeys(url, ttl, cached); ok {
+					return keys, nil
+				}
+
+				return nil, failure
+			}
+		}
+
 		etag := ""
 		if !force && cached.URL == url {
 			etag = cached.ETag
@@ -361,8 +612,16 @@ func (v *Verifier) keysForURL(ctx context.Context, url string, force bool) ([]Pu
 
 		result, err := v.fetchJWKS(ctx, url, etag)
 		if err != nil {
-			if !force && cached.URL == url && len(cached.Keys) > 0 {
-				return append([]PublicJWK(nil), cached.Keys...), nil
+			first := v.recordFetchFailure(url, err)
+
+			if !force {
+				if keys, ok := v.staleKeys(url, ttl, cached); ok {
+					return keys, nil
+				}
+			}
+
+			if first {
+				log.Warnf("jwt: key set refresh failed and the cached keys are no longer usable, so tokens are denied")
 			}
 
 			attempts++
@@ -371,7 +630,7 @@ func (v *Verifier) keysForURL(ctx context.Context, url string, force bool) ([]Pu
 			}
 
 			delay := backoffDuration(attempts)
-			log.Debugf("jwt: jwks fetch retry %d for %s in %s (%s)", attempts, url, delay, err)
+			log.Debugf("jwt: jwks fetch retry %d for %s in %s (%s)", attempts, clean.Log(url), delay, clean.ErrorFull(err))
 
 			select {
 			case <-time.After(delay):
@@ -380,6 +639,8 @@ func (v *Verifier) keysForURL(ctx context.Context, url string, force bool) ([]Pu
 				return nil, ctx.Err()
 			}
 		}
+
+		v.clearFetchFailure()
 
 		if keys, ok := v.updateCache(url, result); ok {
 			return keys, nil
@@ -412,6 +673,80 @@ func (v *Verifier) cachedKeys(url string, ttl time.Duration, cache cacheEntry, f
 	}
 
 	return append([]PublicJWK(nil), cache.Keys...), true
+}
+
+// staleKeys returns the cached keys for url when a refresh has failed but they are still
+// inside the stale window.
+func (v *Verifier) staleKeys(url string, ttl time.Duration, cache cacheEntry) ([]PublicJWK, bool) {
+	if cache.URL != url || len(cache.Keys) == 0 || !v.staleKeysUsable(cache, ttl) {
+		return nil, false
+	}
+
+	return append([]PublicJWK(nil), cache.Keys...), true
+}
+
+// recentFetchFailure returns the error from a recent failed refresh of url, or nil once the
+// retry interval has passed.
+func (v *Verifier) recentFetchFailure(url string) error {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+
+	if v.failedURL != url || v.failedErr == nil {
+		return nil
+	}
+
+	age := v.now().Unix() - v.failedAt
+
+	if age < 0 || time.Duration(age)*time.Second > jwksFetchRetryAfter {
+		return nil
+	}
+
+	return v.failedErr
+}
+
+// recordFetchFailure remembers a failed refresh and reports whether it opens a new retry
+// interval, so an operator-visible warning is emitted once per interval rather than per request.
+func (v *Verifier) recordFetchFailure(url string, err error) (first bool) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+
+	now := v.now().Unix()
+	age := now - v.failedAt
+
+	first = v.failedURL != url || v.failedErr == nil || age < 0 || time.Duration(age)*time.Second > jwksFetchRetryAfter
+
+	v.failedURL = url
+	v.failedAt = now
+	v.failedErr = err
+
+	return first
+}
+
+// clearFetchFailure drops the remembered failure after a successful refresh.
+func (v *Verifier) clearFetchFailure() {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+
+	v.failedURL = ""
+	v.failedAt = 0
+	v.failedErr = nil
+}
+
+// staleKeysUsable reports whether cached keys may still be served after a refresh failed or outlasted jwksStaleWait.
+// Age is measured from the last successful fetch, and the window runs one cache TTL beyond
+// the issuer's rotation overlap, which no live token can outlast.
+func (v *Verifier) staleKeysUsable(cache cacheEntry, ttl time.Duration) bool {
+	if cache.FetchedAt <= 0 {
+		return false
+	}
+
+	age := v.now().Unix() - cache.FetchedAt
+
+	if age < 0 {
+		return false
+	}
+
+	return time.Duration(age)*time.Second <= ttl+RotationOverlap()
 }
 
 type jwksFetchResult struct {
@@ -455,7 +790,7 @@ func (v *Verifier) fetchJWKS(ctx context.Context, url, etag string) (*jwksFetchR
 		}, nil
 	case http.StatusOK:
 		var body JWKS
-		if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		if err := json.NewDecoder(io.LimitReader(resp.Body, maxJWKSResponseBytes)).Decode(&body); err != nil {
 			return nil, err
 		}
 		if len(body.Keys) == 0 {

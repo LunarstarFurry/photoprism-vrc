@@ -1,6 +1,8 @@
 package config
 
 import (
+	"encoding/json"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -9,6 +11,34 @@ import (
 	"github.com/photoprism/photoprism/internal/config/customize"
 	"github.com/photoprism/photoprism/internal/entity"
 )
+
+// TestConfig_ClientConfigThumbLimit checks the serving limit in all client configurations.
+func TestConfig_ClientConfigThumbLimit(t *testing.T) {
+	c := NewMinimalTestConfigWithDb("client-thumb-limit", t.TempDir())
+	c.options.ThumbSize = 1920
+	c.options.ThumbSizeUncached = 7680
+
+	for _, tc := range []struct {
+		name     string
+		uncached bool
+		want     int
+	}{
+		{"CachedOnly", false, 1920},
+		{"OnDemand", true, 7680},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c.options.ThumbUncached = tc.uncached
+			for _, cfg := range []*ClientConfig{c.ClientPublic(), c.ClientShare(), c.ClientUser(true)} {
+				assert.Equal(t, tc.want, cfg.ThumbLimit)
+				data, err := json.Marshal(cfg)
+				assert.NoError(t, err)
+				var values map[string]any
+				assert.NoError(t, json.Unmarshal(data, &values))
+				assert.Equal(t, float64(tc.want), values["thumbLimit"])
+			}
+		})
+	}
+}
 
 func TestConfig_ClientConfig(t *testing.T) {
 	t.Run("TestConfig", func(t *testing.T) {
@@ -30,6 +60,13 @@ func TestConfig_ClientConfig(t *testing.T) {
 		assert.IsType(t, &ClientConfig{}, result2)
 		assert.Equal(t, AuthModePasswd, result2.AuthMode)
 		assert.Equal(t, false, result2.Public)
+	})
+	t.Run("SiteName", func(t *testing.T) {
+		c := NewConfig(CliTestContext())
+		c.options.SiteName = "Acme Media"
+		cfg := c.ClientPublic()
+		assert.IsType(t, &ClientConfig{}, cfg)
+		assert.Equal(t, "Acme Media", cfg.SiteName)
 	})
 	t.Run("Values", func(t *testing.T) {
 		c := TestConfig()
@@ -73,6 +110,27 @@ func TestConfig_ClientConfig(t *testing.T) {
 	})
 }
 
+func TestConfig_ClientConfigDisableMCP(t *testing.T) {
+	// ClientPublic, ClientShare, and ClientUser must all propagate the MCP
+	// disable flag so the frontend can hide any MCP-related controls when
+	// the endpoint is turned off via --disable-mcp / PHOTOPRISM_DISABLE_MCP.
+	c := NewMinimalTestConfigWithDb("client-mcp", t.TempDir())
+	c.SetAuthMode(AuthModePasswd)
+
+	original := c.Options().DisableMCP
+	t.Cleanup(func() { c.Options().DisableMCP = original })
+
+	c.Options().DisableMCP = false
+	assert.False(t, c.ClientPublic().Disable.MCP)
+	assert.False(t, c.ClientShare().Disable.MCP)
+	assert.False(t, c.ClientUser(true).Disable.MCP)
+
+	c.Options().DisableMCP = true
+	assert.True(t, c.ClientPublic().Disable.MCP)
+	assert.True(t, c.ClientShare().Disable.MCP)
+	assert.True(t, c.ClientUser(true).Disable.MCP)
+}
+
 func TestConfig_ClientShareConfig(t *testing.T) {
 	config := TestConfig()
 	result := config.ClientShare()
@@ -81,6 +139,84 @@ func TestConfig_ClientShareConfig(t *testing.T) {
 	assert.Equal(t, AuthModePublic, result.AuthMode)
 	assert.Equal(t, true, result.Experimental)
 	assert.Equal(t, false, result.ReadOnly)
+	t.Run("NoBaseTokens", func(t *testing.T) {
+		c := NewMinimalTestConfigWithDb("client-share-tokens", t.TempDir())
+		c.SetAuthMode(AuthModePasswd)
+		assert.Empty(t, c.ClientShare().PreviewToken)
+		assert.Empty(t, c.ClientShare().DownloadToken)
+		assert.Empty(t, c.ClientUser(false).PreviewToken)
+		assert.Empty(t, c.ClientUser(false).DownloadToken)
+	})
+	t.Run("PublicModeTokens", func(t *testing.T) {
+		cfg := TestConfig().ClientPublic()
+		assert.Equal(t, entity.TokenPublic, cfg.PreviewToken)
+		assert.Equal(t, entity.TokenPublic, cfg.DownloadToken)
+	})
+}
+
+func TestClientConfig_ApplyACL(t *testing.T) {
+	usage := Usage{
+		StorageLow:   true,
+		FilesUsed:    120,
+		FilesUsedPct: 60,
+		FilesFree:    80,
+		FilesFreePct: 40,
+		FilesTotal:   200,
+		UsersUsedPct: 50,
+		UsersFreePct: 50,
+	}
+
+	apply := func(role acl.Role) Usage {
+		cfg := &ClientConfig{Usage: usage}
+		return cfg.ApplyACL(acl.Rules, role).Usage
+	}
+
+	t.Run("RoleAdmin", func(t *testing.T) {
+		u := apply(acl.RoleAdmin)
+		assert.Equal(t, 60, u.FilesUsedPct)
+		assert.EqualValues(t, 200, u.FilesTotal)
+		assert.True(t, u.StorageLow)
+		assert.Equal(t, 50, u.UsersUsedPct)
+	})
+	t.Run("RoleGuest", func(t *testing.T) {
+		u := apply(acl.RoleGuest)
+		assert.Equal(t, -1, u.FilesUsedPct)
+		assert.Equal(t, -1, u.FilesFreePct)
+		assert.EqualValues(t, 0, u.FilesUsed)
+		assert.EqualValues(t, 0, u.FilesFree)
+		assert.EqualValues(t, 0, u.FilesTotal)
+		assert.False(t, u.StorageLow)
+		// Guests hold view on their own user record, so the account quota stays visible.
+		assert.Equal(t, 50, u.UsersUsedPct)
+	})
+	t.Run("RoleVisitor", func(t *testing.T) {
+		u := apply(acl.RoleVisitor)
+		assert.Equal(t, -1, u.FilesUsedPct)
+		assert.EqualValues(t, 0, u.FilesTotal)
+		assert.Equal(t, -1, u.UsersUsedPct)
+		assert.Equal(t, -1, u.UsersFreePct)
+	})
+	t.Run("RoleUnknown", func(t *testing.T) {
+		// An unrecognized role holds no grant, so the guard must clear rather than pass through.
+		u := apply(acl.Role("unknown-role"))
+		assert.Equal(t, -1, u.FilesUsedPct)
+		assert.EqualValues(t, 0, u.FilesTotal)
+	})
+	t.Run("McpRoles", func(t *testing.T) {
+		// Community Edition admins manage only their own account, so they do not receive the list.
+		assert.Nil(t, (&ClientConfig{}).ApplyACL(acl.Rules, acl.RoleAdmin).McpRoles)
+
+		a := acl.ACL{
+			acl.ResourceUsers: acl.Roles{acl.RoleAdmin: acl.GrantFullAccess, acl.RoleGuest: acl.GrantViewUpdateOwn},
+			acl.ResourceMCP:   acl.Roles{acl.RoleAdmin: acl.GrantFullAccess, acl.RoleGuest: acl.GrantSearchAll},
+		}
+
+		admin := (&ClientConfig{}).ApplyACL(a, acl.RoleAdmin)
+		assert.Equal(t, []string{"admin", "guest"}, admin.McpRoles)
+
+		// Roles that cannot manage all accounts do not receive the list, and a reused config is cleared.
+		assert.Nil(t, admin.ApplyACL(a, acl.RoleGuest).McpRoles)
+	})
 }
 
 func TestConfig_ClientUser(t *testing.T) {
@@ -111,8 +247,59 @@ func TestConfig_ClientUser(t *testing.T) {
 		assert.Equal(t, result.Settings.Features.Private, false)
 		assert.Equal(t, result.Settings.Features, guestFeatures)
 	})
+	t.Run("ManualCameras", func(t *testing.T) {
+		added, created, err := entity.AddCamera("Minolta", "X-700")
+		assert.NoError(t, err)
+		assert.True(t, created)
+		orphan := entity.FirstOrCreateCamera(entity.NewCamera("Minolta", "XD-7"))
+		t.Cleanup(func() {
+			entity.FlushCameraCache()
+			assert.NoError(t, entity.UnscopedDb().Delete(&entity.Camera{}, "id IN (?)", []uint{added.ID, orphan.ID}).Error)
+		})
+
+		c.Settings().Features = c.ClientRole(acl.RoleAdmin).Settings.Features
+		result := c.ClientUser(true)
+
+		// Cameras added manually are listed even though no picture references them, other orphans are not.
+		slugs := make([]string, 0, len(result.Cameras))
+		for _, camera := range result.Cameras {
+			slugs = append(slugs, camera.CameraSlug)
+		}
+		assert.Contains(t, slugs, added.CameraSlug)
+		assert.NotContains(t, slugs, orphan.CameraSlug)
+	})
+	t.Run("NilTesting", func(t *testing.T) {
+		if testing.Short() {
+			t.Skip("skipping test in short mode.")
+		}
+		t.Cleanup(func() {
+			entity.ResetTestFixtures()
+		})
+		// Clean the database as if it's brand new
+		entity.Entities.Truncate(entity.Db())
+		entity.CreateDefaultFixtures()
+		entity.FlushCaches()
+		entity.File{}.RegenerateIndex()
+
+		var count int64
+		c.Db().Model(&entity.Photo{}).Count(&count)
+		assert.Equal(t, int64(0), count)
+
+		adminFeatures := c.ClientRole(acl.RoleAdmin).Settings.Features
+		c.Settings().Features = adminFeatures
+		result := c.ClientUser(true)
+		assert.Nil(t, result.AlbumCategories, "AlbumCategories")
+		assert.NotNil(t, result.Cameras, "Cameras")
+		assert.NotNil(t, result.Lenses, "Lenses")
+		assert.NotNil(t, result.Countries, "Countries")
+		assert.NotNil(t, result.Thumbs, "Thumbs")
+		assert.Nil(t, result.Years, "Years")
+		assert.NotNil(t, result.Colors, "Colors")
+		assert.NotNil(t, result.Categories, "Categories")
+	})
 }
 
+// TestConfig_ClientRoleConfig checks feature settings across session grants.
 func TestConfig_ClientRoleConfig(t *testing.T) {
 	c := NewMinimalTestConfigWithDb("client-role", t.TempDir())
 	c.SetAuthMode(AuthModePasswd)
@@ -131,35 +318,39 @@ func TestConfig_ClientRoleConfig(t *testing.T) {
 		assert.Equal(t, adminFeatures, f)
 
 		expected := customize.FeatureSettings{
-			Account:   true,
-			Albums:    true,
-			Archive:   true,
-			Delete:    true,
-			Download:  true,
-			Edit:      true,
-			BatchEdit: true,
-			Estimates: true,
-			Favorites: true,
-			Files:     true,
-			Folders:   true,
-			Import:    true,
-			Labels:    true,
-			Library:   true,
-			Logs:      true,
-			Calendar:  true,
-			Moments:   true,
-			People:    true,
-			Places:    true,
-			Private:   true,
-			Ratings:   true,
-			Reactions: true,
-			Review:    true,
-			Search:    true,
-			Settings:  true,
-			Share:     true,
-			Services:  true,
-			Upload:    true,
-			Videos:    true,
+			Albums:       true,
+			Archive:      true,
+			Delete:       true,
+			Download:     true,
+			Export:       true,
+			Edit:         true,
+			BatchEdit:    true,
+			Estimates:    true,
+			Favorites:    true,
+			Files:        true,
+			Folders:      true,
+			Import:       true,
+			Labels:       true,
+			Cameras:      true,
+			Lenses:       true,
+			Library:      true,
+			Logs:         true,
+			Calendar:     true,
+			Moments:      true,
+			People:       true,
+			Places:       true,
+			Private:      true,
+			Ratings:      true,
+			Reactions:    true,
+			Review:       true,
+			Search:       true,
+			Account:      true,
+			AppPasswords: true,
+			Settings:     true,
+			Share:        true,
+			Services:     true,
+			Upload:       true,
+			Videos:       true,
 		}
 
 		assert.Equal(t, expected, f)
@@ -171,35 +362,39 @@ func TestConfig_ClientRoleConfig(t *testing.T) {
 		assert.NotEqual(t, adminFeatures, f)
 
 		expected := customize.FeatureSettings{
-			Account:   true,
-			Albums:    true,
-			Archive:   false,
-			Delete:    false,
-			Download:  true,
-			Edit:      false,
-			BatchEdit: false,
-			Estimates: true,
-			Favorites: false,
-			Files:     false,
-			Folders:   true,
-			Import:    false,
-			Labels:    false,
-			Library:   false,
-			Logs:      false,
-			Calendar:  true,
-			Moments:   true,
-			People:    false,
-			Places:    true,
-			Private:   false,
-			Ratings:   false,
-			Reactions: true,
-			Review:    true,
-			Search:    true,
-			Settings:  true,
-			Share:     false,
-			Services:  false,
-			Upload:    false,
-			Videos:    true,
+			Albums:       true,
+			Archive:      false,
+			Delete:       false,
+			Download:     true,
+			Export:       false,
+			Edit:         false,
+			BatchEdit:    false,
+			Estimates:    true,
+			Favorites:    false,
+			Files:        false,
+			Folders:      true,
+			Import:       false,
+			Labels:       false,
+			Cameras:      false,
+			Lenses:       false,
+			Library:      false,
+			Logs:         false,
+			Calendar:     true,
+			Moments:      true,
+			People:       false,
+			Places:       true,
+			Private:      false,
+			Ratings:      false,
+			Reactions:    true,
+			Review:       true,
+			Search:       true,
+			Account:      true,
+			AppPasswords: true,
+			Settings:     true,
+			Share:        false,
+			Services:     false,
+			Upload:       false,
+			Videos:       true,
 		}
 
 		assert.Equal(t, expected, f)
@@ -211,35 +406,39 @@ func TestConfig_ClientRoleConfig(t *testing.T) {
 		assert.NotEqual(t, adminFeatures, f)
 
 		expected := customize.FeatureSettings{
-			Account:   false,
-			Albums:    true,
-			Archive:   false,
-			Delete:    false,
-			Download:  true,
-			Edit:      false,
-			BatchEdit: false,
-			Estimates: true,
-			Favorites: false,
-			Files:     false,
-			Folders:   true,
-			Import:    false,
-			Labels:    false,
-			Library:   false,
-			Logs:      false,
-			Calendar:  true,
-			Moments:   true,
-			People:    false,
-			Places:    true,
-			Private:   false,
-			Ratings:   false,
-			Reactions: false,
-			Review:    true,
-			Search:    false,
-			Settings:  false,
-			Share:     false,
-			Services:  false,
-			Upload:    false,
-			Videos:    false,
+			Albums:       true,
+			Archive:      false,
+			Delete:       false,
+			Download:     true,
+			Export:       false,
+			Edit:         false,
+			BatchEdit:    false,
+			Estimates:    true,
+			Favorites:    false,
+			Files:        false,
+			Folders:      true,
+			Import:       false,
+			Labels:       false,
+			Cameras:      false,
+			Lenses:       false,
+			Library:      false,
+			Logs:         false,
+			Calendar:     true,
+			Moments:      true,
+			People:       false,
+			Places:       true,
+			Private:      false,
+			Ratings:      false,
+			Reactions:    false,
+			Review:       true,
+			Search:       false,
+			Account:      false,
+			AppPasswords: false,
+			Settings:     false,
+			Share:        false,
+			Services:     false,
+			Upload:       false,
+			Videos:       false,
 		}
 
 		assert.Equal(t, expected, f)
@@ -255,6 +454,8 @@ func TestConfig_ClientRoleConfig(t *testing.T) {
 		assert.False(t, f.Calendar)
 		assert.False(t, f.Moments)
 		assert.False(t, f.Labels)
+		assert.False(t, f.Cameras)
+		assert.False(t, f.Lenses)
 		assert.False(t, f.People)
 		assert.False(t, f.Settings)
 		assert.False(t, f.Edit)
@@ -277,17 +478,24 @@ func TestConfig_ClientRoleConfig(t *testing.T) {
 
 func TestConfig_ClientSessionConfig(t *testing.T) {
 	c := NewTestConfig("config")
+	assert.Equal(t, filepath.Dir(c.StoragePath()), c.testFolder, "test folder")
 	c.SetAuthMode(AuthModePasswd)
+
+	// Propagate configures the download signer; without it no session gets a signed token and the
+	// coarse fallback is empty.
+	c.Propagate()
 
 	assert.Equal(t, AuthModePasswd, c.AuthMode())
 
 	adminFeatures := c.ClientRole(acl.RoleAdmin).Settings.Features
 
 	t.Run("RoleAdmin", func(t *testing.T) {
-		cfg := c.ClientSession(entity.SessionFixtures.Pointer("alice"))
+		sess := entity.SessionFixtures.Pointer("alice")
+		want := sess.PreviewToken
+		cfg := c.ClientSession(sess)
 		assert.IsType(t, &ClientConfig{}, cfg)
 		assert.Equal(t, false, cfg.Public)
-		assert.NotEmpty(t, cfg.PreviewToken)
+		assert.Equal(t, want, cfg.PreviewToken)
 		assert.NotEmpty(t, cfg.DownloadToken)
 
 		f := cfg.Settings.Features
@@ -299,6 +507,8 @@ func TestConfig_ClientSessionConfig(t *testing.T) {
 		assert.True(t, f.Calendar)
 		assert.True(t, f.Moments)
 		assert.True(t, f.Labels)
+		assert.True(t, f.Cameras)
+		assert.True(t, f.Lenses)
 		assert.True(t, f.People)
 		assert.True(t, f.Settings)
 		assert.True(t, f.Edit)
@@ -315,11 +525,13 @@ func TestConfig_ClientSessionConfig(t *testing.T) {
 		assert.True(t, f.Share)
 	})
 	t.Run("RoleAdminToken", func(t *testing.T) {
-		cfg := c.ClientSession(entity.SessionFixtures.Pointer("alice_token"))
+		sess := entity.SessionFixtures.Pointer("alice_token")
+		want := sess.PreviewToken
+		cfg := c.ClientSession(sess)
 
 		assert.IsType(t, &ClientConfig{}, cfg)
 		assert.Equal(t, false, cfg.Public)
-		assert.NotEmpty(t, cfg.PreviewToken)
+		assert.Equal(t, want, cfg.PreviewToken)
 		assert.NotEmpty(t, cfg.DownloadToken)
 
 		f := cfg.Settings.Features
@@ -331,6 +543,8 @@ func TestConfig_ClientSessionConfig(t *testing.T) {
 		assert.True(t, f.Calendar)
 		assert.True(t, f.Moments)
 		assert.True(t, f.Labels)
+		assert.True(t, f.Cameras)
+		assert.True(t, f.Lenses)
 		assert.True(t, f.People)
 		assert.True(t, f.Settings)
 		assert.True(t, f.Edit)
@@ -347,11 +561,13 @@ func TestConfig_ClientSessionConfig(t *testing.T) {
 		assert.True(t, f.Share)
 	})
 	t.Run("RoleAdminTokenScope", func(t *testing.T) {
-		cfg := c.ClientSession(entity.SessionFixtures.Pointer("alice_token_scope"))
+		sess := entity.SessionFixtures.Pointer("alice_token_scope")
+		want := sess.PreviewToken
+		cfg := c.ClientSession(sess)
 
 		assert.IsType(t, &ClientConfig{}, cfg)
 		assert.Equal(t, false, cfg.Public)
-		assert.NotEmpty(t, cfg.PreviewToken)
+		assert.Equal(t, want, cfg.PreviewToken)
 		assert.NotEmpty(t, cfg.DownloadToken)
 
 		f := cfg.Settings.Features
@@ -362,6 +578,8 @@ func TestConfig_ClientSessionConfig(t *testing.T) {
 		assert.True(t, f.Albums)
 		assert.False(t, f.Moments)
 		assert.False(t, f.Labels)
+		assert.False(t, f.Cameras)
+		assert.False(t, f.Lenses)
 		assert.False(t, f.People)
 		assert.False(t, f.Settings)
 		assert.True(t, f.Edit)
@@ -377,12 +595,23 @@ func TestConfig_ClientSessionConfig(t *testing.T) {
 		assert.True(t, f.Review)
 		assert.False(t, f.Share)
 	})
+	t.Run("ScopeWithoutDownload", func(t *testing.T) {
+		// A scope that covers no downloadable resource still receives its preview token, but no
+		// download token.
+		sess := entity.SessionFixtures.Pointer("alice_app_password_shares")
+		cfg := c.ClientSession(sess)
+
+		assert.Equal(t, sess.PreviewToken, cfg.PreviewToken)
+		assert.Empty(t, cfg.DownloadToken)
+	})
 	t.Run("RoleVisitor", func(t *testing.T) {
-		cfg := c.ClientSession(entity.SessionFixtures.Pointer("visitor"))
+		sess := entity.SessionFixtures.Pointer("visitor")
+		want := sess.PreviewToken
+		cfg := c.ClientSession(sess)
 
 		assert.IsType(t, &ClientConfig{}, cfg)
 		assert.Equal(t, false, cfg.Public)
-		assert.NotEmpty(t, cfg.PreviewToken)
+		assert.Equal(t, want, cfg.PreviewToken)
 		assert.NotEmpty(t, cfg.DownloadToken)
 
 		f := cfg.Settings.Features
@@ -395,6 +624,8 @@ func TestConfig_ClientSessionConfig(t *testing.T) {
 		assert.True(t, f.Moments)
 		assert.True(t, f.Folders)
 		assert.False(t, f.Labels)
+		assert.False(t, f.Cameras)
+		assert.False(t, f.Lenses)
 		assert.False(t, f.People)
 		assert.False(t, f.Settings)
 		assert.False(t, f.Edit)
@@ -411,12 +642,15 @@ func TestConfig_ClientSessionConfig(t *testing.T) {
 		assert.False(t, f.Share)
 	})
 	t.Run("RoleVisitorTokenMetrics", func(t *testing.T) {
-		cfg := c.ClientSession(entity.SessionFixtures.Pointer("visitor_token_metrics"))
+		sess := entity.SessionFixtures.Pointer("visitor_token_metrics")
+		want := sess.PreviewToken
+		cfg := c.ClientSession(sess)
 
 		assert.IsType(t, &ClientConfig{}, cfg)
 		assert.Equal(t, false, cfg.Public)
-		assert.NotEmpty(t, cfg.PreviewToken)
-		assert.NotEmpty(t, cfg.DownloadToken)
+		assert.Equal(t, want, cfg.PreviewToken)
+		// The metrics scope covers no downloadable resource.
+		assert.Empty(t, cfg.DownloadToken)
 
 		f := cfg.Settings.Features
 		assert.NotEqual(t, adminFeatures, f)
@@ -428,6 +662,8 @@ func TestConfig_ClientSessionConfig(t *testing.T) {
 		assert.True(t, f.Moments)
 		assert.True(t, f.Folders)
 		assert.False(t, f.Labels)
+		assert.False(t, f.Cameras)
+		assert.False(t, f.Lenses)
 		assert.False(t, f.People)
 		assert.False(t, f.Settings)
 		assert.False(t, f.Edit)
@@ -444,12 +680,13 @@ func TestConfig_ClientSessionConfig(t *testing.T) {
 	})
 	t.Run("RoleNone", func(t *testing.T) {
 		sess := entity.SessionFixtures.Pointer("unauthorized")
+		want := sess.PreviewToken
 
 		cfg := c.ClientSession(sess)
 
 		assert.IsType(t, &ClientConfig{}, cfg)
 		assert.Equal(t, false, cfg.Public)
-		assert.NotEmpty(t, cfg.PreviewToken)
+		assert.Equal(t, want, cfg.PreviewToken)
 		assert.NotEmpty(t, cfg.DownloadToken)
 
 		f := cfg.Settings.Features
@@ -460,6 +697,8 @@ func TestConfig_ClientSessionConfig(t *testing.T) {
 		assert.False(t, f.Albums)
 		assert.False(t, f.Moments)
 		assert.False(t, f.Labels)
+		assert.False(t, f.Cameras)
+		assert.False(t, f.Lenses)
 		assert.False(t, f.People)
 		assert.False(t, f.Settings)
 		assert.False(t, f.Edit)
@@ -476,11 +715,13 @@ func TestConfig_ClientSessionConfig(t *testing.T) {
 		assert.False(t, f.Share)
 	})
 	t.Run("Bob", func(t *testing.T) {
-		cfg := c.ClientSession(entity.SessionFixtures.Pointer("bob"))
+		sess := entity.SessionFixtures.Pointer("bob")
+		want := sess.PreviewToken
+		cfg := c.ClientSession(sess)
 
 		assert.IsType(t, &ClientConfig{}, cfg)
 		assert.Equal(t, false, cfg.Public)
-		assert.NotEmpty(t, cfg.PreviewToken)
+		assert.Equal(t, want, cfg.PreviewToken)
 		assert.NotEmpty(t, cfg.DownloadToken)
 		f := cfg.Settings.Features
 
@@ -490,6 +731,8 @@ func TestConfig_ClientSessionConfig(t *testing.T) {
 		assert.True(t, f.Calendar)
 		assert.True(t, f.Moments)
 		assert.True(t, f.Labels)
+		assert.True(t, f.Cameras)
+		assert.True(t, f.Lenses)
 		assert.True(t, f.People)
 		assert.True(t, f.Settings)
 		assert.True(t, f.Edit)
@@ -506,12 +749,13 @@ func TestConfig_ClientSessionConfig(t *testing.T) {
 		assert.True(t, f.Share)
 	})
 	t.Run("TokenMetrics", func(t *testing.T) {
-		cfg := c.ClientSession(entity.SessionFixtures.Pointer("token_metrics"))
+		sess := entity.SessionFixtures.Pointer("token_metrics")
+		cfg := c.ClientSession(sess)
 
 		assert.IsType(t, &ClientConfig{}, cfg)
 		assert.Equal(t, false, cfg.Public)
-		assert.NotEmpty(t, cfg.PreviewToken)
-		assert.NotEmpty(t, cfg.DownloadToken)
+		assert.Empty(t, cfg.PreviewToken)
+		assert.Empty(t, cfg.DownloadToken)
 
 		f := cfg.Settings.Features
 		assert.NotEqual(t, adminFeatures, f)
@@ -522,6 +766,8 @@ func TestConfig_ClientSessionConfig(t *testing.T) {
 		assert.False(t, f.Moments)
 		assert.False(t, f.Folders)
 		assert.False(t, f.Labels)
+		assert.False(t, f.Cameras)
+		assert.False(t, f.Lenses)
 		assert.False(t, f.People)
 		assert.False(t, f.Settings)
 		assert.False(t, f.Edit)
@@ -537,12 +783,13 @@ func TestConfig_ClientSessionConfig(t *testing.T) {
 		assert.False(t, f.Share)
 	})
 	t.Run("TokenSettings", func(t *testing.T) {
-		cfg := c.ClientSession(entity.SessionFixtures.Pointer("token_settings"))
+		sess := entity.SessionFixtures.Pointer("token_settings")
+		cfg := c.ClientSession(sess)
 
 		assert.IsType(t, &ClientConfig{}, cfg)
 		assert.Equal(t, false, cfg.Public)
-		assert.NotEmpty(t, cfg.PreviewToken)
-		assert.NotEmpty(t, cfg.DownloadToken)
+		assert.Empty(t, cfg.PreviewToken)
+		assert.Empty(t, cfg.DownloadToken)
 
 		f := cfg.Settings.Features
 		assert.NotEqual(t, adminFeatures, f)
@@ -553,6 +800,8 @@ func TestConfig_ClientSessionConfig(t *testing.T) {
 		assert.False(t, f.Calendar)
 		assert.False(t, f.Moments)
 		assert.False(t, f.Labels)
+		assert.False(t, f.Cameras)
+		assert.False(t, f.Lenses)
 		assert.False(t, f.People)
 		assert.True(t, f.Settings)
 		assert.False(t, f.Edit)
@@ -581,6 +830,7 @@ func TestConfig_ClientSessionConfig(t *testing.T) {
 		f := cfg.Settings.Features
 		assert.Equal(t, adminFeatures, f)
 	})
+	c.CleanupTestFolder()
 }
 
 func TestConfig_Flags(t *testing.T) {

@@ -13,6 +13,8 @@ func (s *Settings) ApplyACL(list acl.ACL, role acl.Role) *Settings {
 	m.Features.Favorites = s.Features.Favorites && list.AllowAny(acl.ResourceFavorites, role, acl.Permissions{acl.ActionSearch})
 	m.Features.Folders = s.Features.Folders && list.AllowAny(acl.ResourceFolders, role, acl.Permissions{acl.ActionSearch})
 	m.Features.Labels = s.Features.Labels && list.AllowAny(acl.ResourceLabels, role, acl.Permissions{acl.ActionSearch})
+	m.Features.Cameras = s.Features.Cameras && list.AllowAny(acl.ResourceCameras, role, acl.Permissions{acl.ActionSearch})
+	m.Features.Lenses = s.Features.Lenses && list.AllowAny(acl.ResourceLenses, role, acl.Permissions{acl.ActionSearch})
 	m.Features.Calendar = s.Features.Calendar && list.AllowAny(acl.ResourceCalendar, role, acl.Permissions{acl.ActionSearch})
 	m.Features.Moments = s.Features.Moments && list.AllowAny(acl.ResourceMoments, role, acl.Permissions{acl.ActionSearch})
 	m.Features.People = s.Features.People && list.AllowAny(acl.ResourcePeople, role, acl.Permissions{acl.ActionSearch})
@@ -33,6 +35,7 @@ func (s *Settings) ApplyACL(list acl.ACL, role acl.Role) *Settings {
 
 	// Browse, upload and download files.
 	m.Features.Upload = s.Features.Upload && list.Allow(acl.ResourcePhotos, role, acl.ActionUpload)
+	m.Features.Export = s.Features.Export && list.AllowAll(acl.ResourcePhotos, role, acl.Permissions{acl.AccessAll, acl.ActionDownload})
 	m.Features.Download = s.Features.Download && !s.Download.Disabled && list.Allow(acl.ResourcePhotos, role, acl.ActionDownload)
 
 	// Library.
@@ -43,6 +46,7 @@ func (s *Settings) ApplyACL(list acl.ACL, role acl.Role) *Settings {
 
 	// Settings.
 	m.Features.Account = s.Features.Account && list.Allow(acl.ResourcePassword, role, acl.ActionUpdate)
+	m.Features.AppPasswords = s.Features.AppPasswords && list.Allow(acl.ResourcePassword, role, acl.ActionUpdate)
 	m.Features.Settings = s.Features.Settings && list.AllowAny(acl.ResourceSettings, role, acl.Permissions{acl.ActionUpdate})
 	m.Features.Services = s.Features.Services && list.Allow(acl.ResourceServices, role, acl.ActionUpload)
 

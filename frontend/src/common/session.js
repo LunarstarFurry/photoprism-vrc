@@ -1,6 +1,6 @@
 /*
 
-Copyright (c) 2018 - 2025 PhotoPrism UG. All rights reserved.
+Copyright (c) 2018 - 2026 PhotoPrism UG. All rights reserved.
 
     This program is free software: you can redistribute it and/or modify
     it under Version 3 of the GNU Affero General Public License (the "AGPL"):
@@ -13,7 +13,7 @@ Copyright (c) 2018 - 2025 PhotoPrism UG. All rights reserved.
 
     The AGPL is supplemented by our Trademark and Brand Guidelines,
     which describe how our Brand Assets may be used:
-    <https://www.photoprism.app/trademark>
+    <https://www.photoprism.app/trademark/>
 
 Feel free to send an email to hello@photoprism.app if you have questions,
 want to support our work, or just want to say hello.
@@ -26,6 +26,14 @@ Additional information can be found in our Developer Guide:
 import $api from "common/api";
 import $event from "common/event";
 import { createNamespacedStorage } from "common/storage";
+import {
+  persistInstanceIdentity,
+  InstanceIdentityKeys,
+  instanceTitle,
+  listLogoutTargets,
+  signOutInstances,
+  clearInstanceStorage,
+} from "common/instances";
 import { $view } from "common/view";
 import User from "model/user";
 import Socket from "websocket.js";
@@ -34,6 +42,20 @@ const RequestHeader = "X-Auth-Token";
 const PublicSessionID = "a9b8ff820bf40ab451910f8bbfe401b2432446693aa539538fbd2399560a722f";
 const PublicAuthToken = "234200000000000000000000000000000000000000000000";
 const LoginPage = "login";
+
+// login.* keys survive auth.gohtml's session.* wipe after the OIDC roundtrip.
+const LoginRedirectKey = "login.next";
+const LogoutSignalKey = "login.logout";
+// One-shot flag (per browser tab) for the OIDC auto-redirect attempt. Stored
+// in sessionStorage so a closed tab clears it, and so a failed/abandoned OIDC
+// roundtrip can fall back to the local login form instead of looping.
+const OidcAttemptKey = "login.oidc.attempt";
+// Loop guard for the post-login redirect (login.next): the timestamp of the last
+// follow, and the window within which a re-entry counts as a bounce-back loop.
+// Lets /login fall back to the default route instead of looping when the redirect
+// target (e.g. the OIDC OP /api/v1/oauth/authorize) can't authenticate the navigation.
+const LoginRedirectAttemptKey = "login.next.at";
+const LoginRedirectLoopWindow = 6000;
 
 const resolveStorageNamespace = (config) => {
   if (typeof config?.storageNamespace === "string" && config.storageNamespace !== "") {
@@ -140,6 +162,11 @@ export default class Session {
     // Authenticated?
     this.auth = this.isUser();
 
+    // Record this instance's identity so peers on a shared domain can switch to it.
+    if (this.auth) {
+      this.recordInstanceIdentity();
+    }
+
     // Subscribe to session events.
     $event.subscribe("session.logout", () => {
       return this.onLogout();
@@ -179,7 +206,7 @@ export default class Session {
 
     try {
       return JSON.parse(value);
-    } catch (_error) {
+    } catch {
       this.storage.removeItem(key);
       return null;
     }
@@ -324,6 +351,8 @@ export default class Session {
     this.clearLegacyKey("session.scope");
     this.clearLegacyKey("authError");
     this.clearLegacyKey("session.error");
+    this.clearLegacyKey("session.messageId");
+    this.clearLegacyKey("session.messageParams");
 
     delete $api.defaults.headers.common[RequestHeader];
   }
@@ -430,6 +459,35 @@ export default class Session {
     this.user = new User(user);
     this.storage.setItem(this.storageKey + ".user", JSON.stringify(user));
     this.auth = this.isUser();
+
+    if (this.auth) {
+      this.recordInstanceIdentity();
+    }
+  }
+
+  // recordInstanceIdentity stores this instance's SiteUrl, display title, and app
+  // icon under the active namespace so other instances on the same origin can offer
+  // a switch entry. The title prefers the configured site name (see instanceTitle)
+  // and falls back to the distinctive base-path segment for unbranded instances;
+  // the icon is the root-relative app icon, which resolves on the shared origin from
+  // any peer. No-op when the site URL is unknown or storage is unavailable.
+  recordInstanceIdentity() {
+    const values = this.config?.values;
+
+    if (!values || !values.siteUrl) {
+      return;
+    }
+
+    persistInstanceIdentity(this.storage, {
+      url: values.siteUrl,
+      // Frontend URI (e.g. "/portal" or "/i/pro-1/library") so peers open the
+      // app entry point rather than a web-overlay landing page at the site root.
+      route: this.config?.frontendUri,
+      title: instanceTitle(values),
+      icon: this.config.getIcon(),
+      // Flag the Portal's own session so Sign-Out delegates it to the Portal end-session endpoint.
+      portal: !!this.config?.isPortal?.(),
+    });
   }
 
   getUser() {
@@ -472,32 +530,86 @@ export default class Session {
     return this;
   }
 
+  // Returns the post-login redirect target: in-memory first, then namespaced
+  // storage (survives the OIDC roundtrip), else `defaultUrl` (defaults to "/";
+  // pass null to branch on "no redirect recorded").
   getLoginRedirectUrl(defaultUrl) {
-    if (!defaultUrl) {
-      defaultUrl = "/";
+    if (this.loginRedirect) {
+      return this.loginRedirect;
     }
 
-    return this.loginRedirect ? this.loginRedirect : defaultUrl;
+    const stored = this.localStorage?.getItem(LoginRedirectKey);
+    if (stored) {
+      return stored;
+    }
+
+    return defaultUrl === undefined ? "/" : defaultUrl;
+  }
+
+  // Reports whether a deep-link redirect target is recorded. The /login
+  // route guard uses this as the deep-link arrival signal: a stored URL
+  // means the global router guard bounced the user here from a protected
+  // page, while a missing one means the user opened /login directly.
+  hasLoginRedirectUrl() {
+    if (this.loginRedirect) {
+      return true;
+    }
+    return !!this.localStorage?.getItem(LoginRedirectKey);
   }
 
   clearLoginRedirectUrl() {
     this.loginRedirect = false;
+    this.localStorage?.removeItem(LoginRedirectKey);
+    // The OIDC attempt flag is paired with the deep-link target: clearing
+    // the target (after successful login or logout) frees the next deep-link
+    // arrival to trigger a fresh OIDC roundtrip.
+    this.sessionStorage?.removeItem(OidcAttemptKey);
 
     return this;
   }
 
+  // Records the post-login target. Persisted so it survives the OIDC roundtrip.
   setLoginRedirectUrl(url) {
-    if (!url) {
+    if (this.invalidRedirectUrl(url)) {
       return this.clearLoginRedirectUrl();
     }
 
     this.loginRedirect = url;
+    this.localStorage?.setItem(LoginRedirectKey, url);
 
     return this;
   }
 
+  // invalidRedirectUrl rejects empty or login-page post-login redirect targets.
+  invalidRedirectUrl(url) {
+    if (typeof url !== "string") {
+      return true;
+    }
+    const trimmed = url.trim();
+    if (trimmed === "") {
+      return true;
+    }
+    let path = trimmed;
+    try {
+      const origin = (typeof window !== "undefined" && window.location?.origin) || "http://localhost";
+      path = new URL(trimmed, origin).pathname;
+    } catch {
+      path = trimmed.split("?")[0].split("#")[0];
+    }
+    path = path.replace(/\/+$/, "");
+    if (!path) {
+      return true;
+    }
+    const loginUri = (this.config?.loginUri || "").replace(/\/+$/, "");
+    if (loginUri && path === loginUri) {
+      return true;
+    }
+    return path.endsWith("/login");
+  }
+
+  // isUser returns true when the current session has a fully-loaded user record.
   isUser() {
-    return this.user && this.user.hasId();
+    return !!this.user?.hasId();
   }
 
   getDefaultRoute() {
@@ -508,12 +620,14 @@ export default class Session {
     return this.config.getDefaultRoute();
   }
 
+  // isAdmin returns true when the session belongs to an admin or super-admin user.
   isAdmin() {
-    return this.user && this.user.hasId() && (this.user.Role === "admin" || this.user.SuperAdmin);
+    return !!(this.user?.hasId() && (this.user.Role === "admin" || this.user.SuperAdmin));
   }
 
+  // isSuperAdmin returns true when the session belongs to a super-admin user.
   isSuperAdmin() {
-    return this.user && this.user.hasId() && this.user.SuperAdmin;
+    return !!(this.user?.hasId() && this.user.SuperAdmin);
   }
 
   isAnonymous() {
@@ -541,6 +655,9 @@ export default class Session {
     this.clearNamespacedKey(this.storageKey + ".user");
     this.clearLegacyKey("user");
     this.clearLegacyKey("session.user");
+    // Drop this instance's switcher identity so a logged-out instance is no
+    // longer offered as a switch target by peers on the same shared domain.
+    InstanceIdentityKeys.forEach((key) => this.clearNamespacedKey(key));
   }
 
   deleteClipboard() {
@@ -554,6 +671,9 @@ export default class Session {
     this.deleteData();
     this.deleteUser();
     this.deleteClipboard();
+    // Clear the Photo LRU so cached metadata cannot leak across role
+    // changes. Dynamic import avoids the session ↔ photo module cycle.
+    import("model/photo").then((m) => m.default.clearCache()).catch(() => {});
   }
 
   sendClientInfo() {
@@ -567,7 +687,7 @@ export default class Session {
 
     try {
       Socket.send(JSON.stringify(clientInfo));
-    } catch (e) {
+    } catch {
       if (this.config.debug) {
         console.log("session: can't use websocket, not connected (yet)");
       }
@@ -682,24 +802,110 @@ export default class Session {
     $view.redirect(url, delay, true);
   }
 
-  onLogout(noRedirect) {
-    // Delete all authentication and session data.
-    this.reset();
+  // isClusterSession reports whether the current session was signed in through the
+  // cluster Portal OIDC provider, so sign-out runs the cluster-wide fan-out and
+  // clears the Portal OP cookie. Read before reset()/signOut() clears the provider.
+  isClusterSession() {
+    return this.getProvider() === "oidc" && !!this.config?.isClusterOidc?.();
+  }
 
-    // Perform redirect?
-    if (noRedirect !== true && !this.isLogin()) {
-      this.followRedirect(this.config.loginUri);
+  // logoutRedirectUri returns the post-sign-out landing URL: a cluster-OIDC session
+  // goes directly to the Portal login page (re-auth → instance chooser), everyone
+  // else to the local login. The instance OIDC roundtrip is never re-initiated on
+  // sign-out, since that would pin the Portal login's return_to to the just-left
+  // instance and dead-end accounts without a grant there; when the Portal login URL
+  // is unknown, the local form is the fallback landing. Read provider before reset().
+  logoutRedirectUri() {
+    if (this.isClusterSession()) {
+      return this.config.portalLoginUri() || this.config.loginUri;
     }
 
-    return Promise.resolve();
+    return this.config.loginUri;
+  }
+
+  // onLogout resets client state and resolves to the post-sign-out landing URL. It follows
+  // the redirect itself unless noRedirect is set, in which case the caller does (e.g. the
+  // /logout route guard), so the resolved URL — the provider logout URL when present — is
+  // returned either way.
+  onLogout(noRedirect, providerLogoutUri) {
+    // Prefer the backend's provider logout URL (RP-initiated logout); else the local target,
+    // resolved before reset() clears the auth provider.
+    const redirectUri = providerLogoutUri || this.logoutRedirectUri();
+
+    this.reset();
+
+    // Drop stale deep-link redirects; raise one-shot flag so /login skips
+    // auto-OIDC once when PHOTOPRISM_OIDC_REDIRECT is on.
+    this.clearLoginRedirectUrl();
+    this.localStorage?.setItem(LogoutSignalKey, "1");
+
+    if (noRedirect !== true && !this.isLogin()) {
+      this.followRedirect(redirectUri);
+    }
+
+    return Promise.resolve(redirectUri);
+  }
+
+  // Reads and clears the one-shot logout flag set by onLogout().
+  consumeLogoutSignal() {
+    if (!this.localStorage) {
+      return false;
+    }
+    const raised = this.localStorage.getItem(LogoutSignalKey) === "1";
+    if (raised) {
+      this.localStorage.removeItem(LogoutSignalKey);
+    }
+    return raised;
+  }
+
+  // Marks that an OIDC auto-redirect attempt is in flight for this tab.
+  markOidcAttempt() {
+    this.sessionStorage?.setItem(OidcAttemptKey, "1");
+    return this;
+  }
+
+  // Reads and clears the OIDC attempt flag. Returns true once per tab between
+  // markOidcAttempt() calls, so /login can fall back to the form when an OIDC
+  // roundtrip fails or is abandoned instead of looping back to the IdP.
+  consumeOidcAttempt() {
+    if (!this.sessionStorage) {
+      return false;
+    }
+    const raised = this.sessionStorage.getItem(OidcAttemptKey) === "1";
+    if (raised) {
+      this.sessionStorage.removeItem(OidcAttemptKey);
+    }
+    return raised;
+  }
+
+  // Records the time we last followed the post-login redirect, so a fast
+  // bounce-back can be recognized as a loop. Stored per browser tab.
+  markLoginRedirectAttempt() {
+    this.sessionStorage?.setItem(LoginRedirectAttemptKey, String(Date.now()));
+    return this;
+  }
+
+  // loginRedirectLooping reports whether the post-login redirect was followed
+  // within the last LoginRedirectLoopWindow ms, i.e. the target bounced straight
+  // back without authenticating the navigation — used to break redirect loops.
+  loginRedirectLooping() {
+    const at = parseInt(this.sessionStorage?.getItem(LoginRedirectAttemptKey) || "0", 10);
+    return at > 0 && Date.now() - at < LoginRedirectLoopWindow;
+  }
+
+  // Clears the post-login redirect loop guard.
+  clearLoginRedirectAttempt() {
+    this.sessionStorage?.removeItem(LoginRedirectAttemptKey);
+    return this;
   }
 
   logout(noRedirect) {
     if (this.isAuthenticated()) {
       return $api
         .delete("session")
-        .then(() => {
-          return this.onLogout(noRedirect);
+        .then((resp) => {
+          // providerLogoutUri (RP-initiated logout) redirects the browser to the provider.
+          return this.onLogout(noRedirect, resp?.data?.providerLogoutUri);
         })
         .catch(() => {
           return this.onLogout(noRedirect);
@@ -707,5 +913,56 @@ export default class Session {
     } else {
       return this.onLogout(noRedirect);
     }
+  }
+
+  // revokePeerSessions revokes reachable peer sessions and clears their stored keys.
+  // Keys are cleared synchronously; the returned promise settles peer revocation.
+  // Unwrap stores so cross-namespace keys are not prefixed twice.
+  revokePeerSessions() {
+    const rawStore = (s) => (s && s.storage ? s.storage : s);
+    const stores = [rawStore(this.localStorage), rawStore(this.sessionStorage)];
+
+    let targets = [];
+    try {
+      targets = listLogoutTargets({ currentNamespace: this.storageNamespace, stores });
+    } catch {
+      targets = [];
+    }
+
+    // Cluster-OIDC Sign-Out delegates the Portal session to its end-session endpoint (which
+    // performs the upstream RP-logout); revoking it here would strip the session it needs.
+    let deleteTargets = targets;
+    if (this.isClusterSession() && this.config?.oidcLogout?.()) {
+      deleteTargets = targets.filter((t) => !t.portal);
+    }
+
+    const revoked = signOutInstances(deleteTargets).catch(() => {});
+    clearInstanceStorage(
+      targets.map((t) => t.namespace),
+      stores
+    );
+    return revoked;
+  }
+
+  // logoutEverywhere performs a cluster-wide Sign-Out (Tier 2): best-effort revokes
+  // every reachable peer instance's session server-side, drops their local tokens,
+  // then signs out the current instance (clearing the OP cookie) and redirects.
+  // Shared-domain (same-origin) clusters only; always resolves.
+  logoutEverywhere(noRedirect) {
+    return this.revokePeerSessions().then(() => this.logout(noRedirect));
+  }
+
+  // Synchronous cluster-wide logout for SPA route guards (/logout): revokes every
+  // reachable peer session and the current one (best-effort, in the background),
+  // clears shared storage, then resets client state. Firing the current DELETE with
+  // the captured token avoids a 401 echo that would re-raise the logout flag.
+  signOut() {
+    this.revokePeerSessions();
+    const token = this.getAuthToken();
+    if (token) {
+      $api.delete("session", { headers: { [RequestHeader]: token } }).catch(() => {});
+    }
+    this.onLogout(true);
+    return this;
   }
 }

@@ -3,9 +3,70 @@ package clean
 import (
 	"strings"
 	"testing"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/assert"
 )
+
+func TestAuthRunes(t *testing.T) {
+	t.Run("Empty", func(t *testing.T) {
+		assert.Equal(t, 0, AuthRunes(""))
+		assert.Equal(t, 0, AuthRunes("  \x00<>  "))
+	})
+	t.Run("Dropped", func(t *testing.T) {
+		assert.Equal(t, 9, AuthRunes("  Photo\x01 <Adm>  "))
+		assert.Equal(t, 1, AuthRunes("< x"))
+	})
+	t.Run("Uncapped", func(t *testing.T) {
+		assert.Equal(t, 600, AuthRunes(strings.Repeat("a", 600)))
+		assert.Equal(t, AuthMaxRunes+1, AuthRunes(strings.Repeat("a", AuthMaxRunes)+"b"))
+	})
+	t.Run("TrailingOther", func(t *testing.T) {
+		assert.Equal(t, AuthMaxRunes+1, AuthRunes(strings.Repeat("a", AuthMaxRunes)+"\u00a0"))
+		assert.Equal(t, 2, AuthRunes("\xff\xfe"))
+	})
+	t.Run("MatchesAuth", func(t *testing.T) {
+		for _, s := range []string{" Photo  Admins ", "\tA<b>c\x7fd ", "\u00a0x", strings.Repeat("\u023a", 100), strings.Repeat("a", AuthMaxRunes)} {
+			assert.Equal(t, utf8.RuneCountInString(Auth(s)), AuthRunes(s), s)
+		}
+	})
+}
+
+func TestGroupID(t *testing.T) {
+	t.Run("Success", func(t *testing.T) {
+		assert.Equal(t, "photo admins", GroupID(" Photo Admins "))
+		assert.Equal(t, strings.Repeat("a", AuthMaxRunes), GroupID(strings.Repeat("A", AuthMaxRunes)))
+		assert.Len(t, GroupID(strings.Repeat("\u023a", 170)), GroupIDMaxBytes)
+	})
+	t.Run("Empty", func(t *testing.T) {
+		assert.Equal(t, "", GroupID(""))
+		assert.Equal(t, "", GroupID("\x00<>"))
+	})
+	t.Run("TooLong", func(t *testing.T) {
+		assert.Equal(t, "", GroupID(strings.Repeat("a", AuthMaxRunes+1)))
+		assert.Equal(t, "", GroupID(strings.Repeat("a", 253)+"  users"))
+		assert.Equal(t, "", GroupID(strings.Repeat("\u023a", 171)))
+		assert.Equal(t, "", GroupID(strings.Repeat("\xff", 200)))
+	})
+	t.Run("Idempotent", func(t *testing.T) {
+		for _, s := range []string{"Photo Admins", strings.Repeat("\u023a", 170), strings.Repeat("A", AuthMaxRunes), "\xffx"} {
+			id := GroupID(s)
+			assert.NotEmpty(t, id, s)
+			assert.Equal(t, id, GroupID(id), s)
+		}
+	})
+}
+
+func TestGroupIDTooLong(t *testing.T) {
+	assert.False(t, GroupIDTooLong(""))
+	assert.False(t, GroupIDTooLong("\x00<>"))
+	assert.False(t, GroupIDTooLong(strings.Repeat("a", AuthMaxRunes)+"   "))
+	assert.True(t, GroupIDTooLong(strings.Repeat("a", AuthMaxRunes+1)))
+	assert.True(t, GroupIDTooLong(strings.Repeat("\u3042", 171)))
+	assert.True(t, GroupIDTooLong(strings.Repeat("\x01", 600)+"admins"))
+	assert.False(t, GroupIDTooLong(strings.Repeat("\x01", 600)))
+}
 
 func TestAuth(t *testing.T) {
 	t.Run("Admin", func(t *testing.T) {
@@ -72,6 +133,15 @@ func TestHandle(t *testing.T) {
 	})
 	t.Run("Empty", func(t *testing.T) {
 		assert.Equal(t, "", Handle("  "))
+	})
+	t.Run("LeadingDot", func(t *testing.T) {
+		for _, s := range []string{".", "..", "...", "/", "./", " . ", ".gitignore", ".Bob", "(bob)", "..@example.com", "corp\\..", "x\\.bob"} {
+			assert.Equal(t, "", Handle(s), s)
+		}
+	})
+	t.Run("InnerDots", func(t *testing.T) {
+		assert.Equal(t, "jane..doe", Handle("Jane .Doe"))
+		assert.Equal(t, "bob.", Handle("bob."))
 	})
 	t.Run("ControlCharacter", func(t *testing.T) {
 		assert.Equal(t, "admin!", Handle("admin!"+string(rune(1))))
@@ -232,5 +302,113 @@ func TestPasscode(t *testing.T) {
 	})
 	t.Run("Space", func(t *testing.T) {
 		assert.Equal(t, "", Passcode("    	"))
+	})
+}
+
+// identities are the helpers that decide what a stored account name may contain.
+var identities = map[string]func(string) string{"Username": Username, "Handle": Handle}
+
+func TestIdentityHelpersEmitOnlyVisibleText(t *testing.T) {
+	for name, sanitize := range identities {
+		t.Run(name, func(t *testing.T) {
+			eachRune(func(r rune) {
+				for _, out := range sanitize("ab" + string(r) + "cd") {
+					if endsLine(out) || drivesTerminal(out) || reordersText(out) {
+						t.Fatalf("input U+%04X produced U+%04X", r, out)
+					}
+				}
+			})
+		})
+	}
+}
+
+func TestIdentityHelpersRemoveEveryHiddenRune(t *testing.T) {
+	// hidesText selects from the standard library's categories, so a classifier that stops
+	// rejecting one is caught here instead of narrowing what the test looks at.
+	for name, sanitize := range identities {
+		t.Run(name, func(t *testing.T) {
+			eachRune(func(r rune) {
+				if !hidesText(r) {
+					return
+				}
+				assert.NotContains(t, sanitize("ab"+string(r)+"cd"), string(r), "U+%04X survived", r)
+			})
+		})
+	}
+}
+
+func TestIdentityHelpersNormalizeLookalikeSpaces(t *testing.T) {
+	// Asserted exactly: the two helpers dispose of a space differently, and a rendering that
+	// dropped the character would also satisfy NotContains.
+	t.Run("EveryLookalike", func(t *testing.T) {
+		eachRune(func(r rune) {
+			if r == ' ' || !unicode.Is(unicode.Zs, r) {
+				return
+			}
+			assert.Equal(t, "ab cd", Username("ab"+string(r)+"cd"), "U+%04X", r)
+			assert.Equal(t, "ab.cd", Handle("ab"+string(r)+"cd"), "U+%04X", r)
+		})
+	})
+	t.Run("OrdinarySpaceIsNotFolded", func(t *testing.T) {
+		// Each helper already had a disposition for it, and the fold above must not change one.
+		assert.Equal(t, "ab cd", Username("ab cd"))
+		assert.Equal(t, "ab.cd", Handle("ab cd"))
+	})
+}
+
+func TestIdentityHelpersKeepLetterFormingJoiners(t *testing.T) {
+	// Both form letters in names people really have, so neither may be removed.
+	for label, r := range map[string]rune{"ZWNJ": 0x200C, "ZWJ": 0x200D} {
+		for name, sanitize := range identities {
+			t.Run(name+"/"+label, func(t *testing.T) {
+				assert.Contains(t, sanitize("ab"+string(r)+"cd"), string(r))
+			})
+		}
+	}
+}
+
+func TestIdentityHelpersKeepOrdinaryNames(t *testing.T) {
+	// Asserted exactly, so a helper that returned its input with something appended still fails.
+	// The combining mark is deliberate: it is not printable on its own but forms a real letter.
+	for name, sanitize := range identities {
+		for _, s := range []string{"ünterlagen", "日本語", "δοκιμή", "صورة", "user-2019", "nguye\u0302n"} {
+			t.Run(name+"/"+s, func(t *testing.T) {
+				assert.Equal(t, s, sanitize(s))
+			})
+		}
+	}
+}
+
+func TestIdentityHelpersAreIdempotent(t *testing.T) {
+	// The stored name and the lookup key are both produced by these helpers, so a value that is
+	// not their own fixpoint stops matching itself and fails authn.Username.
+	for name, sanitize := range identities {
+		t.Run(name, func(t *testing.T) {
+			eachRune(func(r rune) {
+				for _, in := range []string{"ab" + string(r), string(r) + "ab", "a" + string(r) + "b",
+					"ab\u00a0" + string(r), string(r) + "\u00a0ab"} {
+					out := sanitize(in)
+					assert.Equal(t, out, sanitize(out), "U+%04X in %q", r, in)
+				}
+			})
+		})
+	}
+}
+
+func FuzzGroupID(f *testing.F) {
+	for _, s := range []string{"Photo Admins", " \x01<a>", strings.Repeat("\u023a", 170), strings.Repeat("a", 256), "\xff\xfe"} {
+		f.Add(s)
+	}
+
+	f.Fuzz(func(t *testing.T, s string) {
+		id := GroupID(s)
+
+		if id == "" {
+			return
+		}
+
+		assert.Equal(t, strings.ToLower(Auth(s)), id)
+		assert.Equal(t, id, GroupID(id))
+		assert.LessOrEqual(t, len(id), GroupIDMaxBytes)
 	})
 }

@@ -5,9 +5,9 @@
         <input ref="upload" type="file" class="d-none input-upload" accept="image/png, image/jpeg" @change.stop="onUploadAvatar()" />
         <v-card flat tile class="bg-background ma-0 pa-0">
           <v-card-actions class="ma-0 pa-0">
-            <v-row align="start" dense>
-              <v-col cols="8" sm="9" md="10" align-self="stretch" class="pa-0 d-flex">
-                <v-row align="start" dense>
+            <v-row class="align-start" density="compact">
+              <v-col cols="8" sm="9" md="10" class="pa-0 d-flex align-self-stretch">
+                <v-row class="align-start" density="compact">
                   <v-col md="2" class="hidden-sm-and-down">
                     <v-text-field
                       v-model="user.Details.NameTitle"
@@ -72,7 +72,7 @@
                       v-model="user.Email"
                       type="email"
                       maxlength="255"
-                      :disabled="busy"
+                      :disabled="busy || !canEditEmail"
                       autocomplete="off"
                       autocorrect="off"
                       autocapitalize="none"
@@ -84,7 +84,7 @@
                   </v-col>
                 </v-row>
               </v-col>
-              <v-col class="text-center" cols="4" sm="3" md="2" align-self="center">
+              <v-col class="text-center align-self-center" cols="4" sm="3" md="2">
                 <v-avatar :size="$vuetify.display.md ? 100 : 112" :class="{ clickable: !busy }" @click.stop.prevent="onChangeAvatar()">
                   <v-img
                     :alt="accountInfo"
@@ -133,7 +133,7 @@
             {{ $gettext(`Security and Access`) }}
           </v-card-title>
           <v-card-actions class="ma-0 pa-0">
-            <v-row align="start" dense>
+            <v-row class="align-start" density="compact">
               <v-col cols="12" sm="6">
                 <v-btn
                   block
@@ -162,7 +162,7 @@
                   <v-icon v-else end>mdi-shield-alert</v-icon>
                 </v-btn>
               </v-col>
-              <v-col cols="12" sm="6">
+              <v-col v-if="$config.featAppPasswords()" cols="12" sm="6">
                 <v-btn
                   block
                   variant="flat"
@@ -173,6 +173,19 @@
                 >
                   {{ $gettext(`Apps and Devices`) }}
                   <v-icon end>mdi-cellphone-link</v-icon>
+                </v-btn>
+              </v-col>
+              <v-col v-if="showConnectedApps" cols="12" sm="6">
+                <v-btn
+                  block
+                  variant="flat"
+                  color="button"
+                  class="action-connected-apps-dialog"
+                  :disabled="isPublic || isDemo || user.Name === ''"
+                  @click.stop="showDialog('connectedApps')"
+                >
+                  {{ $gettext(`Connected Apps`) }}
+                  <v-icon end>mdi-connection</v-icon>
                 </v-btn>
               </v-col>
               <v-col cols="12" sm="6">
@@ -196,7 +209,7 @@
             {{ $gettext(`Birth Date`) }}
           </v-card-title>
           <v-card-actions class="ma-0 pa-0">
-            <v-row align="start" dense>
+            <v-row class="align-start" density="compact">
               <v-col cols="6" sm="3">
                 <v-combobox
                   :model-value="user?.Details?.BirthDay > 0 ? user.Details.BirthDay : null"
@@ -263,7 +276,7 @@
             {{ $gettext(`Contact Details`) }}
           </v-card-title>
           <v-card-actions class="ma-0 pa-0">
-            <v-row align="start" dense>
+            <v-row class="align-start" density="compact">
               <v-col cols="12" sm="7">
                 <v-text-field
                   v-model="user.Details.Location"
@@ -317,6 +330,7 @@
       </v-form>
     </div>
     <p-settings-apps :visible="dialog.apps" :model="user" @close="dialog.apps = false"></p-settings-apps>
+    <p-settings-connected-apps :visible="dialog.connectedApps" :model="user" @close="dialog.connectedApps = false"></p-settings-connected-apps>
     <p-settings-passcode :visible="dialog.passcode" :model="user" @close="dialog.passcode = false" @update-user="updateUser()"></p-settings-passcode>
     <p-settings-password :visible="dialog.password" :model="user" @close="dialog.password = false"></p-settings-password>
     <p-settings-webdav :visible="dialog.webdav" @close="dialog.webdav = false"></p-settings-webdav>
@@ -325,10 +339,10 @@
 
 <script>
 import PSettingsApps from "component/settings/apps.vue";
+import PSettingsConnectedApps from "component/settings/connected-apps.vue";
 import PSettingsPasscode from "component/settings/passcode.vue";
 import PSettingsPassword from "component/settings/password.vue";
 import PSettingsWebdav from "component/settings/webdav.vue";
-import countries from "options/countries.json";
 import User from "model/user";
 import * as options from "options/options";
 import { rules } from "common/form";
@@ -337,6 +351,7 @@ export default {
   name: "PSettingsAccount",
   components: {
     PSettingsApps,
+    PSettingsConnectedApps,
     PSettingsPasscode,
     PSettingsPassword,
     PSettingsWebdav,
@@ -355,10 +370,11 @@ export default {
       valid: true,
       rtl: this.$isRtl,
       user: user,
-      countries: countries,
+      countries: options.Countries(),
       session: this.$session,
       dialog: {
         apps: false,
+        connectedApps: false,
         passcode: false,
         password: false,
         webdav: false,
@@ -366,6 +382,10 @@ export default {
     };
   },
   computed: {
+    // showConnectedApps reports whether users can connect apps with OAuth sign-in, so the dialog is offered.
+    showConnectedApps() {
+      return this.$config.featOAuthApps();
+    },
     accountInfo() {
       const user = this.$session.getUser();
       if (user) {
@@ -381,6 +401,11 @@ export default {
       }
 
       return this.$gettext("Unregistered");
+    },
+    // canEditEmail checks if the account may change its email address, which requires permission to manage accounts.
+    canEditEmail() {
+      const user = this.$session.getUser();
+      return !!user && (user.SuperAdmin || this.$config.allowAny("users", ["manage", "manage_own"]));
     },
   },
   created() {

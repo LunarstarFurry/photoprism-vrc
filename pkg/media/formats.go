@@ -1,6 +1,11 @@
 package media
 
-import "github.com/photoprism/photoprism/pkg/fs"
+import (
+	"sort"
+	"sync"
+
+	"github.com/photoprism/photoprism/pkg/fs"
+)
 
 // Formats maps file formats to general media types.
 var Formats = map[fs.Type]Type{
@@ -14,6 +19,7 @@ var Formats = map[fs.Type]Type{
 	fs.ImageTiff:       Image,
 	fs.ImagePsd:        Image,
 	fs.ImageBmp:        Image,
+	fs.ImageCineon:     Image,
 	fs.ImageMPO:        Image,
 	fs.ImageAvif:       Image,
 	fs.ImageAvifS:      Image,
@@ -21,6 +27,7 @@ var Formats = map[fs.Type]Type{
 	fs.ImageHeic:       Image,
 	fs.ImageHeicS:      Image,
 	fs.ImageWebp:       Image,
+	fs.ImageInsp:       Image,
 	fs.ImageRaw:        Raw,
 	fs.ImageDng:        Raw,
 	fs.SidecarXMP:      Sidecar,
@@ -62,5 +69,53 @@ var Formats = map[fs.Type]Type{
 	fs.VideoASF:        Video,
 	fs.VideoWMV:        Video,
 	fs.VideoDV:         Video,
+	fs.VideoInsv:       Video,
+	fs.VideoLrv:        Video,
 	fs.TypeUnknown:     Sidecar,
+}
+
+// ImageTypesExceptJpeg returns every image file format except JPEG as type strings, sorted by
+// name, for callers that treat JPEG as the format they deliver. Deriving the set here keeps it
+// from going stale when a format is added. Computed once and shared, so it must not be modified.
+var ImageTypesExceptJpeg = sync.OnceValue(func() []string {
+	fileTypes := FileTypes(Image)
+	result := make([]string, 0, len(fileTypes))
+
+	for _, fileType := range fileTypes {
+		if fileType != fs.ImageJpeg {
+			result = append(result, fileType.String())
+		}
+	}
+
+	// Cap the slice to its length so a caller that appends reallocates instead of
+	// writing into the shared array.
+	return result[:len(result):len(result)]
+})
+
+// FileTypes returns the file types that belong to the specified media type, sorted by name.
+// A media type groups several file types, so Raw covers both fs.ImageRaw and fs.ImageDng.
+func FileTypes(t Type) []fs.Type {
+	result := make([]fs.Type, 0, len(Formats))
+
+	for fileType, mediaType := range Formats {
+		if mediaType == t {
+			result = append(result, fileType)
+		}
+	}
+
+	sort.Slice(result, func(i, j int) bool { return result[i] < result[j] })
+
+	return result
+}
+
+// FileTypeStrings returns the file types that belong to the specified media type as strings.
+func FileTypeStrings(t Type) []string {
+	fileTypes := FileTypes(t)
+	result := make([]string, 0, len(fileTypes))
+
+	for _, fileType := range fileTypes {
+		result = append(result, string(fileType))
+	}
+
+	return result
 }

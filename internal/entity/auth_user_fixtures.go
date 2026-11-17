@@ -1,6 +1,8 @@
 package entity
 
 import (
+	"time"
+
 	"github.com/photoprism/photoprism/internal/auth/acl"
 	"github.com/photoprism/photoprism/pkg/authn"
 )
@@ -118,7 +120,7 @@ var UserFixtures = UserMap{
 		CanLogin:     false,
 		WebDAV:       true,
 		CanInvite:    false,
-		DeletedAt:    TimeStamp(),
+		DeletedAt:    DeletedAtTime(*TimeStamp()),
 		UserSettings: &UserSettings{
 			UITheme:     "",
 			MapsStyle:   "",
@@ -201,6 +203,7 @@ var UserFixtures = UserMap{
 			BirthMonth: 5,
 			BirthYear:  2001,
 		},
+		LoginAt: TimePointer(Now().Add(time.Second * -24)),
 	},
 	"guest": {
 		ID:           10000025,
@@ -290,12 +293,24 @@ var UserFixtures = UserMap{
 		WebDAV:       false,
 		CanInvite:    false,
 		InviteToken:  "",
+		LoginAt:      TimePointer(Now().Add(time.Millisecond * -24)),
 	},
 }
 
 // CreateUserFixtures creates the user fixtures specified above
 func CreateUserFixtures() {
 	for _, entity := range UserFixtures {
-		Db().Create(&entity)
+		createFixture(&entity)
+
+		// Adds the settings and details of the fixture, as related records are saved explicitly.
+		if entity.UserSettings != nil {
+			entity.UserSettings.UserUID = entity.UserUID
+			createFixture(entity.UserSettings)
+		}
+
+		if entity.UserDetails != nil {
+			entity.UserDetails.UserUID = entity.UserUID
+			createFixture(entity.UserDetails)
+		}
 	}
 }

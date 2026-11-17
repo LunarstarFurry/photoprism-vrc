@@ -5,7 +5,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jinzhu/gorm"
+	"gorm.io/gorm"
 
 	"github.com/photoprism/photoprism/pkg/clean"
 	"github.com/photoprism/photoprism/pkg/txt"
@@ -16,9 +16,9 @@ var versionMutex = sync.Mutex{}
 
 // Version represents the application version.
 type Version struct {
-	ID         uint       `gorm:"primary_key" yaml:"-"`
-	Version    string     `gorm:"size:255;unique_index:idx_version_edition;" json:"Version" yaml:"Version,omitempty"`
-	Edition    string     `gorm:"size:255;unique_index:idx_version_edition;" json:"Edition" yaml:"Edition,omitempty"`
+	ID         uint       `gorm:"primaryKey;size:32" yaml:"-"`
+	Version    string     `gorm:"size:255;uniqueIndex:idx_version_edition;" json:"Version" yaml:"Version,omitempty"`
+	Edition    string     `gorm:"size:255;uniqueIndex:idx_version_edition;" json:"Edition" yaml:"Edition,omitempty"`
 	Error      string     `gorm:"size:255;" json:"Error" yaml:"Error,omitempty"`
 	CreatedAt  time.Time  `yaml:"CreatedAt,omitempty"`
 	UpdatedAt  time.Time  `yaml:"UpdatedAt,omitempty"`
@@ -30,6 +30,7 @@ func (Version) TableName() string {
 	return "versions"
 }
 
+// UnknownVersion is what a database reports when it records no schema version.
 var UnknownVersion = Version{
 	Version: "0.0.0",
 	Edition: "dev",
@@ -37,11 +38,12 @@ var UnknownVersion = Version{
 
 // NeedsMigration tests if the Version is not yet installed.
 func (m *Version) NeedsMigration() bool {
-	if m == nil {
+	switch {
+	case m == nil:
 		return true
-	} else if m.MigratedAt == nil || m.CreatedAt.IsZero() {
+	case m.MigratedAt == nil || m.CreatedAt.IsZero():
 		return true
-	} else if m.Unknown() {
+	case m.Unknown():
 		return true
 	}
 
@@ -161,7 +163,7 @@ func (m *Version) CreateTable(db *gorm.DB) (err error) {
 	}
 
 	versionOnce.Do(func() {
-		err = db.AutoMigrate(&Version{}).Error
+		err = db.AutoMigrate(&Version{})
 	})
 
 	return err

@@ -3,9 +3,12 @@ package entity
 import (
 	"encoding/json"
 
+	"gorm.io/gorm"
+
 	"github.com/photoprism/photoprism/pkg/txt"
 )
 
+// Subject types, of which people are the only one recognized automatically.
 const (
 	SubjPerson = "person" // SubjType for people.
 )
@@ -23,8 +26,8 @@ type Person struct {
 }
 
 // AfterFind is a hook that updates the name cache after querying.
-func (m *Person) AfterFind() (err error) {
-	SubjNames.Set(m.SubjUID, m.SubjName)
+func (m *Person) AfterFind(tx *gorm.DB) (err error) {
+	setSubjName(m.SubjUID, m.SubjName)
 	return
 }
 

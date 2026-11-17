@@ -1,14 +1,17 @@
 package api
 
 import (
+	"errors"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
 
 	"github.com/photoprism/photoprism/internal/auth/acl"
+	"github.com/photoprism/photoprism/internal/config"
 	"github.com/photoprism/photoprism/internal/entity"
 	"github.com/photoprism/photoprism/internal/mutex"
 	"github.com/photoprism/photoprism/internal/photoprism/get"
+	"github.com/photoprism/photoprism/pkg/clean"
 	"github.com/photoprism/photoprism/pkg/i18n"
 )
 
@@ -23,7 +26,7 @@ import (
 //	@Router		/api/v1/config/options [get]
 func GetConfigOptions(router *gin.RouterGroup) {
 	router.GET("/config/options", func(c *gin.Context) {
-		s := Auth(c, acl.ResourceConfig, acl.AccessAll)
+		s := AuthAccess(c, acl.ResourceConfig, acl.ActionView, acl.Permissions{acl.AccessAll})
 		conf := get.Config()
 
 		// Abort if permission is not granted.
@@ -32,7 +35,7 @@ func GetConfigOptions(router *gin.RouterGroup) {
 			return
 		}
 
-		c.JSON(http.StatusOK, conf.Options())
+		c.JSON(http.StatusOK, conf.RedactedOptions())
 	})
 }
 
@@ -43,9 +46,9 @@ func GetConfigOptions(router *gin.RouterGroup) {
 //	@Tags		Config, Settings
 //	@Accept		json
 //	@Produce	json
-//	@Success	200					{object}	config.Options
-//	@Failure	400,401,403,429,500	{object}	i18n.Response
-//	@Param		options				body		config.Options	true	"properties to be updated (only submit values that should be changed)"
+//	@Success	200						{object}	config.Options
+//	@Failure	400,401,403,413,429,500	{object}	i18n.Response
+//	@Param		options					body		config.Options	true	"properties to be updated (only submit values that should be changed)"
 //	@Router		/api/v1/config/options [post]
 func SaveConfigOptions(router *gin.RouterGroup) {
 	router.POST("/config/options", func(c *gin.Context) {
@@ -71,9 +74,29 @@ func SaveConfigOptions(router *gin.RouterGroup) {
 			return
 		}
 
+		// Only options the API returns may be set through it.
+		if removed := config.RemoveUnsupportedOptionValues(v); len(removed) > 0 {
+			log.Debugf("config: ignored %s in options update", clean.LogNames(removed))
+		}
+
+		// A value returned redacted and sent back unchanged sets nothing.
+		if removed := conf.RemoveRedactedOptionValues(v); len(removed) > 0 {
+			log.Debugf("config: ignored unchanged %s in options update", clean.LogNames(removed))
+		}
+
 		if _, err := conf.SaveOptionsPatch(v); err != nil {
-			log.Errorf("config: failed saving options patch (%s)", err)
-			c.AbortWithStatusJSON(http.StatusInternalServerError, err)
+			// A value that does not fit the option it sets is the request's fault, not the server's.
+			if errors.Is(err, config.ErrInvalidOptionValue) {
+				AbortBadRequest(c, err)
+				return
+			} else if errors.Is(err, config.ErrOptionsTooLarge) {
+				log.Warnf("config: options not saved because the options file would exceed its size limit")
+				AbortRequestTooLarge(c, i18n.ErrFileTooLarge)
+				return
+			}
+
+			log.Errorf("config: failed saving options patch (%s)", clean.Error(err))
+			AbortSaveFailed(c)
 			return
 		}
 
@@ -88,6 +111,6 @@ func SaveConfigOptions(router *gin.RouterGroup) {
 		UpdateClientConfig()
 
 		// Return updated config options.
-		c.JSON(http.StatusOK, conf.Options())
+		c.JSON(http.StatusOK, conf.RedactedOptions())
 	})
 }

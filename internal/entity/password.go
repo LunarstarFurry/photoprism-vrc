@@ -2,6 +2,7 @@ package entity
 
 import (
 	"fmt"
+	"testing"
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
@@ -11,14 +12,30 @@ import (
 	"github.com/photoprism/photoprism/pkg/txt"
 )
 
-// DefaultPasswordCost specifies the cost of the BCrypt Password Hash,
-// see https://github.com/photoprism/photoprism/issues/3718.
-var DefaultPasswordCost = 12
+// PasswordCost is the bcrypt cost of new password hashes in production.
+const PasswordCost = 12
+
+// DefaultPasswordCost is the bcrypt cost new password hashes use, lowered to the minimum in test binaries.
+var DefaultPasswordCost = PasswordCost
+
+// init sets the bcrypt cost for binaries built by "go test", so tests that create accounts hash quickly.
+func init() {
+	DefaultPasswordCost = passwordCost(testing.Testing())
+}
+
+// passwordCost returns the bcrypt cost for new password hashes: the minimum in tests, PasswordCost otherwise.
+func passwordCost(test bool) int {
+	if test {
+		return bcrypt.MinCost
+	}
+
+	return PasswordCost
+}
 
 // Password represents a password hash.
 type Password struct {
-	UID       string    `gorm:"type:VARBINARY(255);primary_key;" json:"UID"`
-	Hash      string    `deepcopier:"skip" gorm:"type:VARBINARY(255);" json:"Hash"`
+	UID       string    `gorm:"type:bytes;size:255;primaryKey;" json:"UID"`
+	Hash      string    `deepcopier:"skip" gorm:"type:bytes;size:255;" json:"Hash"`
 	CreatedAt time.Time `deepcopier:"skip" json:"CreatedAt"`
 	UpdatedAt time.Time `deepcopier:"skip" json:"UpdatedAt"`
 }

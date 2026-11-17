@@ -2,10 +2,8 @@ package vision
 
 import (
 	"net/url"
-	"os"
 	"strings"
 
-	"github.com/photoprism/photoprism/pkg/clean"
 	"github.com/photoprism/photoprism/pkg/http/scheme"
 )
 
@@ -19,23 +17,58 @@ type Service struct {
 	Key            string    `yaml:"Key,omitempty" json:"-"`
 	Org            string    `yaml:"Org,omitempty" json:"org,omitempty"`         // Optional organization header (e.g. OpenAI).
 	Project        string    `yaml:"Project,omitempty" json:"project,omitempty"` // Optional project header (e.g. OpenAI).
-	Think          string    `yaml:"Think,omitempty" json:"think,omitempty"`     // Optional reasoning hint for compatible engines (e.g. Ollama, GPT-OSS).
+	Tier           string    `yaml:"Tier,omitempty" json:"tier,omitempty"`       // Optional service tier sent as service_tier in the request body (OpenAI, e.g. "flex").
+	Think          string    `yaml:"Think,omitempty" json:"think,omitempty"`     // Optional reasoning hint for compatible engines (e.g. Ollama, GPT-OSS); defaults to "false" for the Ollama engine.
 	FileScheme     string    `yaml:"FileScheme,omitempty" json:"fileScheme,omitempty"`
 	RequestFormat  ApiFormat `yaml:"RequestFormat,omitempty" json:"requestFormat,omitempty"`
 	ResponseFormat ApiFormat `yaml:"ResponseFormat,omitempty" json:"responseFormat,omitempty"`
 	Disabled       bool      `yaml:"Disabled,omitempty" json:"disabled,omitempty"`
 }
 
-// Endpoint returns the remote service request method and endpoint URL, if any.
+// UriUnresolved reports whether the service has no endpoint although it is meant to use one: its Uri
+// expands to nothing, or it has no Uri and a request format that the Vision API does not accept.
+func (m *Service) UriUnresolved() bool {
+	if m == nil || m.Disabled {
+		return false
+	} else if strings.TrimSpace(m.Uri) == "" {
+		return m.UriMissing()
+	}
+
+	uri, _ := m.Endpoint()
+
+	return uri == ""
+}
+
+// UriMissing reports whether the service has no Uri although its request format is not accepted by the
+// Vision API, so its requests cannot be sent to the shared service.
+func (m *Service) UriMissing() bool {
+	if m == nil || m.Disabled || strings.TrimSpace(m.Uri) != "" {
+		return false
+	}
+
+	switch strings.ToLower(strings.TrimSpace(m.RequestFormat)) {
+	case "", ApiFormatVision, ApiFormatImages, ApiFormatUrl:
+		return false
+	default:
+		return true
+	}
+}
+
+// Endpoint returns the remote service request method and endpoint URL, if any. The URI expands only
+// variables whose names end in _URL, _URI, or _HOST, see expandUriEnv.
 func (m *Service) Endpoint() (uri, method string) {
 	if m.Disabled || strings.TrimSpace(m.Uri) == "" {
 		return "", ""
 	}
 
-	ensureEnv()
+	// A refused variable leaves the URI without a service rather than with a partial value.
+	expanded, refused := expandUriEnv(m.Uri)
 
-	if uri = strings.TrimSpace(os.ExpandEnv(m.Uri)); strings.Contains(uri, "${") {
-		uri = ""
+	if len(refused) > 0 {
+		warnRefusedEnv("Service.Uri", m.Uri, refused, uriEnvSuffixes)
+		return "", ""
+	} else if uri = strings.TrimSpace(expanded); uri == "" || strings.Contains(uri, "${") {
+		return "", ""
 	}
 
 	if m.Method != "" {
@@ -64,15 +97,24 @@ func (m *Service) Endpoint() (uri, method string) {
 	return uri, method
 }
 
-// GetModel returns the model identifier override for the endpoint, if any.
+// GetModel returns the model identifier override for the endpoint with variables expanded, or an empty string.
+// It expands only variables whose names end in _MODEL; Model.GetModel sanitizes the result once a tag is split off.
 func (m *Service) GetModel() string {
 	if m.Disabled {
 		return ""
 	}
 
-	ensureEnv()
+	expanded, refused := expandEnvSuffix(m.Model, modelEnvSuffixes)
 
-	return clean.TypeLower(os.ExpandEnv(m.Model))
+	if len(refused) > 0 {
+		warnRefusedEnv("Service.Model", m.Model, refused, modelEnvSuffixes)
+	}
+
+	if !hasModelId(expanded) {
+		return ""
+	}
+
+	return strings.TrimSpace(expanded)
 }
 
 // EndpointKey returns the access token belonging to the remote service endpoint, if any.
@@ -83,7 +125,7 @@ func (m *Service) EndpointKey() string {
 
 	ensureEnv()
 
-	return strings.TrimSpace(os.ExpandEnv(m.Key))
+	return strings.TrimSpace(expandEnv(m.Key))
 }
 
 // EndpointOrg returns the organization identifier for the endpoint, if any.
@@ -94,7 +136,7 @@ func (m *Service) EndpointOrg() string {
 
 	ensureEnv()
 
-	return strings.TrimSpace(os.ExpandEnv(m.Org))
+	return strings.TrimSpace(expandEnv(m.Org))
 }
 
 // EndpointProject returns the project identifier for the endpoint, if any.
@@ -105,7 +147,18 @@ func (m *Service) EndpointProject() string {
 
 	ensureEnv()
 
-	return strings.TrimSpace(os.ExpandEnv(m.Project))
+	return strings.TrimSpace(expandEnv(m.Project))
+}
+
+// EndpointTier returns the optional service tier for the endpoint, if any.
+func (m *Service) EndpointTier() string {
+	if m.Disabled {
+		return ""
+	}
+
+	ensureEnv()
+
+	return strings.TrimSpace(expandEnv(m.Tier))
 }
 
 // EndpointThink returns the optional thinking/reasoning setting for the endpoint, if any.
@@ -116,14 +169,14 @@ func (m *Service) EndpointThink() string {
 
 	ensureEnv()
 
-	return strings.TrimSpace(os.ExpandEnv(m.Think))
+	return strings.TrimSpace(expandEnv(m.Think))
 }
 
 // BasicAuth returns the username and password for basic authentication.
 func (m *Service) BasicAuth() (username, password string) {
 	ensureEnv()
-	username = strings.TrimSpace(os.ExpandEnv(m.Username))
-	password = strings.TrimSpace(os.ExpandEnv(m.Password))
+	username = strings.TrimSpace(expandEnv(m.Username))
+	password = strings.TrimSpace(expandEnv(m.Password))
 	return username, password
 }
 

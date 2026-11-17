@@ -5,9 +5,11 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/photoprism/photoprism/internal/ai/face"
 	"github.com/photoprism/photoprism/internal/entity"
+	"github.com/photoprism/photoprism/pkg/rnd"
 )
 
 func TestMarkerByUID(t *testing.T) {
@@ -78,7 +80,7 @@ func TestMarkers(t *testing.T) {
 
 func TestUnmatchedFaceMarkers(t *testing.T) {
 	t.Run("All", func(t *testing.T) {
-		results, err := UnmatchedFaceMarkers(3, 0, nil)
+		results, err := UnmatchedFaceMarkers(3, "", nil)
 
 		if err != nil {
 			t.Fatal(err)
@@ -87,19 +89,39 @@ func TestUnmatchedFaceMarkers(t *testing.T) {
 		assert.Equal(t, 3, len(results))
 	})
 	t.Run("Before", func(t *testing.T) {
-		results, err := UnmatchedFaceMarkers(3, 0, entity.TimeStamp())
+		results, err := UnmatchedFaceMarkers(3, "", entity.TimeStamp())
 
 		if err != nil {
 			t.Fatal(err)
 		}
 
 		assert.Equal(t, 3, len(results))
+	})
+	t.Run("Cursor", func(t *testing.T) {
+		// Paging by cursor is what keeps a run from re-reading markers it visited without
+		// stamping, so a page must start after the uid it is given and never repeat one.
+		first, err := UnmatchedFaceMarkers(2, "", nil)
+		require.NoError(t, err)
+		require.Len(t, first, 2)
+		require.Less(t, first[0].MarkerUID, first[1].MarkerUID, "a page is ordered by the cursor column")
+
+		next, err := UnmatchedFaceMarkers(2, first[1].MarkerUID, nil)
+		require.NoError(t, err)
+
+		for _, m := range next {
+			assert.Greater(t, m.MarkerUID, first[1].MarkerUID)
+		}
+	})
+	t.Run("CursorPastTheEnd", func(t *testing.T) {
+		results, err := UnmatchedFaceMarkers(2, "zzzzzzzzzzzzzzzz", nil)
+		require.NoError(t, err)
+		assert.Empty(t, results)
 	})
 }
 
 func TestFaceMarkers(t *testing.T) {
 	t.Run("All", func(t *testing.T) {
-		results, err := FaceMarkers(3, 0)
+		results, err := FaceMarkers(3, "", "")
 
 		if err != nil {
 			t.Fatal(err)
@@ -107,11 +129,201 @@ func TestFaceMarkers(t *testing.T) {
 
 		assert.Equal(t, 3, len(results))
 	})
+	t.Run("After", func(t *testing.T) {
+		first, err := FaceMarkers(2, "", "")
+		require.NoError(t, err)
+		require.Len(t, first, 2)
+		next, err := FaceMarkers(2, first[1].MarkerUID, "")
+		require.NoError(t, err)
+		require.NotEmpty(t, next)
+		assert.Greater(t, next[0].MarkerUID, first[1].MarkerUID)
+		all, err := FaceMarkers(4, "", "")
+		require.NoError(t, err)
+		require.Len(t, all, 4)
+		assert.Equal(t, all[2].MarkerUID, next[0].MarkerUID, "the next page starts right after the cursor")
+	})
+}
+
+func TestLastMarkerUID(t *testing.T) {
+	last, err := LastMarkerUID()
+	require.NoError(t, err)
+	require.NotEmpty(t, last)
+	_, err = MarkerByUID(last)
+	require.NoError(t, err, "the last uid belongs to a stored marker")
+	var count int64
+	require.NoError(t, UnscopedDb().Model(&entity.Marker{}).Where("marker_uid > ?", last).Count(&count).Error)
+	assert.Zero(t, count, "no marker sorts after the last uid")
+	t.Run("Bound", func(t *testing.T) {
+		all, err := FaceMarkers(4, "", "")
+		require.NoError(t, err)
+		require.Len(t, all, 4)
+		bounded, err := FaceMarkers(4, "", all[1].MarkerUID)
+		require.NoError(t, err)
+		require.Len(t, bounded, 2, "the last uid is included, later ones are not")
+		assert.Equal(t, all[1].MarkerUID, bounded[1].MarkerUID)
+	})
+}
+
+func TestFaceMarkerModelBoundaries(t *testing.T) {
+	restore := face.EmbedderConfig()
+	t.Cleanup(func() {
+		_ = face.ConfigureEmbedder(restore)
+	})
+	require.NoError(t, face.ConfigureEmbedder(face.EmbedderSettings{Name: face.ModelSFace}))
+	beforeUnmatched := CountUnmatchedFaceMarkers()
+
+	compatible := &entity.Marker{
+		MarkerUID:      rnd.GenerateUID('m'),
+		MarkerType:     entity.MarkerFace,
+		EmbedModel:     face.ModelSFace,
+		EmbeddingsJSON: face.Embeddings{{0.1, 0.2}}.JSON(),
+	}
+	legacy := &entity.Marker{
+		MarkerUID:      rnd.GenerateUID('m'),
+		MarkerType:     entity.MarkerFace,
+		EmbeddingsJSON: face.Embeddings{{0.1, 0.2, 0.3}}.JSON(),
+	}
+	require.NoError(t, entity.Db().Create(compatible).Error)
+	require.NoError(t, entity.Db().Create(legacy).Error)
+	t.Cleanup(func() {
+		entity.UnscopedDb().Delete(compatible)
+		entity.UnscopedDb().Delete(legacy)
+	})
+
+	unmatched, err := UnmatchedFaceMarkers(1000, "", nil)
+	require.NoError(t, err)
+	foundCompatible, foundLegacy := false, false
+	for _, marker := range unmatched {
+		foundCompatible = foundCompatible || marker.MarkerUID == compatible.MarkerUID
+		foundLegacy = foundLegacy || marker.MarkerUID == legacy.MarkerUID
+	}
+	assert.True(t, foundCompatible)
+	assert.False(t, foundLegacy)
+	assert.Equal(t, beforeUnmatched+1, CountUnmatchedFaceMarkers())
+
+	all, err := FaceMarkers(1000, "", "")
+	require.NoError(t, err)
+	foundCompatible, foundLegacy = false, false
+	for _, marker := range all {
+		foundCompatible = foundCompatible || marker.MarkerUID == compatible.MarkerUID
+		foundLegacy = foundLegacy || marker.MarkerUID == legacy.MarkerUID
+	}
+	assert.True(t, foundCompatible)
+	assert.False(t, foundLegacy)
+
+	embeddings, err := Embeddings(false, false, 0, 0, face.ModelSFace)
+	require.NoError(t, err)
+	foundCompatible, foundLegacy = false, false
+	for _, embedding := range embeddings {
+		foundCompatible = foundCompatible || len(embedding) == 2
+		foundLegacy = foundLegacy || len(embedding) == 3
+	}
+	assert.True(t, foundCompatible)
+	assert.False(t, foundLegacy)
+}
+
+func TestFaceMarkersWithoutConfiguredModel(t *testing.T) {
+	restore := face.EmbedderConfig()
+	t.Cleanup(func() {
+		_ = face.ConfigureEmbedder(restore)
+	})
+
+	recorded := &entity.Marker{
+		MarkerUID:      rnd.GenerateUID('m'),
+		MarkerType:     entity.MarkerFace,
+		EmbedModel:     face.ModelSFace,
+		EmbeddingsJSON: face.Embeddings{{0.1, 0.2}}.JSON(),
+	}
+	require.NoError(t, entity.Db().Create(recorded).Error)
+	t.Cleanup(func() { entity.UnscopedDb().Delete(recorded) })
+
+	// An embedder that fails to initialize leaves no model name behind, which must not
+	// narrow matching to the legacy rows that predate the provenance column.
+	require.NoError(t, face.ConfigureEmbedder(face.EmbedderSettings{Name: face.ModelNone}))
+	require.Equal(t, "", face.EmbeddingModelName())
+
+	found := func(markers entity.Markers) bool {
+		for _, marker := range markers {
+			if marker.MarkerUID == recorded.MarkerUID {
+				return true
+			}
+		}
+
+		return false
+	}
+
+	t.Run("UnmatchedFaceMarkers", func(t *testing.T) {
+		markers, err := UnmatchedFaceMarkers(1000, "", nil)
+		require.NoError(t, err)
+		assert.True(t, found(markers))
+	})
+	t.Run("FaceMarkers", func(t *testing.T) {
+		markers, err := FaceMarkers(1000, "", "")
+		require.NoError(t, err)
+		assert.True(t, found(markers))
+	})
+	t.Run("CountUnmatchedFaceMarkers", func(t *testing.T) {
+		var expected int64
+		require.NoError(t, entity.Db().Model(&entity.Markers{}).
+			Where("matched_at IS NULL AND marker_invalid = FALSE AND LENGTH(embeddings_json) > 0").
+			Where("marker_type = ?", entity.MarkerFace).
+			Count(&expected).Error)
+		assert.EqualValues(t, expected, CountUnmatchedFaceMarkers())
+	})
+	t.Run("CountNewFaceMarkers", func(t *testing.T) {
+		var expected int64
+		require.NoError(t, entity.Db().Model(&entity.Markers{}).
+			Where("marker_type = ?", entity.MarkerFace).
+			Where("face_id = '' AND marker_invalid = FALSE AND LENGTH(embeddings_json) > 0").
+			Count(&expected).Error)
+		assert.EqualValues(t, expected, CountNewFaceMarkers(0, 0))
+	})
+}
+
+func TestFaceMarkersWithEmptyEmbeddings(t *testing.T) {
+	restore := face.EmbedderConfig()
+	t.Cleanup(func() {
+		_ = face.ConfigureEmbedder(restore)
+	})
+	require.NoError(t, face.ConfigureEmbedder(face.EmbedderSettings{
+		Name:  face.ModelFaceNet,
+		Model: face.FindEmbeddingModel(face.ModelFaceNet),
+	}))
+
+	beforeUnmatched := CountUnmatchedFaceMarkers()
+	beforeNew := CountNewFaceMarkers(0, 0)
+
+	// Embeddings.JSON returns an empty non-nil slice when there is nothing to store, and
+	// the migration writes one to clear a vector. SQLite stores that as a zero-length blob
+	// rather than NULL, which an "embeddings_json <> ''" comparison does not exclude.
+	empty := &entity.Marker{
+		MarkerUID:      rnd.GenerateUID('m'),
+		MarkerType:     entity.MarkerFace,
+		EmbedModel:     face.ModelFaceNet,
+		EmbeddingsJSON: face.Embeddings{}.JSON(),
+	}
+	require.NoError(t, entity.Db().Create(empty).Error)
+	t.Cleanup(func() { entity.UnscopedDb().Delete(empty) })
+
+	t.Run("UnmatchedFaceMarkers", func(t *testing.T) {
+		markers, err := UnmatchedFaceMarkers(1000, "", nil)
+		require.NoError(t, err)
+
+		for _, marker := range markers {
+			assert.NotEqual(t, empty.MarkerUID, marker.MarkerUID)
+		}
+	})
+	t.Run("CountUnmatchedFaceMarkers", func(t *testing.T) {
+		assert.Equal(t, beforeUnmatched, CountUnmatchedFaceMarkers())
+	})
+	t.Run("CountNewFaceMarkers", func(t *testing.T) {
+		assert.Equal(t, beforeNew, CountNewFaceMarkers(0, 0))
+	})
 }
 
 func TestEmbeddings(t *testing.T) {
 	t.Run("All", func(t *testing.T) {
-		results, err := Embeddings(false, false, 0, 0)
+		results, err := Embeddings(false, false, 0, 0, "")
 
 		if err != nil {
 			t.Fatal(err)
@@ -124,7 +336,7 @@ func TestEmbeddings(t *testing.T) {
 		}
 	})
 	t.Run("Size", func(t *testing.T) {
-		results, err := Embeddings(false, false, 230, 0)
+		results, err := Embeddings(false, false, 230, 0, "")
 
 		if err != nil {
 			t.Fatal(err)
@@ -137,7 +349,7 @@ func TestEmbeddings(t *testing.T) {
 		}
 	})
 	t.Run("Score", func(t *testing.T) {
-		results, err := Embeddings(false, false, 0, 50)
+		results, err := Embeddings(false, false, 0, 50, "")
 
 		if err != nil {
 			t.Fatal(err)
@@ -189,10 +401,20 @@ func TestRemoveInvalidMarkerReferences(t *testing.T) {
 }
 
 func TestRemoveNonExistentMarkerFaces(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping test in short mode.")
+	}
+
+	// Make sure that the data is valid for the test.
+	_, err := RemoveAutoFaceClusters()
+	require.NoError(t, err)
+
 	affected, err := RemoveNonExistentMarkerFaces()
 
 	assert.NoError(t, err)
 	assert.GreaterOrEqual(t, affected, int64(1))
+	// Post test cleanup
+	entity.ResetTestFixtures()
 }
 
 func TestRemoveNonExistentMarkerSubjects(t *testing.T) {
@@ -236,4 +458,203 @@ func TestCountMarkers(t *testing.T) {
 	n := CountMarkers(entity.MarkerFace)
 
 	assert.GreaterOrEqual(t, n, 1)
+}
+
+// TestWhereClusterScore pins the bar that decides which markers clustering may use. It is per
+// marker, from the detector that produced it, so an upgrade cannot exclude a marker for a
+// calibration it was never scored against.
+func TestWhereClusterScore(t *testing.T) {
+	newMarker := func(t *testing.T, detector string, score int) *entity.Marker {
+		t.Helper()
+
+		m := &entity.Marker{
+			MarkerUID:      rnd.GenerateUID('m'),
+			FileUID:        "fs6sg6bw45bnlqdw",
+			MarkerType:     entity.MarkerFace,
+			MarkerSrc:      entity.SrcImage,
+			Score:          score,
+			Size:           160,
+			DetectModel:    detector,
+			EmbedModel:     face.EmbeddingModelName(),
+			EmbeddingsJSON: face.Embeddings{face.RandomEmbedding()}.JSON(),
+		}
+
+		require.NoError(t, entity.Db().Create(m).Error)
+		t.Cleanup(func() { entity.UnscopedDb().Delete(m) })
+
+		return m
+	}
+	matched := func(t *testing.T, uid string, floor int) bool {
+		t.Helper()
+
+		var n int64
+		require.NoError(t, whereClusterScore(entity.Db().Model(&entity.Marker{}).Where("marker_uid = ?", uid), floor).
+			Count(&n).Error)
+
+		return n == 1
+	}
+	yunet := face.ClusterScore(face.DetectorYuNet)
+	scrfd := face.ClusterScore(face.DetectorSCRFD)
+
+	// Which detector sits higher is a calibration that moves, so the case is stated by the
+	// relationship rather than by naming one of them.
+	lower, higher := face.DetectorYuNet, face.DetectorSCRFD
+	if scrfd < yunet {
+		lower, higher = face.DetectorSCRFD, face.DetectorYuNet
+	}
+
+	t.Run("EachDetectorItsOwnBar", func(t *testing.T) {
+		// A score between the two bars is admitted for the detector with the lower one and
+		// refused for the other, which is the whole point of registering them separately.
+		between := max(face.ClusterScore(lower), face.ClusterScore(higher)-1)
+
+		require.Less(t, face.ClusterScore(lower), face.ClusterScore(higher))
+		assert.True(t, matched(t, newMarker(t, lower, between).MarkerUID, face.ClusterScoreAuto))
+		assert.False(t, matched(t, newMarker(t, higher, between).MarkerUID, face.ClusterScoreAuto))
+	})
+	t.Run("ConfiguredFloorOverridesEveryDetector", func(t *testing.T) {
+		// FACE_CLUSTER_SCORE is a choice rather than a calibration a marker was never scored
+		// against, so unlike a detector's bar it applies to every marker. Without this the
+		// option reached no query at all.
+		restore := face.ClusterScoreThreshold
+		t.Cleanup(func() { face.ClusterScoreThreshold = restore })
+		face.ClusterScoreThreshold = 90
+
+		assert.False(t, matched(t, newMarker(t, face.DetectorYuNet, 89).MarkerUID, face.ClusterScoreAuto))
+		assert.True(t, matched(t, newMarker(t, face.DetectorSCRFD, 90).MarkerUID, face.ClusterScoreAuto))
+	})
+	t.Run("ConfiguredFloorRemovesTheBar", func(t *testing.T) {
+		restore := face.ClusterScoreThreshold
+		t.Cleanup(func() { face.ClusterScoreThreshold = restore })
+		face.ClusterScoreThreshold = -1
+
+		assert.True(t, matched(t, newMarker(t, face.DetectorSCRFD, 1).MarkerUID, face.ClusterScoreAuto))
+	})
+	t.Run("UnrecordedDetectorKeepsTheDefault", func(t *testing.T) {
+		// Every row written before the provenance column existed, which must not be stranded.
+		legacy := newMarker(t, "", face.ClusterScoreThresholdDefault)
+
+		assert.True(t, matched(t, legacy.MarkerUID, face.ClusterScoreAuto))
+		assert.False(t, matched(t, newMarker(t, "", face.ClusterScoreThresholdDefault-1).MarkerUID, face.ClusterScoreAuto))
+	})
+	t.Run("ExplicitFloorOverrides", func(t *testing.T) {
+		m := newMarker(t, face.DetectorYuNet, yunet)
+
+		assert.True(t, matched(t, m.MarkerUID, yunet))
+		assert.False(t, matched(t, m.MarkerUID, yunet+1))
+	})
+	t.Run("ZeroDoesNotFilter", func(t *testing.T) {
+		assert.True(t, matched(t, newMarker(t, "", 1).MarkerUID, 0))
+	})
+}
+
+// TestResetAllFaceMarkerMatches covers the difference between the two reset scopes, which is
+// whether a marker a person named keeps its identity.
+func TestResetAllFaceMarkerMatches(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping test in short mode.")
+	}
+
+	t.Cleanup(entity.ResetTestFixtures)
+
+	named := entity.MarkerFixtures.Get("actress-a-1")
+	require.Equal(t, entity.SrcManual, named.SubjSrc, "the fixture this pins must be hand-named")
+
+	t.Run("KeepsManual", func(t *testing.T) {
+		_, err := ResetFaceMarkerMatches()
+		require.NoError(t, err)
+
+		m, err := MarkerByUID(named.MarkerUID)
+		require.NoError(t, err)
+		assert.Equal(t, named.SubjUID, m.SubjUID, "an automatic reset must not touch a hand-named marker")
+		assert.Equal(t, named.MarkerName, m.MarkerName)
+		assert.Equal(t, named.FaceID, m.FaceID)
+	})
+	t.Run("ClearsManual", func(t *testing.T) {
+		removed, err := ResetAllFaceMarkerMatches()
+		require.NoError(t, err)
+		assert.Positive(t, removed)
+
+		m, err := MarkerByUID(named.MarkerUID)
+		require.NoError(t, err)
+		assert.Empty(t, m.SubjUID)
+		assert.Empty(t, m.SubjSrc)
+		assert.Empty(t, m.MarkerName)
+		assert.Empty(t, m.FaceID)
+		assert.Nil(t, m.MatchedAt)
+	})
+	t.Run("KeepsEmbeddings", func(t *testing.T) {
+		// The whole point of the scope: detection survives, so a later run re-clusters from the
+		// stored vectors instead of decoding every file again.
+		m, err := MarkerByUID(named.MarkerUID)
+		require.NoError(t, err)
+		assert.Equal(t, named.Size, m.Size)
+		assert.Equal(t, named.Score, m.Score)
+		assert.NotEmpty(t, m.Thumb)
+	})
+}
+
+func TestFaceMarkerFiles(t *testing.T) {
+	const fileUID = "fs6sg6bw45bn0004" // Germany/bridge.jpg
+
+	t.Run("All", func(t *testing.T) {
+		result, err := FaceMarkerFiles("")
+
+		require.NoError(t, err)
+		assert.Greater(t, result[fileUID].Markers, 0)
+		assert.Greater(t, result["fs6sg6bq45bnlqd0"].Markers, 0) // London/bridge1.jpg
+
+		dot, err := FaceMarkerFiles(".")
+		require.NoError(t, err)
+		assert.Equal(t, result, dot)
+	})
+	t.Run("PrimaryOnly", func(t *testing.T) {
+		// London/bridge3.jpg holds a marker but is not the primary file, which the index does not reach.
+		result, err := FaceMarkerFiles("")
+
+		require.NoError(t, err)
+		assert.NotContains(t, result, "fs6sg6bwhhbnlqdn")
+	})
+	t.Run("Folder", func(t *testing.T) {
+		result, err := FaceMarkerFiles("/Germany/")
+
+		require.NoError(t, err)
+		assert.Greater(t, result[fileUID].Markers, 0)
+		assert.NotContains(t, result, "fs6sg6bq45bnlqd0", "files in other folders are left out")
+	})
+	t.Run("FileName", func(t *testing.T) {
+		result, err := FaceMarkerFiles("Germany")
+
+		require.NoError(t, err)
+		assert.Equal(t, entity.RootOriginals, result[fileUID].FileRoot)
+		assert.Equal(t, "Germany/bridge.jpg", result[fileUID].FileName)
+		assert.NotZero(t, result[fileUID].PhotoID)
+	})
+	t.Run("SidecarFolder", func(t *testing.T) {
+		// A folder run covers the matching sidecar folder, which mirrors the originals folder.
+		result, err := FaceMarkerFiles("Holiday")
+
+		require.NoError(t, err)
+		require.Contains(t, result, "fs6sg6bw45bn0008")
+		assert.Equal(t, entity.RootSidecar, result["fs6sg6bw45bn0008"].FileRoot)
+
+		result, err = FaceMarkerFiles("2000")
+
+		require.NoError(t, err)
+		assert.Contains(t, result, "fs6sg6bqhhinlple")
+	})
+	t.Run("Wildcards", func(t *testing.T) {
+		for _, dir := range []string{"Lond_n", "Lon%", "German_"} {
+			result, err := FaceMarkerFiles(dir)
+
+			require.NoError(t, err)
+			assert.Empty(t, result, dir)
+		}
+	})
+	t.Run("MissingFolder", func(t *testing.T) {
+		result, err := FaceMarkerFiles("missing-folder")
+
+		require.NoError(t, err)
+		assert.Empty(t, result)
+	})
 }

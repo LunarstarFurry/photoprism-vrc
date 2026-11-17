@@ -18,8 +18,8 @@ func TestClientRegistry_DuplicateNamePrefersLatest(t *testing.T) {
 	// Create two clients directly to simulate duplicates with same name.
 	c1 := entity.NewClient().SetName("pp-dupe").SetRole(cluster.RoleInstance)
 	assert.NoError(t, c1.Create())
-	// Stagger times
-	time.Sleep(10 * time.Millisecond)
+	// Backdate c1 so c2 is unambiguously the most recently updated.
+	backdateClient(t, c1.ClientUID, time.Hour)
 	c2 := entity.NewClient().SetName("pp-dupe").SetRole(cluster.RoleService)
 	assert.NoError(t, c2.Create())
 
@@ -33,6 +33,46 @@ func TestClientRegistry_DuplicateNamePrefersLatest(t *testing.T) {
 		// IDs have expected format
 		assert.True(t, rnd.IsUID(n.ClientID, entity.ClientUID))
 	}
+}
+
+// DisplayName: instance-reported names update freely until an admin pins one;
+// an admin override is sticky across registrations, and clearing it un-pins.
+func TestClientRegistry_DisplayNameOverride(t *testing.T) {
+	c := newRegistryTestConfig(t, "cluster-registry-displayname")
+	r, _ := NewClientRegistryWithConfig(c)
+
+	// Instance reports a display name on first registration.
+	assert.NoError(t, r.Put(&Node{Node: cluster.Node{Name: "pp-dn", Role: cluster.RoleInstance, DisplayName: "First Title"}}))
+	got, err := r.FindByName("pp-dn")
+	assert.NoError(t, err)
+	if !assert.NotNil(t, got) {
+		return
+	}
+	assert.Equal(t, "First Title", got.DisplayName)
+
+	// A later instance registration updates the reported name (no admin pin yet).
+	assert.NoError(t, r.Put(&Node{Node: cluster.Node{ClientID: got.ClientID, Name: got.Name, DisplayName: "Second Title"}}))
+	got, _ = r.FindByName("pp-dn")
+	assert.Equal(t, "Second Title", got.DisplayName)
+
+	// Admin override (SrcManual) pins the value.
+	assert.NoError(t, r.Put(&Node{Node: cluster.Node{ClientID: got.ClientID, Name: got.Name, DisplayName: "Admin Pinned"}, NameSrc: entity.SrcManual}))
+	got, _ = r.FindByName("pp-dn")
+	assert.Equal(t, "Admin Pinned", got.DisplayName)
+
+	// A subsequent instance registration must NOT overwrite the admin override.
+	assert.NoError(t, r.Put(&Node{Node: cluster.Node{ClientID: got.ClientID, Name: got.Name, DisplayName: "Instance Again"}}))
+	got, _ = r.FindByName("pp-dn")
+	assert.Equal(t, "Admin Pinned", got.DisplayName)
+
+	// Admin clears the override (empty + SrcManual): un-pins and falls back, then
+	// the next instance registration repopulates it.
+	assert.NoError(t, r.Put(&Node{Node: cluster.Node{ClientID: got.ClientID, Name: got.Name, DisplayName: ""}, NameSrc: entity.SrcManual}))
+	got, _ = r.FindByName("pp-dn")
+	assert.Equal(t, "", got.DisplayName)
+	assert.NoError(t, r.Put(&Node{Node: cluster.Node{ClientID: got.ClientID, Name: got.Name, DisplayName: "After Clear"}}))
+	got, _ = r.FindByName("pp-dn")
+	assert.Equal(t, "After Clear", got.DisplayName)
 }
 
 // Role change path: Put should update ClientRole via mapping.
@@ -71,4 +111,95 @@ func TestClientRegistry_FindByName_NormalizesLegacyAliasAppToInstance(t *testing
 	if assert.NotNil(t, n) {
 		assert.Equal(t, cluster.RoleInstance, n.Role)
 	}
+}
+
+// TestClientRegistry_PutNameLookup checks that a name resolves the record stored under its DNS label.
+func TestClientRegistry_PutNameLookup(t *testing.T) {
+	c := newRegistryTestConfig(t, "cluster-registry-name-lookup")
+
+	existing := entity.NewClient().SetName("pp-node-name").SetRole(cluster.RoleInstance)
+	assert.NoError(t, existing.Create())
+
+	r, err := NewClientRegistryWithConfig(c)
+	assert.NoError(t, err)
+
+	n := &Node{Node: cluster.Node{UUID: rnd.UUIDv7(), Name: "PP-Node-Name", Role: cluster.RoleInstance}}
+	assert.NoError(t, r.Put(n))
+	assert.Equal(t, existing.ClientUID, n.ClientID)
+
+	var count int64
+	assert.NoError(t, entity.UnscopedDb().Model(&entity.Client{}).Where("client_name = ?", "pp-node-name").Count(&count).Error)
+	assert.EqualValues(t, 1, count)
+}
+
+func TestClientRegistry_CreateInsertOnly(t *testing.T) {
+	c := newRegistryTestConfig(t, "cluster-registry-create-insert")
+	r, _ := NewClientRegistryWithConfig(c)
+
+	n := &Node{Node: cluster.Node{UUID: rnd.UUIDv7(), Name: "pp-create-once", Role: cluster.RoleInstance}}
+	assert.NoError(t, r.Create(n))
+	t.Cleanup(func() { _ = r.DeleteAllByUUID(n.UUID) })
+
+	t.Run("SameUUID", func(t *testing.T) {
+		assert.ErrorIs(t, r.Create(&Node{Node: cluster.Node{UUID: n.UUID, Name: "pp-create-other", Role: cluster.RoleInstance}}), ErrIdentifierMismatch)
+	})
+	t.Run("SameName", func(t *testing.T) {
+		assert.ErrorIs(t, r.Create(&Node{Node: cluster.Node{Name: "pp-create-once", Role: cluster.RoleService}}), ErrIdentifierMismatch)
+
+		stored, err := r.FindByName("pp-create-once")
+		if assert.NoError(t, err) {
+			assert.Equal(t, n.ClientID, stored.ClientID)
+			assert.Equal(t, cluster.RoleInstance, stored.Role)
+		}
+	})
+	t.Run("SameClientID", func(t *testing.T) {
+		assert.ErrorIs(t, r.Create(&Node{Node: cluster.Node{Name: "pp-create-client", ClientID: n.ClientID, Role: cluster.RoleInstance}}), ErrIdentifierMismatch)
+	})
+}
+
+func TestClientRegistry_RecordDatabase(t *testing.T) {
+	c := newRegistryTestConfig(t, "cluster-registry-record-db")
+	r, _ := NewClientRegistryWithConfig(c)
+
+	db := cluster.NodeDatabase{Name: "cluster_drecord", User: "cluster_urecord", Driver: "mysql"}
+
+	t.Run("Recorded", func(t *testing.T) {
+		n := &Node{Node: cluster.Node{UUID: rnd.UUIDv7(), Name: "pp-record-db", Role: cluster.RoleInstance}}
+		assert.NoError(t, r.Create(n))
+		t.Cleanup(func() { _ = r.DeleteAllByUUID(n.UUID) })
+
+		recorded, err := r.RecordDatabase(n, db)
+		assert.NoError(t, err)
+		assert.True(t, recorded)
+
+		stored, err := r.FindByNodeUUID(n.UUID)
+		if assert.NoError(t, err) && assert.NotNil(t, stored.Database) {
+			assert.Equal(t, db.Name, stored.Database.Name)
+			assert.Equal(t, db.User, stored.Database.User)
+		}
+	})
+	t.Run("KeepsExisting", func(t *testing.T) {
+		n := &Node{Node: cluster.Node{UUID: rnd.UUIDv7(), Name: "pp-record-keep", Role: cluster.RoleInstance}}
+		n.Database = &cluster.NodeDatabase{Name: "cluster_dexisting", User: "cluster_uexisting"}
+		assert.NoError(t, r.Create(n))
+		t.Cleanup(func() { _ = r.DeleteAllByUUID(n.UUID) })
+
+		recorded, err := r.RecordDatabase(n, db)
+		assert.NoError(t, err)
+		assert.False(t, recorded)
+
+		stored, err := r.FindByNodeUUID(n.UUID)
+		if assert.NoError(t, err) && assert.NotNil(t, stored.Database) {
+			assert.Equal(t, "cluster_dexisting", stored.Database.Name)
+		}
+	})
+	t.Run("Empty", func(t *testing.T) {
+		recorded, err := r.RecordDatabase(nil, db)
+		assert.NoError(t, err)
+		assert.False(t, recorded)
+
+		recorded, err = r.RecordDatabase(&Node{}, cluster.NodeDatabase{})
+		assert.NoError(t, err)
+		assert.False(t, recorded)
+	})
 }

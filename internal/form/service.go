@@ -16,7 +16,7 @@ type Service struct {
 	AccUser       string `json:"AccUser"`
 	AccPass       string `json:"AccPass"`
 	AccTimeout    string `json:"AccTimeout"` // Request timeout: default, high, medium, low, none
-	AccError      string `json:"AccError"`
+	AccError      string `json:"AccError"`   // Read only, except that an empty value clears it.
 	AccShare      bool   `json:"AccShare"`   // Manual upload enabled, see SharePath, ShareSize, and ShareExpires.
 	AccSync       bool   `json:"AccSync"`    // Background sync enabled, see SyncDownload and SyncUpload.
 	RetryLimit    int    `json:"RetryLimit"` // Maximum number of failed requests.
@@ -29,6 +29,7 @@ type Service struct {
 	SyncDownload  bool   `json:"SyncDownload"`
 	SyncFilenames bool   `json:"SyncFilenames"`
 	SyncRaw       bool   `json:"SyncRaw"`
+	SyncYaml      int    `json:"SyncYaml"` // YAML sidecar files: -1 disabled, 0 default (enabled), 1 enabled.
 }
 
 // NewService creates a new service form.

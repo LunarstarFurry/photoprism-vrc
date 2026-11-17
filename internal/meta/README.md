@@ -1,6 +1,6 @@
 ## PhotoPrism — Metadata Pipeline
 
-**Last Updated:** February 11, 2026
+**Last Updated:** October 13, 2026
 
 ### Overview
 
@@ -25,9 +25,39 @@ The `internal/meta` package extracts, normalizes, and reports metadata from imag
 
 ### Parsing Order & Fallbacks
 
-- Exif → XMP → JSON (ExifTool/GPhotos/motion) → filename → filesystem mtime. Each stage logs source and errors but continues when safe.
+- Capture time: Exif → XMP → JSON (ExifTool/GPhotos/motion) → filename → metadata modify time (`ModifiedAt`: Exif `DateTime`, ExifTool `ModifyDate`, via `Data.TakenOrModified`, source `modified`) → filesystem mtime. `TakenAt` holds capture times only. Each stage logs source and errors but continues when safe.
 - Brute-force Exif search is used when native parsers fail; errors are logged with context.
-- GPS parsing supports decimal and DMS formats; regexes are kept simple and precompiled.
+- GPS parsing supports decimal, DMS (`51 deg 15' 17.47" N`), and the 2-component Adobe XMP form (`52,30.4567N`); regexes are kept simple and precompiled.
+
+### JSON Sidecar Reader
+
+JSON metadata sidecars have an inclusive 1 MiB default encoded-size limit (`JSONMaxFileBytes`).
+`Data.JSON` checks the opened file's size and reads through a limit of one extra byte,
+so a growing file or an inaccurate size hint still stays within the read bound. Oversized
+input returns `ErrJSONFileTooLarge` before ExifTool/Google Photos format dispatch and leaves
+already collected metadata unchanged. The limit applies to sidecars from every source,
+including WebDAV, filesystem import, and generated ExifTool cache files.
+
+ExifTool JSON capture uses the same limit before publishing a cache file; oversized output
+is refused rather than truncated into a partial JSON file. This bounds JSON input/capture,
+not the total memory of the process or an external metadata tool. Transfer size limits are
+separate, and the web-upload sidecar policy does not admit JSON files.
+
+Operators can override the shared JSON byte limit with `PHOTOPRISM_JSON_LIMIT` (positive
+decimal bytes, for example `4194304` for 4 MiB). Empty, invalid, zero, negative, or
+out-of-range values retain the 1 MiB default; there is no unlimited setting. The override
+applies to both sidecar reads and ExifTool stdout capture, not the 64 KiB stderr bound.
+
+### XMP Sidecar Reader
+
+The `.xmp` sidecar reader (`xmp.go` + `xmp_document.go`) is XPath-based on `antchfx/xmlquery` and namespace-aware via `xpath.CompileWithNS`. Each accessor declares a `chainXPath` priority list; the engine evaluates links left-to-right and returns the first non-empty match. Composition (Lat sign from `GPSLatitudeRef`, sub-second join from `SubSecTimeOriginal`, etc.) lives in the relevant accessor — never in the chain engine.
+
+- **Loader security guards.** `Load` rejects sidecars larger than 1 MiB (`ErrXmpFileTooLarge`) and documents nesting deeper than 64 elements (`ErrXmpTooDeep`). XXE and DTD attacks are mitigated by `encoding/xml`'s default behavior (no external entity resolution); `xmp_security_test.go` is the regression guard.
+- **Element-or-attribute helper.** RDF/XML allows scalar properties to be expressed as either child elements or attributes on `rdf:Description`. The `elemOrAttr(qname)` helper builds a union XPath that matches both — required because digiKam emits `xmpMM:*`/`exif:*`/`tiff:*` as attributes while Adobe writes them as child elements.
+- **Adding an accessor.** Declare a `chainXPath` at package init using `mustCompile` (or `elemOrAttr` for scalar fields), document the priority chain in a one-line comment, then add the accessor that calls `firstNonEmpty` (for scalars) or `queryAll` (for `rdf:Bag`/`rdf:Seq`). Wire the new field into `xmp.go` with the existing "set only when non-empty" pattern.
+- **Source priority.** Sidecar values are tagged `SrcXmp` (priority 32), which outranks `SrcMeta` (priority 16) at the entity layer. Re-indexing a photo after the sidecar has been added overwrites previously-`SrcMeta` values without a database wipe.
+- **Keywords vs. Subject.** `dc:subject` (Adobe's "Keywords" panel) maps to the descriptive `Details.Subject` field — never the `Details.Keywords` field — matching the embedded/ExifTool path where `data.Subject` comes from the `dc:subject`-backed `Subject` tag and `data.Keywords` from IPTC `Keywords`. The XMP path adds only the derived `flash`/`panorama`/`hdr` keywords. Face-region parsing (people Subjects) is implemented: MWG-RS, Microsoft `MP:RegionInfo`, and ACDSee regions are read from embedded XMP and `.xmp` sidecars into `meta.Data.Faces` (see `xmp_faces.go`) and imported as face markers during indexing. `meta.FaceRegions` reports whether a region container was declared and whether every declared region resolved, so callers can tell an authoritative "no faces" from a file that carries no region data. Hierarchical-label parsing (Labels) remains a planned extension tracked under epic [#2260](https://github.com/photoprism/photoprism/issues/2260).
+- **Coverage.** The fixture corpus under `testdata/xmp/{adobe,darktable,digikam,synthetic}/` documents the full set of supported tags and their per-fixture provenance; face-region fixtures (MWG-RS, Microsoft `MP:RegionInfo`, and ACDSee, embedded JSON and `.xmp` sidecar) live under `testdata/faces/` (see its `README.md`).
 
 ### Motion Photos & Embedded Media
 
@@ -36,7 +66,7 @@ The `internal/meta` package extracts, normalizes, and reports metadata from imag
 
 ### Sanitization
 
-- `SanitizeString`, `SanitizeUnicode`, and related helpers strip binary markers, quotes, and invalid Unicode; filenames and keywords use lower-case, dash/underscore-safe regexes.
+- `SanitizeString`, `SanitizeUnicode`, and related helpers strip binary markers, quotes, invalid Unicode, and C0 controls and DEL other than tabs and line breaks (line breaks become `\n`); filenames and keywords use lower-case, dash/underscore-safe regexes.
 - Lower-case regex and quote removal now use `ReplaceAll` and raw strings to avoid double escaping.
 - Google Photos JSON coordinates are clamped to hard latitude/longitude bounds with `geo.ClampCoordinateBounds` before assigning `meta.Data.Lat` and `meta.Data.Lng`.
 

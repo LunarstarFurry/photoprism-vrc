@@ -1,10 +1,12 @@
 import memoizeOne from "memoize-one";
 import RestModel from "model/rest";
+import ModelCache from "model/model-cache";
 import File from "model/file";
 import Marker from "model/marker";
 import { DateTime } from "luxon";
 import { $config } from "app/session";
 import $api from "common/api";
+import { subscribeEntityActions } from "common/event";
 import $util from "common/util";
 import countries from "options/countries.json";
 import { $gettext } from "common/gettext";
@@ -20,7 +22,36 @@ export const DayUnknown = -1;
 export const TimeZoneUTC = "UTC";
 export const TimeZoneLocal = "Local";
 
+// isTimeZoneUTC reports whether the time zone is UTC.
+export function isTimeZoneUTC(zone) {
+  return typeof zone === "string" && zone.toLowerCase() === TimeZoneUTC.toLowerCase();
+}
+
+// isTimeZoneLocal reports whether the time zone is Local or not set, so the wall time is all that is known.
+export function isTimeZoneLocal(zone) {
+  return !zone || zone === TimeZoneLocal;
+}
+
+// localTimeString formats the wall time of a date as the naive UTC timestamp stored in TakenAtLocal.
+function localTimeString(date) {
+  return date.toISO({ suppressMilliseconds: true, includeOffset: false }) + "Z";
+}
+
 export let BatchSize = 156;
+
+// MaxLength mirrors the backend Set*-helper clips (txt.ClipShortText / ClipText)
+// so UI validation matches what the server persists; keep in sync with details.go.
+export const MaxLength = Object.freeze({
+  Title: 200,
+  Caption: 4096,
+  Subject: 1024,
+  Artist: 1024,
+  Copyright: 1024,
+  License: 1024,
+  Keywords: 2048,
+  Notes: 2048,
+  Exposure: 64,
+});
 
 // Photo models core metadata for images and videos shown in the UI.
 export class Photo extends RestModel {
@@ -40,13 +71,14 @@ export class Photo extends RestModel {
       Private: false,
       Scan: false,
       Panorama: false,
+      Projection: "",
       Portrait: false,
       TakenAt: "",
       TakenAtLocal: "",
       TakenSrc: "",
       TimeZone: "",
       Path: "",
-      Color: 0,
+      Color: -1,
       Name: "",
       OriginalName: "",
       Title: "",
@@ -75,7 +107,10 @@ export class Photo extends RestModel {
       LensID: 0,
       LensMake: "",
       LensModel: "",
-      Country: "",
+      // "zz" mirrors the backend UnknownCountry default; without it the
+      // required country rule flashes red between dialog mount and the
+      // findCached() resolve that hydrates the real value.
+      Country: "zz",
       Year: YearUnknown,
       Month: MonthUnknown,
       Day: DayUnknown,
@@ -143,12 +178,24 @@ export class Photo extends RestModel {
   generateClasses = memoizeOne((isPlayable, isInClipboard, portrait, favorite, isPrivate, isStack) => {
     let classes = ["is-photo", "uid-" + this.UID, "type-" + this.Type];
 
-    if (isPlayable) classes.push("is-playable");
-    if (isInClipboard) classes.push("is-selected");
-    if (portrait) classes.push("is-portrait");
-    if (favorite) classes.push("is-favorite");
-    if (isPrivate) classes.push("is-private");
-    if (isStack) classes.push("is-stack");
+    if (isPlayable) {
+      classes.push("is-playable");
+    }
+    if (isInClipboard) {
+      classes.push("is-selected");
+    }
+    if (portrait) {
+      classes.push("is-portrait");
+    }
+    if (favorite) {
+      classes.push("is-favorite");
+    }
+    if (isPrivate) {
+      classes.push("is-private");
+    }
+    if (isStack) {
+      classes.push("is-stack");
+    }
 
     return classes;
   });
@@ -191,6 +238,7 @@ export class Photo extends RestModel {
     return this.Year.toString();
   }
 
+  // localDateString combines calendar fields and wall time in the current time zone.
   localDateString(time) {
     if (!this.localYearString()) {
       return this.TakenAtLocal;
@@ -202,13 +250,7 @@ export class Photo extends RestModel {
       time = this.TakenAtLocal.substring(11, 19);
     }
 
-    let iso = `${date}T${time}`;
-
-    if (this.originalTimeZoneUTC()) {
-      iso += "Z";
-    }
-
-    return iso;
+    return `${date}T${time}${this.currentTimeZoneUTC() ? "Z" : ""}`;
   }
 
   getTimeZone() {
@@ -219,8 +261,9 @@ export class Photo extends RestModel {
     return "";
   }
 
+  // timeIsUTC reports whether the displayed time uses UTC.
   timeIsUTC() {
-    return this.originalTimeZoneUTC() || this.currentTimeZoneUTC();
+    return this.currentTimeZoneUTC();
   }
 
   getDateTime() {
@@ -231,24 +274,96 @@ export class Photo extends RestModel {
     }
   }
 
-  currentTimeZoneUTC() {
-    const tz = this.getTimeZone();
-
-    if (tz) {
-      return tz.toLowerCase() === TimeZoneUTC.toLowerCase();
+  // setValues also resets the time anchor when the values carry a time or zone, since they are the known time again.
+  setValues(values, scalarOnly) {
+    if (values && ["TakenAt", "TakenAtLocal", "TimeZone"].some((key) => Object.hasOwn(values, key))) {
+      this.__timeAnchor = null;
     }
 
-    return false;
+    return super.setValues(values, scalarOnly);
   }
 
-  originalTimeZoneUTC() {
-    const tz = this.originalValue("TimeZone");
+  // rollback also resets the time anchor to the saved values.
+  rollback() {
+    this.__timeAnchor = null;
+    return super.rollback();
+  }
 
-    if (tz) {
-      return tz.toLowerCase() === TimeZoneUTC.toLowerCase();
+  // timeAnchor returns the known time that time zone changes start from: the time entered last with
+  // setLocalTime, or else the saved one, so changing the zone several times gives the same result as once.
+  timeAnchor() {
+    if (this.__timeAnchor) {
+      return this.__timeAnchor;
     }
 
-    return false;
+    return {
+      fromUTC: this.originalTimeZoneUTC(),
+      TakenAt: this.originalValue("TakenAt"),
+      TakenAtLocal: this.originalValue("TakenAtLocal"),
+    };
+  }
+
+  // setLocalTime sets the capture time from the date parts and a wall time in the current zone,
+  // and makes it the known time for later zone changes. It returns the parsed local date.
+  setLocalTime(time) {
+    const localDate = this.localDate(time);
+
+    if (!localDate.isValid) {
+      return localDate;
+    }
+
+    this.TakenAtLocal = localTimeString(localDate);
+
+    if (!isTimeZoneLocal(this.TimeZone)) {
+      this.TakenAt = localDate.toUTC().toISO({ suppressMilliseconds: true });
+    }
+
+    this.__timeAnchor = { fromUTC: this.currentTimeZoneUTC(), TakenAt: this.TakenAt, TakenAtLocal: this.TakenAtLocal };
+
+    return localDate;
+  }
+
+  // changeTimeZone sets a new zone without editing the time: a known UTC time is converted to the local time
+  // in that zone, and a known local time is kept, see timeAnchor. Month and Year follow only while all finer
+  // date parts are known, since an unknown day leaves a placeholder.
+  changeTimeZone(zone) {
+    if (zone === this.TimeZone) {
+      return;
+    }
+
+    const anchor = this.timeAnchor();
+    const toLocal = isTimeZoneLocal(zone);
+    const taken =
+      anchor.fromUTC && !toLocal
+        ? DateTime.fromISO(anchor.TakenAt, { zone: "UTC" }).setZone(zone)
+        : DateTime.fromISO(anchor.TakenAtLocal, { zone: "UTC" }).setZone(toLocal ? "UTC" : zone, { keepLocalTime: true });
+
+    if (!taken.isValid) {
+      return;
+    }
+
+    this.TimeZone = zone;
+    this.TakenAtLocal = localTimeString(taken);
+    this.TakenAt = taken.toUTC().toISO({ suppressMilliseconds: true });
+
+    if (this.Day > 0) {
+      this.Day = taken.day;
+      if (this.Month > 0) {
+        this.Month = taken.month;
+        if (this.Year > 0) {
+          this.Year = taken.year;
+        }
+      }
+    }
+  }
+
+  currentTimeZoneUTC() {
+    return isTimeZoneUTC(this.getTimeZone());
+  }
+
+  // originalTimeZoneUTC reports whether the saved time zone is UTC.
+  originalTimeZoneUTC() {
+    return isTimeZoneUTC(this.originalValue("TimeZone"));
   }
 
   localDate(time) {
@@ -256,14 +371,11 @@ export class Photo extends RestModel {
       return this.utcDate();
     }
 
-    let iso = this.localDateString(time);
-    let zone = this.getTimeZone();
+    const iso = this.localDateString(time);
+    const zone = this.getTimeZone();
 
-    if (zone === "") {
-      zone = "UTC";
-    }
-
-    return DateTime.fromISO(iso, { zone });
+    // A Local wall time is naive, so it is read as UTC rather than in the browser's zone.
+    return DateTime.fromISO(iso, { zone: isTimeZoneLocal(zone) ? "UTC" : zone });
   }
 
   utcDate() {
@@ -315,6 +427,7 @@ export class Photo extends RestModel {
     return result;
   }
 
+  // fileBase returns the last element of a file path, without bidi and other control characters.
   fileBase(name) {
     let result = name;
     const slash = result.lastIndexOf("/");
@@ -323,7 +436,7 @@ export class Photo extends RestModel {
       result = name.substring(slash + 1);
     }
 
-    return result;
+    return $util.stripBidiControls(result);
   }
 
   getEntityName() {
@@ -735,13 +848,19 @@ export class Photo extends RestModel {
     return `${$config.apiUri}/dl/${this.fileHash()}?t=${$config.downloadToken}`;
   }
 
+  // isVideoFileKept checks if a file of a video is a video, a live photo part, or a metadata sidecar.
+  isVideoFileKept(file) {
+    return file.MediaType === media.Video || file.MediaType === media.Live || file.MediaType === media.Sidecar || !!file.Video || !!file.Sidecar;
+  }
+
   // Downloads all related files if they exist and depending on the settings.
+  // Returns { downloaded, skipped } so callers can report the outcome.
   downloadAll() {
     const s = $config.getSettings();
 
     if (!s || !s.features || !s.download || !s.features.download || s.download.disabled) {
       console.log("download: disabled in settings", s.features, s.download);
-      return;
+      return { downloaded: 0, skipped: 0 };
     }
 
     const token = $config.downloadToken;
@@ -751,48 +870,75 @@ export class Photo extends RestModel {
       const hash = this.fileHash();
 
       if (hash) {
-        download(`/${$config.apiUri}/dl/${hash}?t=${token}`, this.baseName(false));
+        download(`${$config.apiUri}/dl/${hash}?t=${token}`, this.baseName(false));
+        return { downloaded: 1, skipped: 0 };
       } else if ($config.debug) {
         console.log("download: failed, empty file hash", this);
       }
 
-      return;
+      return { downloaded: 0, skipped: 0 };
     }
 
-    this.Files.forEach((file) => {
+    let downloaded = 0;
+    let skipped = 0;
+
+    let files = this.Files;
+
+    // Start the video files of a video first, since some browsers keep only the first of several downloads.
+    if (this.Type === media.Video) {
+      const isVideo = (file) => !!file && (file.MediaType === media.Video || !!file.Video);
+      files = [...files.filter(isVideo), ...files.filter((file) => !isVideo(file))];
+    }
+
+    files.forEach((file) => {
       if (!file || !file.Hash) {
         return;
       }
 
       // Originals only?
-      if (s.download.originals && file.Root.length > 1) {
+      if (s.download.originals && file.Root !== "/") {
         // Don't download broken files and sidecars.
-        if ($config.debug) console.log(`download: skipped ${file.Root} file ${file.Name}`);
+        if ($config.debug) {
+          console.log(`download: skipped ${file.Root} file ${file.Name}`);
+        }
+        skipped++;
         return;
       }
 
       // Skip metadata sidecar files?
       if (!s.download.mediaSidecar && (file.MediaType === media.Sidecar || file.Sidecar)) {
         // Don't download broken files and sidecars.
-        if ($config.debug) console.log(`download: skipped sidecar file ${file.Name}`);
+        if ($config.debug) {
+          console.log(`download: skipped sidecar file ${file.Name}`);
+        }
+        skipped++;
         return;
       }
 
       // Skip RAW images?
       if (!s.download.mediaRaw && (file.MediaType === media.Raw || file.FileType === media.Raw)) {
-        if ($config.debug) console.log(`download: skipped raw file ${file.Name}`);
+        if ($config.debug) {
+          console.log(`download: skipped raw file ${file.Name}`);
+        }
+        skipped++;
         return;
       }
 
-      // If this is a video, always skip stacked images...
-      // see https://github.com/photoprism/photoprism/issues/1436
-      if (this.Type === media.Video && !(file.MediaType === media.Video || file.Video)) {
-        if ($config.debug) console.log(`download: skipped video sidecar ${file.Name}`);
+      // Skip generated still images of videos, i.e. files outside the originals folder that
+      // are neither a video, a live photo part, nor a metadata sidecar.
+      if (this.Type === media.Video && typeof file.Root === "string" && file.Root !== "/" && !this.isVideoFileKept(file)) {
+        if ($config.debug) {
+          console.log(`download: skipped video still ${file.Name}`);
+        }
+        skipped++;
         return;
       }
 
       download(`${$config.apiUri}/dl/${file.Hash}?t=${token}`, this.fileBase(file.Name));
+      downloaded++;
     });
+
+    return { downloaded, skipped };
   }
 
   calculateSize(width, height) {
@@ -874,22 +1020,38 @@ export class Photo extends RestModel {
     return $gettext("Unknown");
   }
 
-  locationInfo = () => {
-    return this.generateLocationInfo(this.PlaceID, this.Country, this.Place, this.PlaceLabel);
-  };
+  // Localized location label with the "Unknown" fallback — for views
+  // that render the placeholder as an edit prompt (cards, list, edit
+  // dialog). Read-only renderers should use `placeName()`.
+  locationInfo() {
+    return this.placeName() || $gettext("Unknown");
+  }
 
-  generateLocationInfo = memoizeOne((placeId, countryCode, place, placeLabel) => {
-    if (placeId === "zz" && countryCode !== "zz") {
+  // Returns the place label, or "" when the photo has no real
+  // geocoding data. Read-only callers gate row visibility on this.
+  placeName() {
+    return this.generatePlaceName(this.PlaceID, this.Country, this.Place, this.PlaceLabel);
+  }
+
+  generatePlaceName = memoizeOne((placeId, countryCode, place, placeLabel) => {
+    let label = "";
+
+    if (placeId === "zz" && countryCode && countryCode !== "zz") {
       const country = countries.find((c) => c.Code === countryCode);
-
       if (country) {
         return country.Name;
       }
     } else if (place && place.Label) {
-      return place.Label;
+      label = place.Label;
     }
 
-    return placeLabel ? placeLabel : $gettext("Unknown");
+    if (!label) {
+      label = placeLabel || "";
+    }
+
+    // Strip the DB literal from UnknownPlace (`internal/entity/place.go`).
+    // Backend-set, not translated — safe to compare.
+    return label === "Unknown" ? "" : label;
   });
 
   addSizeInfo(file, info) {
@@ -1005,9 +1167,9 @@ export class Photo extends RestModel {
   });
 
   // Example: Apple iPhone 12 Pro Max, DNG, 4032 × 3024, 32.9 MB
-  getCameraInfo = () => {
+  getCameraInfo() {
     return this.generateCameraInfo(this.Camera, this.CameraID, this.CameraMake, this.CameraModel, this.Iso, this.Exposure);
-  };
+  }
 
   generateCameraInfo = memoizeOne((camera, cameraId, cameraMake, cameraModel, iso, exposure) => {
     let info = [];
@@ -1053,9 +1215,9 @@ export class Photo extends RestModel {
   });
 
   // Example: iPhone 12 Pro Max 5.1mm ƒ/1.6, 26mm, ISO32, 1/4525
-  getLensInfo = () => {
+  getLensInfo() {
     return this.generateLensInfo(this.Lens, this.LensID, this.LensMake, this.LensModel, this.CameraModel, this.FNumber, this.FocalLength);
-  };
+  }
 
   generateLensInfo = memoizeOne((lens, lensId, lensMake, lensModel, cameraModel, fNumber, focalLength) => {
     let info = [];
@@ -1089,6 +1251,23 @@ export class Photo extends RestModel {
     return info.join(", ");
   });
 
+  getExifInfo() {
+    const parts = [];
+    if (this.FocalLength) {
+      parts.push(this.FocalLength + "mm");
+    }
+    if (this.FNumber) {
+      parts.push("\u0192/" + this.FNumber);
+    }
+    if (this.Iso) {
+      parts.push("ISO " + this.Iso);
+    }
+    if (this.Exposure) {
+      parts.push(this.Exposure);
+    }
+    return parts.join(" \u2022 ");
+  }
+
   getCamera() {
     if (this.Camera) {
       return this.Camera.Make + " " + this.Camera.Model;
@@ -1099,6 +1278,9 @@ export class Photo extends RestModel {
     return $gettext("Unknown");
   }
 
+  // archive moves the photo to the archive (soft delete). No local flag flip:
+  // Photo consumers don't read .Archived (Thumb carries that state); the grid
+  // refreshes via the photos.archived WS handler.
   archive() {
     return $api.post("batch/photos/archive", { photos: [this.getId()] });
   }
@@ -1182,6 +1364,37 @@ export class Photo extends RestModel {
     return $api.delete(this.getEntityResource() + "/label/" + id).then((r) => Promise.resolve(this.setValues(r.data)));
   }
 
+  // addToAlbum adds this photo to the album, then evicts and refetches so
+  // this.Albums reflects the saved state without waiting on a WS round-trip.
+  // Distinct from Thumb.addToAlbum (grid layer, Removed flag); both contracts
+  // are pinned in tests.
+  addToAlbum(albumUID) {
+    if (!albumUID) {
+      return Promise.resolve(this);
+    }
+    return $api
+      .post(`albums/${albumUID}/photos`, { photos: [this.UID] })
+      .then(() => {
+        Photo.evictCache(this.UID);
+        return this.find(this.UID);
+      })
+      .then((photo) => Promise.resolve(this.setValues(photo.getValues())));
+  }
+
+  // removeFromAlbum mirrors addToAlbum's evict + refind pattern.
+  removeFromAlbum(albumUID) {
+    if (!albumUID) {
+      return Promise.resolve(this);
+    }
+    return $api
+      .delete(`albums/${albumUID}/photos`, { data: { photos: [this.UID] } })
+      .then(() => {
+        Photo.evictCache(this.UID);
+        return this.find(this.UID);
+      })
+      .then((photo) => Promise.resolve(this.setValues(photo.getValues())));
+  }
+
   getMarkers(valid) {
     let result = [];
 
@@ -1202,7 +1415,60 @@ export class Photo extends RestModel {
     return result;
   }
 
+  // trimInputs strips whitespace from MaxLength fields; Subject/Artist/etc. live under Details.
+  trimInputs() {
+    for (const key of Object.keys(MaxLength)) {
+      if (typeof this[key] === "string") {
+        this[key] = this[key].trim();
+        continue;
+      }
+      if (this.Details && typeof this.Details[key] === "string") {
+        this.Details[key] = this.Details[key].trim();
+      }
+    }
+  }
+
+  // mergeUnchanged copies the editable text fields and their sources from values into fields without
+  // unsaved edits and records them as saved, so a refresh from the server never discards local edits.
+  mergeUnchanged(values) {
+    if (!values) {
+      return;
+    }
+
+    const changes = {};
+
+    for (const key of ["Title", "Caption"]) {
+      if (this[key] === this.originalValue(key)) {
+        for (const field of [key, `${key}Src`]) {
+          if (values[field] !== undefined) {
+            changes[field] = values[field];
+          }
+        }
+      }
+    }
+
+    this.setValues(changes, true);
+
+    const details = this.Details;
+    const saved = this.__originalValues.Details;
+
+    if (!details || !saved || !values.Details) {
+      return;
+    }
+
+    for (const key of ["Subject", "Artist", "Copyright", "License", "Keywords", "Notes"]) {
+      if (details[key] === saved[key]) {
+        for (const field of [key, `${key}Src`]) {
+          if (values.Details[field] !== undefined) {
+            details[field] = saved[field] = values.Details[field];
+          }
+        }
+      }
+    }
+  }
+
   update() {
+    this.trimInputs();
     const values = this.getValues(true);
 
     if (typeof values.Title === "string") {
@@ -1284,6 +1550,63 @@ export class Photo extends RestModel {
     return $gettext("Photo");
   }
 
+  // Module-level Photo cache. Per-subclass scoping (rather than a shared
+  // static on Rest) keeps Photo's size budget and invalidation surface
+  // independent from other model caches. Snapshot via getValues so type
+  // coercion through getDefaults() is applied; hydrate by constructing
+  // a fresh Photo from the cached values.
+  static _cache = new ModelCache({
+    max: 50,
+    ttl: 0,
+    snapshot: (photo) => (photo instanceof Photo ? photo.getValues(false) : photo),
+    hydrate: (values) => new Photo(values),
+  });
+
+  // getCache exposes the ModelCache so the inherited Rest.findCached and
+  // Rest.prefetch helpers can route through it. Subclasses that don't want
+  // caching simply don't override Rest.getCache() (default: null).
+  static getCache() {
+    return Photo._cache;
+  }
+
+  // evictCache drops a photo from the LRU. Mutating methods rely on the
+  // photos.* WS subscriptions below; this stays as an escape hatch for flows
+  // that mutate a photo without a matching event (e.g. album-membership).
+  static evictCache(uid) {
+    if (uid) {
+      Photo._cache.evict(uid);
+    }
+  }
+
+  // clearCache drops every cached photo and rejects in-flight fetches via the
+  // session-epoch gate so metadata fetched under one role cannot reach another.
+  static clearCache() {
+    Photo._cache.clear();
+  }
+
+  // Warms the cache for the slides around `index` so the next/previous
+  // sidebar open hits a cached entity. Defaults match the lightbox's
+  // current policy (one slide forward, none back). Each prefetch is
+  // fire-and-forget; rejections are absorbed via Promise.allSettled.
+  static prefetchAround(models, index, { before = 0, after = 1 } = {}) {
+    if (!Array.isArray(models) || typeof index !== "number" || index < 0) {
+      return Promise.resolve([]);
+    }
+    const tasks = [];
+    const start = Math.max(0, index - before);
+    const end = Math.min(models.length - 1, index + after);
+    for (let i = start; i <= end; i++) {
+      if (i === index) {
+        continue;
+      }
+      const uid = models[i]?.UID;
+      if (uid) {
+        tasks.push(Photo.prefetch(uid));
+      }
+    }
+    return Promise.allSettled(tasks);
+  }
+
   static mergeResponse(results, response) {
     if (response.offset === 0 || results.length === 0) {
       return response.models;
@@ -1301,5 +1624,25 @@ export class Photo extends RestModel {
     return results.concat(response.models);
   }
 }
+
+// evictCachedFromEntities drops cached entries from a WS payload, accepting
+// both bare-UID arrays and legacy entity-object payloads. Events are
+// evict-only signals; the next read goes back through /photos/:uid for the
+// full record.
+function evictCachedFromEntities(data) {
+  if (!data || !Array.isArray(data.entities)) {
+    return;
+  }
+  data.entities.forEach((entity) => {
+    if (typeof entity === "string" && entity) {
+      Photo._cache.evict(entity);
+    } else if (entity && typeof entity === "object" && entity.UID) {
+      Photo._cache.evict(entity.UID);
+    }
+  });
+}
+
+// Evict cache entries on any standard mutation verb in the photos namespace.
+subscribeEntityActions("photos", (_ev, data) => evictCachedFromEntities(data));
 
 export default Photo;

@@ -1,7 +1,9 @@
 import { Selector, t } from "testcafe";
 
 export default class Page {
-  constructor() {}
+  constructor() {
+    this.search = Selector(".input-search input");
+  }
 
   async getNthAlbumUid(type, nth) {
     if (type === "all") {
@@ -13,6 +15,17 @@ export default class Page {
         .getAttribute("data-uid");
       return NthAlbum;
     }
+  }
+
+  // getAlbumUidByTitle returns the UID of the album card matching a title.
+  // Callers narrow the list with toolbar.search first. Picking an album by position is
+  // unstable because the moments worker adds moment and calendar albums on a timer,
+  // so a new one can sort ahead of the intended album.
+  async getAlbumUidByTitle(title) {
+    const Card = Selector("div.result.is-album", { timeout: 10000 }).withText(title);
+    await t.expect(Card.exists).ok(`album "${title}" not found`);
+    const AlbumUid = await Card.getAttribute("data-uid");
+    return AlbumUid;
   }
 
   async getAlbumCount(type) {
@@ -36,20 +49,14 @@ export default class Page {
   }
 
   async selectAlbumFromUID(uid) {
-    await t
-      .hover(Selector("div.result.is-album").withAttribute("data-uid", uid))
-      .click(Selector(`.uid-${uid} .input-select`));
+    await t.hover(Selector("div.result.is-album").withAttribute("data-uid", uid)).click(Selector(`.uid-${uid} .input-select`));
   }
 
   async toggleSelectNthAlbum(nth, type) {
     if (type === "all") {
-      await t
-        .hover(Selector("div.result.is-album", { timeout: 4000 }).nth(nth))
-        .click(Selector("div.result.is-album .input-select").nth(nth));
+      await t.hover(Selector("div.result.is-album", { timeout: 4000 }).nth(nth)).click(Selector("div.result.is-album .input-select").nth(nth));
     } else {
-      await t
-        .hover(Selector("div.type-" + type, { timeout: 4000 }).nth(nth))
-        .click(Selector("div.type-" + type + " .input-select").nth(nth));
+      await t.hover(Selector("div.type-" + type, { timeout: 4000 }).nth(nth)).click(Selector("div.type-" + type + " .input-select").nth(nth));
     }
   }
 
@@ -67,6 +74,17 @@ export default class Page {
 
   async openAlbumWithUid(uid) {
     await t.click(Selector("div.result.is-album").withAttribute("data-uid", uid));
+  }
+
+  async openByTitle(title) {
+    // Enter submits the filter to the backend; without it the grid stays on
+    // the default ordering and a freshly-added album can be pushed off-screen
+    // by virtual scrolling.
+    await t.typeText(this.search, title, { replace: true }).pressKey("enter");
+    const card = Selector("div.result.is-album", { timeout: 10000 }).withText(title);
+    await t.expect(card.exists).ok();
+    await t.click(card);
+    await t.expect(Selector("div.is-photo").visible).ok();
   }
 
   async checkAlbumVisibility(uid, visible) {

@@ -17,7 +17,7 @@ func (m *User) SetValuesFromCli(ctx *cli.Context) error {
 
 	// Email address.
 	if ctx.IsSet("email") {
-		m.UserEmail = frm.Email()
+		m.SetEmail(frm.Email())
 	}
 
 	// Display name.
@@ -37,14 +37,20 @@ func (m *User) SetValuesFromCli(ctx *cli.Context) error {
 		privilegeLevelChange = true
 	}
 
-	// Authentication ID.
+	// Authentication ID, which is set after validation, since setting it clears the same ID on other accounts.
 	if ctx.IsSet("auth-id") {
 		if frm.AuthID == "" {
 			m.AuthID = ""
 			m.AuthIssuer = ""
-		} else {
-			m.SetAuthID(frm.AuthID, m.AuthIssuer)
 		}
+		privilegeLevelChange = true
+	}
+
+	// Authentication Issuer URL, e.g. the Portal base URL when adopting an
+	// account into a cluster OIDC identity. Pinning it scopes the link to that
+	// issuer instead of matching any provider that asserts the same subject.
+	if ctx.IsSet("auth-issuer") {
+		m.AuthIssuer = frm.AuthIssuer
 		privilegeLevelChange = true
 	}
 
@@ -63,6 +69,12 @@ func (m *User) SetValuesFromCli(ctx *cli.Context) error {
 	// Allow the use of WebDAV?
 	if ctx.IsSet("webdav") {
 		m.WebDAV = frm.WebDAV
+		privilegeLevelChange = true
+	}
+
+	// Allow the use of MCP?
+	if ctx.IsSet("mcp") {
+		m.MCP = frm.MCPSetting()
 		privilegeLevelChange = true
 	}
 
@@ -100,9 +112,16 @@ func (m *User) SetValuesFromCli(ctx *cli.Context) error {
 	if err := m.Validate(); err != nil {
 		// Invalid.
 		return err
-	} else if privilegeLevelChange {
-		// Delete sessions after privilege level change.
-		m.DeleteSessions(nil)
+	}
+
+	if ctx.IsSet("auth-id") && frm.AuthID != "" {
+		m.SetAuthID(frm.AuthID, m.AuthIssuer)
+	}
+
+	if privilegeLevelChange {
+		// Revoke all user sessions after a privilege level change,
+		// except for app passwords and client access tokens.
+		m.RevokeDerivedSessions(nil)
 	}
 
 	return nil
@@ -110,7 +129,14 @@ func (m *User) SetValuesFromCli(ctx *cli.Context) error {
 
 // RestoreFromCli restores a deleted account from CLI input and optionally sets a new password.
 func (m *User) RestoreFromCli(ctx *cli.Context, newPassword string) (err error) {
-	m.DeletedAt = nil
+	// Validate the new password before restoring the account.
+	if newPassword != "" {
+		if err = ValidatePasswordLength(newPassword); err != nil {
+			return err
+		}
+	}
+
+	m.DeletedAt = DeletedAt{}
 
 	// Set values.
 	if err = m.SetValuesFromCli(ctx); err != nil {

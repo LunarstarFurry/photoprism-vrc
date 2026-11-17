@@ -1,8 +1,10 @@
 package workers
 
 import (
+	"errors"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/dustin/go-humanize/english"
 
@@ -15,6 +17,18 @@ import (
 	"github.com/photoprism/photoprism/internal/service/webdav"
 	"github.com/photoprism/photoprism/pkg/clean"
 	"github.com/photoprism/photoprism/pkg/fs"
+	"github.com/photoprism/photoprism/pkg/media"
+	"github.com/photoprism/photoprism/pkg/txt"
+)
+
+// downloadLimit is the number of queued files a download run reads, of which the last 48 are left to the next
+// run, so that related files are not split. Tests may lower it to no less than 51.
+var downloadLimit = 1000
+
+// syncIndexWorker and syncImportWorker process the downloaded files; tests replace them to observe the jobs.
+var (
+	syncIndexWorker  = photoprism.IndexWorker
+	syncImportWorker = photoprism.ImportWorker
 )
 
 // Downloads groups files to sync by their directory/prefix.
@@ -28,7 +42,7 @@ func (w *Sync) downloadPath() string {
 // relatedDownloads returns files to be downloaded grouped by prefix.
 func (w *Sync) relatedDownloads(a entity.Service) (result Downloads, err error) {
 	result = make(Downloads)
-	maxResults := 1000
+	maxResults := downloadLimit
 
 	// Get list of remote files from database.
 	files, err := query.FileSyncs(a.ID, entity.FileSyncNew, maxResults)
@@ -52,23 +66,35 @@ func (w *Sync) relatedDownloads(a entity.Service) (result Downloads, err error) 
 	return result, nil
 }
 
-// Downloads remote files in batches and imports / indexes them
+// download transfers eligible remote files in batches for import and indexing.
 func (w *Sync) download(a entity.Service) (complete bool, err error) {
+	if webdav.SkipSyncPath(a.SyncPath) {
+		log.Tracef("sync: skipping excluded path %s for service %s (download)", clean.Log(a.SyncPath), clean.Log(a.AccName))
+		return true, nil
+	}
+
+	// Downloads that are imported need a destination that gives names the index accepts; refresh reports it.
+	if !a.SyncFilenames {
+		if destErr := get.Import().CheckDest(w.conf.ImportDest()); destErr != nil {
+			log.Debugf("sync: skipped downloads from %s because the import destination is not supported", clean.Log(a.AccName))
+			return true, nil
+		}
+	}
 	// Set up index worker
 	indexJobs := make(chan photoprism.IndexJob)
 
-	go photoprism.IndexWorker(indexJobs)
+	go syncIndexWorker(indexJobs)
 	defer close(indexJobs)
 
 	// Set up import worker
 	importJobs := make(chan photoprism.ImportJob)
-	go photoprism.ImportWorker(importJobs)
+	go syncImportWorker(importJobs)
 	defer close(importJobs)
 
 	relatedFiles, err := w.relatedDownloads(a)
 
 	if err != nil {
-		w.logErr(err)
+		w.logAccountErr(err, a)
 		return false, err
 	}
 
@@ -86,14 +112,24 @@ func (w *Sync) download(a entity.Service) (complete bool, err error) {
 		return true, nil
 	}
 
+	// The stage completes once a run makes no progress, see below.
+	before, err := query.CountQueuedFileSyncs(a.ID, a.RetryLimit)
+
+	if err != nil {
+		return false, err
+	}
+
 	// Display log message.
-	log.Infof("sync: downloading from %s", a.AccName)
+	log.Infof("sync: downloading from %s", clean.Log(a.AccName))
 
 	client, err := webdav.NewClient(a.AccURL, a.AccUser, a.AccPass, webdav.Timeout(a.AccTimeout), w.conf.ServicesCIDR())
 
 	if err != nil {
 		return false, err
 	}
+
+	// Bound each download to the originals size limit.
+	client.SetDownloadLimit(w.conf.OriginalsLimitBytes())
 
 	var baseDir string
 
@@ -105,8 +141,12 @@ func (w *Sync) download(a entity.Service) (complete bool, err error) {
 
 	done := make(map[string]bool)
 
+	var stalls stallBudget
+
+	stopped := false
+
 	for _, files := range relatedFiles {
-		if w.conf.FilesQuotaReached() {
+		if w.conf.InsufficientStorage() {
 			log.Warnf("sync: skipped downloading files from %s due to insufficient storage", clean.Log(a.AccName))
 			return false, nil
 		}
@@ -116,29 +156,96 @@ func (w *Sync) download(a entity.Service) (complete bool, err error) {
 				return false, nil
 			}
 
-			// Failed too often?
-			if a.RetryLimit > 0 && file.Errors > a.RetryLimit {
-				log.Debugf("sync: downloading %s from %s failed more than %d times", file.RemoteName, clean.Log(a.AccName), a.RetryLimit)
+			if webdav.SkipSyncPath(file.RemoteName) {
+				log.Debugf("sync: skipping excluded path %s", clean.Log(file.RemoteName))
+				file.Status, file.Error, file.Errors = entity.FileSyncIgnore, "", 0
+				w.logFileErr(entity.Db().Save(&file).Error, file.RemoteName, a)
+				files[i] = file
 				continue
 			}
 
-			localName := baseDir + file.RemoteName
+			if syncNameTooLong(file.RemoteName) {
+				log.Debugf("sync: skipping %s from %s because its name is too long", clean.Log(file.RemoteName), clean.Log(a.AccName))
+				file.Status, file.Error, file.Errors = entity.FileSyncIgnore, "", 0
+				w.logFileErr(entity.Db().Save(&file).Error, file.RemoteName, a)
+				files[i] = file
+				continue
+			}
+
+			// A queued file whose name is not portable is removed from the queue, like in a refresh.
+			if !portableSyncName(syncNameRoot(a), file.RemoteName) {
+				log.Debugf("sync: skipping %s from %s because its name is not supported", clean.Log(file.RemoteName), clean.Log(a.AccName))
+				w.logFileErr(entity.Db().Delete(&file).Error, file.RemoteName, a)
+				continue
+			}
+
+			if !a.SyncYamlEnabled() && fs.FileType(file.RemoteName) == fs.SidecarYaml {
+				file.Status, file.Error, file.Errors = entity.FileSyncIgnore, "", 0
+				w.logFileErr(entity.Db().Save(&file).Error, file.RemoteName, a)
+				files[i] = file
+				continue
+			}
+
+			// Raw images and videos queued while the option was on are not downloaded once it is off.
+			if content := media.FromName(file.RemoteName); !a.SyncRaw && (content == media.Raw || content == media.Video) {
+				file.Status, file.Error, file.Errors = entity.FileSyncIgnore, "", 0
+				w.logFileErr(entity.Db().Save(&file).Error, file.RemoteName, a)
+				files[i] = file
+				continue
+			}
+
+			// Failed too often?
+			if a.RetryLimit > 0 && file.Errors > a.RetryLimit {
+				log.Debugf("sync: downloading %s from %s failed more than %d times", clean.Log(file.RemoteName), clean.Log(a.AccName), a.RetryLimit)
+				continue
+			}
+
+			// Resolve the local destination with a safe join below the sync base directory.
+			localName, joinErr := fs.SafeJoin(baseDir, strings.TrimPrefix(file.RemoteName, "/"))
+
+			if joinErr != nil {
+				log.Warnf("sync: skipped download of %s from %s because the remote path is invalid", clean.Log(file.RemoteName), clean.Log(a.AccName))
+				file.Status = entity.FileSyncFailed
+				file.Error = "invalid remote path"
+				file.Errors++
+
+				if err = entity.Db().Save(&file).Error; err != nil {
+					w.logFileErr(err, file.RemoteName, a)
+				} else {
+					files[i] = file
+				}
+
+				continue
+			}
+
+			stalled := false
 
 			if _, err = os.Stat(localName); err == nil {
-				log.Warnf("sync: skipped download of %s from %s because local file %s already exists", file.RemoteName, clean.Log(a.AccName), localName)
+				log.Warnf("sync: skipped download of %s from %s because local file %s already exists", clean.Log(file.RemoteName), clean.Log(a.AccName), clean.Log(localName))
 				file.Status = entity.FileSyncExists
 				file.Error = ""
 				file.Errors = 0
 			} else {
-				if err = client.Download(file.RemoteName, localName, false); err != nil {
-					file.Errors++
-					file.Error = err.Error()
+				// A listed size above the limit fails as the download would, without transferring the file.
+				if err = client.CheckDownloadSize(localName, file.RemoteSize); err == nil {
+					err = client.Download(file.RemoteName, localName, false)
+				}
 
-					if file.Errors > a.RetryLimit {
+				if errors.Is(err, os.ErrExist) {
+					log.Infof("sync: skipped download of %s from %s because a local file was created meanwhile", clean.Log(file.RemoteName), clean.Log(a.AccName))
+					file.Status = entity.FileSyncExists
+					file.Error = ""
+					file.Errors = 0
+				} else if err != nil {
+					stalled = errors.Is(err, webdav.ErrStalled)
+					file.Errors++
+					file.Error = clean.ErrorBytes(err, txt.ClipError)
+
+					if a.RetryLimit > 0 && file.Errors > a.RetryLimit {
 						file.Status = entity.FileSyncFailed
 					}
 				} else {
-					log.Infof("sync: downloaded %s from %s", file.RemoteName, clean.Log(a.AccName))
+					log.Infof("sync: downloaded %s from %s", clean.Log(file.RemoteName), clean.Log(a.AccName))
 					file.Status = entity.FileSyncDownloaded
 					file.Error = ""
 					file.Errors = 0
@@ -150,9 +257,16 @@ func (w *Sync) download(a entity.Service) (complete bool, err error) {
 			}
 
 			if err = entity.Db().Save(&file).Error; err != nil {
-				w.logErr(err)
+				w.logFileErr(err, file.RemoteName, a)
 			} else {
 				files[i] = file
+			}
+
+			// Transfers stop after too many stalled, while the files of this group already downloaded are still imported.
+			if stalls.Add(stalled) {
+				stalls.Warn("sync", a.AccName)
+				stopped = true
+				break
 			}
 		}
 
@@ -161,16 +275,24 @@ func (w *Sync) download(a entity.Service) (complete bool, err error) {
 				continue
 			}
 
-			mf, err := photoprism.NewMediaFile(baseDir + file.RemoteName)
+			localName, joinErr := fs.SafeJoin(baseDir, strings.TrimPrefix(file.RemoteName, "/"))
+
+			if joinErr != nil {
+				continue
+			}
+
+			mf, err := photoprism.NewMediaFile(localName)
 
 			if err != nil || !mf.IsMedia() || mf.Empty() {
 				continue
 			}
 
-			related, err := mf.RelatedFiles(w.conf.Settings().StackSequences())
+			related, err := syncRelated(mf, w.conf.Settings().StackSequences())
 
 			if err != nil {
-				w.logWarn(err)
+				log.Warnf("sync: %s (%s from %s)", clean.Error(err), clean.Log(file.RemoteName), clean.Log(a.AccName))
+				continue
+			} else if related.Main == nil {
 				continue
 			}
 
@@ -189,7 +311,7 @@ func (w *Sync) download(a entity.Service) (complete bool, err error) {
 			related.Files = rf
 
 			if a.SyncFilenames {
-				log.Infof("sync: indexing %s and related files", file.RemoteName)
+				log.Infof("sync: indexing %s and related files", clean.Log(file.RemoteName))
 				indexJobs <- photoprism.IndexJob{
 					FileName: mf.FileName(),
 					Related:  related,
@@ -197,7 +319,7 @@ func (w *Sync) download(a entity.Service) (complete bool, err error) {
 					Ind:      get.Index(),
 				}
 			} else {
-				log.Infof("sync: importing %s and related files", file.RemoteName)
+				log.Infof("sync: importing %s and related files", clean.Log(file.RemoteName))
 				importJobs <- photoprism.ImportJob{
 					FileName:  mf.FileName(),
 					Related:   related,
@@ -206,6 +328,10 @@ func (w *Sync) download(a entity.Service) (complete bool, err error) {
 					Imp:       get.Import(),
 				}
 			}
+		}
+
+		if stopped {
+			break
 		}
 	}
 
@@ -218,5 +344,42 @@ func (w *Sync) download(a entity.Service) (complete bool, err error) {
 		w.logWarn(query.UpdateCovers())
 	}
 
-	return false, nil
+	after, err := query.CountQueuedFileSyncs(a.ID, a.RetryLimit)
+
+	if err != nil {
+		return false, err
+	}
+
+	// The stage stays open while a run changes the status of a queued file, or tries files that may be tried again:
+	// without a retry limit, failed files stay new and are tried again in the next sync, so only files not tried yet
+	// count, which the next run reads first; with one, files are tried in each run until they exceed it. A file
+	// whose outcome cannot be saved therefore keeps the stage open only as long as others make progress.
+	if a.RetryLimit <= 0 {
+		if after.Queued < before.Queued || after.Untried > 0 && after.Untried < before.Untried {
+			return false, nil
+		}
+
+		log.Warnf("sync: failed to download %s from %s, retrying in the next sync", english.Plural(int(after.Failed), "file", "files"), clean.Log(a.AccName))
+
+		return true, nil
+	} else if after.Retryable > 0 && (after.Queued < before.Queued || after.Errors > before.Errors) {
+		return false, nil
+	} else if after.Retryable > 0 {
+		log.Warnf("sync: %s from %s still queued, retrying in the next sync", english.Plural(int(after.Retryable), "file", "files"), clean.Log(a.AccName))
+	}
+
+	return true, nil
+}
+
+// syncRelated returns the files to index or import with a downloaded file, without those whose names are not portable.
+func syncRelated(mf *photoprism.MediaFile, stackSequences bool) (photoprism.RelatedFiles, error) {
+	related, err := mf.RelatedFiles(stackSequences)
+
+	if err != nil {
+		return related, err
+	}
+
+	return photoprism.PortableRelated(related, mf, func(f *photoprism.MediaFile) {
+		log.Debugf("sync: skipped %s because its name is not supported", clean.Log(f.BaseName()))
+	}), nil
 }

@@ -6,11 +6,17 @@ import (
 	urlpkg "net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
+	"time"
+	"unicode"
 
+	"github.com/photoprism/photoprism/internal/auth/acl"
+	"github.com/photoprism/photoprism/internal/event"
 	"github.com/photoprism/photoprism/internal/service/cluster"
 	"github.com/photoprism/photoprism/internal/service/cluster/theme"
 	"github.com/photoprism/photoprism/pkg/clean"
+	"github.com/photoprism/photoprism/pkg/dsn"
 	"github.com/photoprism/photoprism/pkg/fs"
 	"github.com/photoprism/photoprism/pkg/http/dns"
 	"github.com/photoprism/photoprism/pkg/http/header"
@@ -26,7 +32,10 @@ var DefaultPortalUrl = "https://portal.${PHOTOPRISM_CLUSTER_DOMAIN}"
 var DefaultNodeRole = cluster.RoleInstance
 
 // DefaultJWTAllowedScopes lists default OAuth scopes for cluster-issued JWTs.
-var DefaultJWTAllowedScopes = "config cluster vision metrics"
+// Includes "users" so the Portal-side user-management proxy
+// (POST/PUT/DELETE /api/v1/cluster/nodes/{uuid}/users[/{uid}]) and the
+// lifecycle sync push are accepted by the instance JWT scope allowlist.
+var DefaultJWTAllowedScopes = "config cluster vision metrics mcp users"
 
 // SaveClusterOptionsUpdate persists a cluster options update to options.yml,
 // reloads in-memory options, and returns true when values changed.
@@ -39,11 +48,37 @@ func (c *Config) SaveClusterOptionsUpdate(update cluster.OptionsUpdate) (bool, e
 		return false, err
 	}
 
+	// Database settings are saved as a whole or not at all, and refused ones do not prevent saving the rest.
+	if err := ValidateClusterDatabaseUpdate(update); err != nil {
+		event.SystemWarn([]string{"config", "cluster", "ignored database settings (%s)"}, clean.Error(err))
+		update.ClearDatabase()
+
+		if update.IsZero() {
+			return false, nil
+		}
+	}
+
+	// Store a DSN rebuilt from its validated parts and accepted parameters.
+	if update.DatabaseDSN != nil {
+		dsnValue, dropped, err := clusterDatabaseDSN(*update.DatabaseDSN, c.DatabaseTimeout())
+
+		if err != nil {
+			return false, err
+		} else if names := dsn.LoggableParamNames(dropped); len(names) > 0 {
+			event.SystemWarn([]string{"config", "cluster", "ignored %d unsupported database dsn parameters %s"}, len(dropped), clean.LogNames(names))
+		} else if len(dropped) > 0 {
+			event.SystemWarn([]string{"config", "cluster", "ignored %d unsupported database dsn parameters"}, len(dropped))
+		}
+
+		update.DatabaseDSN = &dsnValue
+	}
+
 	patch := Values{}
 	setOptionString(patch, "ClusterUUID", update.ClusterUUID)
 	setOptionString(patch, "ClusterCIDR", update.ClusterCIDR)
 	setOptionString(patch, "NodeClientID", update.NodeClientID)
 	setOptionString(patch, "JWKSUrl", update.JWKSUrl)
+	setOptionString(patch, "PortalLoginUrl", update.PortalLoginUrl)
 	setOptionString(patch, "NodeUUID", update.NodeUUID)
 	setOptionString(patch, "DatabaseDriver", update.DatabaseDriver)
 	setOptionString(patch, "DatabaseDSN", update.DatabaseDSN)
@@ -52,10 +87,66 @@ func (c *Config) SaveClusterOptionsUpdate(update cluster.OptionsUpdate) (bool, e
 	setOptionString(patch, "DatabaseUser", update.DatabaseUser)
 	setOptionString(patch, "DatabasePassword", update.DatabasePassword)
 
-	return c.SaveOptionsPatch(patch)
+	// Separate database settings replace a stored DSN, which would otherwise take precedence over them.
+	if update.DatabaseDSN != nil || update.DatabaseName == nil && update.DatabaseUser == nil && update.DatabasePassword == nil {
+		changed, _, err := c.saveOptionsPatch(patch)
+		return changed, err
+	}
+
+	changed, removed, err := c.saveOptionsPatch(patch, "DatabaseDSN", "DatabaseDsn")
+
+	if err != nil {
+		return changed, err
+	} else if len(removed) > 0 {
+		c.options.DatabaseDSN = ""
+		c.options.Deprecated.DatabaseDsn = ""
+	}
+
+	// A DSN set by an environment variable or flag applies again on the next start.
+	if c.databaseDsnFromCli() || len(removed) == 0 && (c.options.DatabaseDSN != "" || c.options.Deprecated.DatabaseDsn != "") {
+		event.SystemWarn([]string{"config", "cluster", "database dsn from an environment variable or flag takes precedence over the saved database settings"})
+	}
+
+	return changed, nil
 }
 
-// validateClusterOptionsUpdate validates cluster-managed option updates.
+// databaseDsnFromCli reports whether an environment variable or flag sets the database DSN.
+func (c *Config) databaseDsnFromCli() bool {
+	if c.cliCtx == nil {
+		return false
+	}
+
+	ctx := flagContext(c.cliCtx, "database-dsn")
+
+	return ctx.IsSet("database-dsn") && ctx.String("database-dsn") != ""
+}
+
+// DatabaseDSNOverride returns the environment variable or flag that sets a database DSN, which takes precedence
+// over database settings saved separately in the options file, or an empty string if neither does.
+func (c *Config) DatabaseDSNOverride() string {
+	if !c.databaseDsnFromCli() {
+		return ""
+	} else if envVar := EnvVar("DATABASE_DSN"); os.Getenv(envVar) != "" && !databaseDsnInArgs(os.Args) {
+		return envVar
+	}
+
+	return "--database-dsn"
+}
+
+// databaseDsnInArgs reports whether command-line arguments set the database DSN flag or its alias.
+func databaseDsnInArgs(args []string) bool {
+	for _, arg := range args {
+		name, _, _ := strings.Cut(strings.TrimLeft(arg, "-"), "=")
+
+		if strings.HasPrefix(arg, "-") && (name == "database-dsn" || name == "dsn") {
+			return true
+		}
+	}
+
+	return false
+}
+
+// validateClusterOptionsUpdate validates the cluster-managed options of an update other than the database settings.
 func validateClusterOptionsUpdate(update cluster.OptionsUpdate) error {
 	if update.ClusterUUID != nil && !rnd.IsUUID(*update.ClusterUUID) {
 		return fmt.Errorf("invalid cluster UUID")
@@ -66,6 +157,92 @@ func validateClusterOptionsUpdate(update cluster.OptionsUpdate) error {
 	}
 
 	return nil
+}
+
+// ValidateClusterDatabaseUpdate validates the database settings of a cluster options update.
+func ValidateClusterDatabaseUpdate(update cluster.OptionsUpdate) error {
+	if update.DatabaseDriver != nil && dsn.ParseDriver(*update.DatabaseDriver) != dsn.DriverMySQL {
+		return fmt.Errorf("invalid database driver")
+	}
+
+	if err := validateClusterDatabase(update.DatabaseName, update.DatabaseUser, update.DatabaseServer); err != nil {
+		return err
+	}
+
+	if update.DatabaseDSN != nil {
+		if _, _, err := clusterDatabaseDSN(*update.DatabaseDSN, 0); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// validateClusterDatabase checks the database name, user, and server of a cluster options update.
+// Empty values are accepted, since they select the defaults.
+func validateClusterDatabase(name, user, server *string) error {
+	if name != nil && *name != "" && !dsn.ValidIdent(*name) {
+		return fmt.Errorf("invalid database name")
+	}
+
+	if user != nil && *user != "" && !dsn.ValidIdent(*user) {
+		return fmt.Errorf("invalid database user")
+	}
+
+	if server != nil && *server != "" && (!dsn.ValidServer(*server) || (&dsn.DSN{Server: *server}).Host() == "") {
+		return fmt.Errorf("invalid database server")
+	}
+
+	return nil
+}
+
+// clusterDatabaseParamRules lists the DSN parameters a cluster instance accepts from the Portal and
+// checks their values. The character set is limited to UTF-8.
+var clusterDatabaseParamRules = dsn.ParamRules{
+	"charset":           dsn.ValidCharset,
+	"collation":         dsn.ValidCollation,
+	"parseTime":         dsn.IsTrue,
+	"interpolateParams": dsn.ValidBool,
+	"rejectReadOnly":    dsn.ValidBool,
+	"timeout":           dsn.ValidDuration,
+	"readTimeout":       dsn.ValidDuration,
+	"writeTimeout":      dsn.ValidDuration,
+	"maxAllowedPacket":  dsn.ValidPacketSize,
+	"tls":               dsn.ValidTLS,
+}
+
+// clusterDatabaseDSN validates a MariaDB DSN received from the Portal and returns it rebuilt from its
+// user, password, server, name, and accepted parameters, adding missing defaults and the dial timeout
+// in seconds. It also returns the names of the parameters it dropped. An empty DSN is returned as is.
+func clusterDatabaseDSN(s string, timeout int) (result string, dropped []string, err error) {
+	if s == "" {
+		return "", nil, nil
+	}
+
+	d := dsn.Parse(s)
+
+	if d.Driver != dsn.DriverMySQL || d.Net != "tcp" || d.Name == "" || d.User == "" || d.Host() == "" {
+		return "", nil, fmt.Errorf("invalid database dsn")
+	}
+
+	if err = validateClusterDatabase(&d.Name, &d.User, &d.Server); err != nil {
+		return "", nil, err
+	}
+
+	if d.Params, dropped, err = dsn.FilterParams(d.Params, clusterDatabaseParamRules); err != nil {
+		return "", nil, fmt.Errorf("invalid database dsn")
+	}
+
+	// A character set and collation must match, so neither default is added if the Portal sets one.
+	defaults := fmt.Sprint(dsn.Params[dsn.DriverMySQL])
+
+	if dsn.HasParam(d.Params, "charset") || dsn.HasParam(d.Params, "collation") {
+		defaults = "parseTime=true"
+	}
+
+	d.Params = dsn.MergeParams(d.Params, fmt.Sprintf("%s&timeout=%ds", defaults, timeout))
+
+	return d.MySQL(), dropped, nil
 }
 
 // ClusterDomain returns the cluster DOMAIN (lowercase DNS name; 1–63 chars).
@@ -112,7 +289,176 @@ func (c *Config) Portal() bool {
 	return c.NodeRole() == cluster.RolePortal
 }
 
-// PortalUrl returns the URL of the cluster management portal server, if configured.
+// ClusterAllowGroups returns the normalized group identifiers admitted to this
+// instance for Portal cluster admission, including the keys of
+// ClusterAllowGroupRoles so a role mapping alone admits its groups.
+func (c *Config) ClusterAllowGroups() []string {
+	seen := make(map[string]struct{})
+	result := make([]string, 0, len(c.options.ClusterAllowGroups))
+
+	add := func(id string) {
+		if n := normalizeGroupID(id); n != "" {
+			if _, dup := seen[n]; !dup {
+				seen[n] = struct{}{}
+				result = append(result, n)
+			}
+		}
+	}
+
+	for _, entry := range c.options.ClusterAllowGroups {
+		for _, id := range splitGroupList(entry) {
+			add(id)
+		}
+	}
+
+	// Role-map keys join the admitted set in sorted order for stable output.
+	roles := c.ClusterAllowGroupRoles()
+	keys := make([]string, 0, len(roles))
+
+	for group := range roles {
+		keys = append(keys, group)
+	}
+
+	sort.Strings(keys)
+
+	for _, group := range keys {
+		add(group)
+	}
+
+	if len(result) == 0 {
+		return nil
+	}
+
+	return result
+}
+
+// ClusterAllowGroupRoles maps normalized group identifiers to the instance role
+// granted on Portal cluster admission, from comma- or whitespace-separated
+// GROUP=ROLE pairs. acl.ClusterInstanceRole validation does not depend on the
+// edition role table, so it resolves correctly during early bootstrap too.
+func (c *Config) ClusterAllowGroupRoles() map[string]string {
+	if len(c.options.ClusterAllowGroupRoles) == 0 {
+		return nil
+	}
+
+	result := make(map[string]string, len(c.options.ClusterAllowGroupRoles))
+
+	for _, entry := range c.options.ClusterAllowGroupRoles {
+		for _, pair := range splitGroupList(entry) {
+			group, roleName, ok := parseGroupRolePair(pair)
+
+			if !ok {
+				continue
+			}
+
+			role, valid := acl.ClusterInstanceRole(roleName)
+
+			if !valid {
+				continue
+			}
+
+			result[group] = role.String()
+		}
+	}
+
+	if len(result) == 0 {
+		return nil
+	}
+
+	return result
+}
+
+// ClusterGroupsFullView reports whether the Portal should send the user's full
+// group set to this instance instead of only the contributing groups.
+func (c *Config) ClusterGroupsFullView() bool {
+	return c.options.ClusterGroupsFullView
+}
+
+// splitGroupList splits a raw option entry into group identifiers, accepting
+// comma- and whitespace-separated lists.
+func splitGroupList(s string) []string {
+	return strings.FieldsFunc(s, func(r rune) bool {
+		return r == ',' || unicode.IsSpace(r)
+	})
+}
+
+// parseGroupRolePair splits a single GROUP=ROLE (or GROUP:ROLE) pair, returning
+// the normalized group id and the raw role string. ok is false for a malformed
+// pair (missing separator, empty group, or empty role).
+func parseGroupRolePair(pair string) (group, role string, ok bool) {
+	sep := strings.IndexAny(pair, "=:")
+	if sep < 1 || sep >= len(pair)-1 {
+		return "", "", false
+	}
+	group = normalizeGroupID(pair[:sep])
+	role = strings.TrimSpace(pair[sep+1:])
+	return group, role, group != "" && role != ""
+}
+
+// PortalOIDCIssuer returns the issuer URL advertised by the Portal's OIDC OP
+// (discovery doc, ID tokens, userinfo). Falls back to SiteUrl when the
+// `PHOTOPRISM_PORTAL_OIDC_ISSUER` override is unset.
+func (c *Config) PortalOIDCIssuer() string {
+	if iss := strings.TrimSpace(c.options.PortalOIDCIssuer); iss != "" {
+		return iss
+	}
+	return c.SiteUrl()
+}
+
+// portalOIDCTTLBounds are the configurable lower / upper bounds for the
+// Portal OIDC OP token and code TTLs. Going below the floor would push
+// past the recommended single-request window for an interactive login;
+// going above the ceiling weakens the security posture of the OP.
+const (
+	portalOIDCTTLMin     = 60
+	portalOIDCTTLMax     = 900
+	portalOIDCCodeTTLMin = 30
+	portalOIDCCodeTTLMax = 300
+)
+
+// PortalOIDCTTL returns the configured access-token / ID-token lifetime for
+// the Portal OIDC OP, clamped to a safe range. Defaults to 300 seconds and
+// caps at 900.
+func (c *Config) PortalOIDCTTL() time.Duration {
+	return clampDurationSeconds(c.options.PortalOIDCTTL, portalOIDCTTLMin, portalOIDCTTLMax, 300)
+}
+
+// PortalOIDCCodeTTL returns the authorization-code lifetime for the Portal
+// OIDC OP. Defaults to 60 seconds and caps at 300.
+func (c *Config) PortalOIDCCodeTTL() time.Duration {
+	return clampDurationSeconds(c.options.PortalOIDCCodeTTL, portalOIDCCodeTTLMin, portalOIDCCodeTTLMax, 60)
+}
+
+// PortalOIDCDefaultPolicyChooser reports whether the Portal OIDC OP should
+// route multi-instance logins through the chooser (default), as opposed to
+// `direct` which always honors the requested client_id without prompting.
+func (c *Config) PortalOIDCDefaultPolicyChooser() bool {
+	switch strings.ToLower(strings.TrimSpace(c.options.PortalOIDCDefaultPolicy)) {
+	case "direct":
+		return false
+	default:
+		return true
+	}
+}
+
+// clampDurationSeconds returns the configured value clamped to [min, max].
+// A zero or negative configured value falls back to `def`.
+func clampDurationSeconds(value, minSec, maxSec, defSec int) time.Duration {
+	v := value
+	if v <= 0 {
+		v = defSec
+	}
+	if v < minSec {
+		v = minSec
+	}
+	if v > maxSec {
+		v = maxSec
+	}
+	return time.Duration(v) * time.Second
+}
+
+// PortalUrl returns the URL of the cluster management portal server, if configured. Variables are
+// expanded on each call without changing the configured value, so the result follows the cluster domain.
 func (c *Config) PortalUrl() string {
 	if c.options.PortalUrl == "" {
 		return ""
@@ -126,13 +472,11 @@ func (c *Config) PortalUrl() string {
 	}
 
 	// Replace variables with the configured cluster domain.
-	c.options.PortalUrl = ExpandVars(c.options.PortalUrl, map[string]string{
+	return ExpandVars(c.options.PortalUrl, map[string]string{
 		"cluster-domain":            d,
 		"CLUSTER_DOMAIN":            d,
 		"PHOTOPRISM_CLUSTER_DOMAIN": d,
 	})
-
-	return c.options.PortalUrl
 }
 
 // PortalProxy reports whether portal proxy routing is enabled on this node.
@@ -204,14 +548,15 @@ func (c *Config) JoinToken() string {
 
 		if fs.FileExistsNotEmpty(fileName) {
 			if b, err := os.ReadFile(fileName); err != nil || len(b) == 0 { //nolint:gosec // path derived from config directory
-				log.Warnf("config: could not read cluster join token from %s (%s)", fileName, err)
+				event.SystemWarn([]string{"config", "cluster join token", "read %s", "%s"}, clean.Log(fileName), clean.ErrorFull(err))
 			} else if s := strings.TrimSpace(string(b)); rnd.IsJoinToken(s, false) {
 				if c.cache != nil {
 					c.cache.SetDefault(fileName, s)
 				}
 				return s
 			} else {
-				log.Warnf("config: cluster join token from %s is shorter than %d characters", fileName, rnd.JoinTokenLength)
+				// IsJoinToken checks the format, not only the length, so do not claim the value is too short.
+				event.SystemWarn([]string{"config", "cluster join token", "read %s", "invalid value"}, clean.Log(fileName))
 			}
 		}
 	}
@@ -220,7 +565,7 @@ func (c *Config) JoinToken() string {
 	if !c.Portal() {
 		return ""
 	} else if token, _, err := c.SaveJoinToken(""); err != nil {
-		log.Errorf("config: %v", err)
+		event.SystemError([]string{"config", "cluster join token", "%s"}, clean.ErrorFull(err))
 		return ""
 	} else {
 		return token
@@ -390,7 +735,7 @@ func (c *Config) NodeUUID() string {
 	c.options.NodeUUID = uuid
 
 	if err := c.SaveNodeUUID(uuid); err != nil {
-		log.Warnf("config: could not save node UUID to %s (%s)", c.OptionsYaml(), err)
+		event.SystemWarn([]string{"config", "cluster", "could not save node UUID", "%s"}, clean.ErrorFull(err))
 	}
 
 	return uuid
@@ -414,14 +759,10 @@ func (c *Config) NodeClientSecret() string {
 			return string(b)
 		}
 
-		if err := os.Chmod(filepath.Dir(fileName), fs.ModeDir); err != nil {
-			log.Debugf("config: failed to set node secrets dir permissions (%s)", err)
-		}
-
 		if _, err := os.Stat(fileName); os.IsNotExist(err) {
-			log.Debugf("config: node client secret file %s not found", clean.Log(fileName))
+			event.SystemDebug([]string{"config", "node client secret", "%s", "not found"}, clean.Log(fileName))
 		} else if err != nil {
-			log.Warnf("config: failed to read node client secret from %s (%s)", clean.Log(fileName), err)
+			event.SystemWarn([]string{"config", "node client secret", "read %s", "%s"}, clean.Log(fileName), clean.ErrorFull(err))
 		}
 	}
 
@@ -451,14 +792,14 @@ func (c *Config) SaveNodeClientSecret(clientSecret string) (fileName string, err
 	if err = fs.MkdirAll(dir); err != nil {
 		// Use memory to store client secret if directory is not writable.
 		c.options.NodeClientSecret = clientSecret
-		return fileName, fmt.Errorf("could not create node secrets path (%s)", err)
+		return fileName, fmt.Errorf("could not create node secrets path (%w)", err)
 	}
 
 	// Write secret to file.
 	if err = fs.WriteFile(fileName, []byte(clientSecret), fs.ModeSecretFile); err != nil {
 		// Use memory to store client secret if file is not writable.
 		c.options.NodeClientSecret = clientSecret
-		return "", fmt.Errorf("could not write node client secret (%s)", err)
+		return "", fmt.Errorf("could not write node client secret (%w)", err)
 	}
 
 	c.options.NodeClientSecret = ""
@@ -483,41 +824,75 @@ func (c *Config) JWKSUrl() string {
 	return strings.TrimSpace(c.options.JWKSUrl)
 }
 
-// SetJWKSUrl updates the configured JWKS endpoint for portal-issued JWTs.
+// validClusterURL returns the trimmed URL and true when it is an absolute
+// HTTPS URL, or an HTTP URL on a loopback host; an empty input is valid and
+// returns the empty string.
+func validClusterURL(url string) (string, bool) {
+	trimmed := strings.TrimSpace(url)
+	if trimmed == "" {
+		return "", true
+	}
+
+	parsed, err := urlpkg.Parse(trimmed)
+	if err != nil || parsed == nil || parsed.Scheme == "" || parsed.Host == "" {
+		return trimmed, false
+	}
+
+	switch strings.ToLower(parsed.Scheme) {
+	case "https":
+		return trimmed, true
+	case "http":
+		return trimmed, dns.IsLoopbackHost(parsed.Hostname())
+	default:
+		return trimmed, false
+	}
+}
+
+// SetJWKSUrl updates the configured JWKS endpoint for portal-issued JWTs
+// (HTTPS, or HTTP for loopback hosts only).
 func (c *Config) SetJWKSUrl(url string) {
 	if c == nil || c.options == nil {
 		return
 	}
 
-	trimmed := strings.TrimSpace(url)
-	if trimmed == "" {
-		c.options.JWKSUrl = ""
-		return
-	}
-
-	parsed, err := urlpkg.Parse(trimmed)
-	if err != nil || parsed == nil || parsed.Scheme == "" || parsed.Host == "" {
-		log.Warnf("config: ignoring JWKS URL %q (%v)", trimmed, err)
-		return
-	}
-
-	scheme := strings.ToLower(parsed.Scheme)
-	host := parsed.Hostname()
-
-	switch scheme {
-	case "https":
-		// Always allowed.
-	case "http":
-		if !dns.IsLoopbackHost(host) {
-			log.Warnf("config: rejecting JWKS URL %q (http only allowed for localhost/loopback)", trimmed)
-			return
-		}
-	default:
-		log.Warnf("config: rejecting JWKS URL %q (unsupported scheme)", trimmed)
+	trimmed, ok := validClusterURL(url)
+	if !ok {
+		event.SystemWarn([]string{"config", "cluster", "rejecting JWKS URL %s (must be https, or http on loopback)"}, clean.Log(trimmed))
 		return
 	}
 
 	c.options.JWKSUrl = trimmed
+}
+
+// PortalLoginUrl returns the browser-facing Portal login page URL. Nodes
+// persist it from the Portal's register response, which derives it from the
+// Portal's SiteUrl and login route; the frontend uses it to land cluster
+// sign-outs on the Portal login instead of re-initiating the instance OIDC
+// roundtrip with a pinned return_to. Stored values are re-validated on read,
+// so an invalid or stale URL (e.g. from a hand-edited options.yml or env)
+// never becomes a browser redirect target.
+func (c *Config) PortalLoginUrl() string {
+	if v, ok := validClusterURL(c.options.PortalLoginUrl); ok {
+		return v
+	}
+
+	return ""
+}
+
+// SetPortalLoginUrl updates the browser-facing Portal login page URL
+// (HTTPS, or HTTP for loopback hosts only).
+func (c *Config) SetPortalLoginUrl(url string) {
+	if c == nil || c.options == nil {
+		return
+	}
+
+	trimmed, ok := validClusterURL(url)
+	if !ok {
+		event.SystemWarn([]string{"config", "cluster", "rejecting portal login URL %s (must be https, or http on loopback)"}, clean.Log(trimmed))
+		return
+	}
+
+	c.options.PortalLoginUrl = trimmed
 }
 
 // JWKSCacheTTL returns the JWKS cache lifetime in seconds (default 300, max 3600).
@@ -540,6 +915,17 @@ func (c *Config) JWTLeeway() int {
 		return 300
 	}
 	return c.options.JWTLeeway
+}
+
+// JWTRotateDays returns the portal signing key lifetime in days, 0 when scheduled rotation
+// is off. Use a negative value to disable it everywhere: ApplyCliContext reads a zero from
+// defaults.yml as unset, so 0 only disables from a flag, an env var, or options.yml.
+func (c *Config) JWTRotateDays() int {
+	if c.options.JWTRotateDays < 0 {
+		return 0
+	}
+
+	return c.options.JWTRotateDays
 }
 
 // JWTAllowedScopes returns an optional allow-list of accepted JWT scopes.

@@ -22,6 +22,31 @@ func TestFileName(t *testing.T) {
 	})
 }
 
+func TestConfigFileName(t *testing.T) {
+	c := config.TestConfig()
+	t.Run("Sidecar", func(t *testing.T) {
+		assert.Equal(t, c.SidecarPath()+"/test.jpg", ConfigFileName(c, entity.RootSidecar, "test.jpg"))
+	})
+	t.Run("Import", func(t *testing.T) {
+		assert.Equal(t, c.ImportPath()+"/test.jpg", ConfigFileName(c, entity.RootImport, "test.jpg"))
+	})
+	t.Run("Examples", func(t *testing.T) {
+		assert.Equal(t, c.SamplesPath()+"/test.jpg", ConfigFileName(c, entity.RootSamples, "test.jpg"))
+	})
+	t.Run("Originals", func(t *testing.T) {
+		// An unknown root resolves against originals, which is where indexed files live.
+		assert.Equal(t, c.OriginalsPath()+"/test.jpg", ConfigFileName(c, "", "test.jpg"))
+	})
+	t.Run("MatchesPackageConfig", func(t *testing.T) {
+		assert.Equal(t, FileName(entity.RootSidecar, "test.jpg"), ConfigFileName(Config(), entity.RootSidecar, "test.jpg"))
+	})
+	t.Run("NilConfig", func(t *testing.T) {
+		// Without a configuration there is no root to resolve against, so the name is
+		// returned unchanged rather than joined onto an empty path.
+		assert.Equal(t, "test.jpg", ConfigFileName(nil, entity.RootOriginals, "test.jpg"))
+	})
+}
+
 func TestCacheName(t *testing.T) {
 	t.Run("CacheKeyEmpty", func(t *testing.T) {
 		r, err := CacheName("abcdghoj", "test", "")
@@ -60,10 +85,35 @@ func TestRoot(t *testing.T) {
 	t.Run("SidecarPath", func(t *testing.T) {
 		assert.Equal(t, entity.RootSidecar, Root(FileName("sidecar", "test.jpg")))
 	})
+	t.Run("SiblingPrefix", func(t *testing.T) {
+		assert.Equal(t, entity.RootOriginals, Root(FileName(entity.RootOriginals, "2024/test.jpg")))
+		assert.Equal(t, entity.RootUnknown, Root(Config().OriginalsPath()+"2/2024/test.jpg"))
+		assert.Equal(t, entity.RootUnknown, Root(Config().SidecarPath()+"-other/test.jpg"))
+	})
 }
 
 func TestRootRelName(t *testing.T) {
 	t.Run("SidecarPath", func(t *testing.T) {
 		assert.Equal(t, "foo/test.jpg", RootRelName(FileName("sidecar", "foo/test.jpg")))
+	})
+}
+
+// TestDisplayFolder verifies the folder names shown in notifications.
+func TestDisplayFolder(t *testing.T) {
+	t.Run("Subfolder", func(t *testing.T) {
+		assert.Equal(t, "2024/trip", displayFolder("/photoprism/originals/2024/trip", "/photoprism/originals"))
+	})
+	t.Run("Base", func(t *testing.T) {
+		assert.Equal(t, "/", displayFolder("/photoprism/originals", "/photoprism/originals"))
+	})
+	t.Run("NoBase", func(t *testing.T) {
+		assert.Equal(t, "batch1", displayFolder("/photoprism/storage/users/u1/upload/batch1", ""))
+	})
+	t.Run("Uncleaned", func(t *testing.T) {
+		assert.Equal(t, "etc/x", displayFolder("/photoprism/import//etc/x/", "/photoprism/import"))
+		assert.Equal(t, "x", displayFolder("/photoprism/import/../import/./x", "/photoprism/import"))
+	})
+	t.Run("OutsideBase", func(t *testing.T) {
+		assert.Equal(t, "other", displayFolder("/tmp/other", "/photoprism/import"))
 	})
 }

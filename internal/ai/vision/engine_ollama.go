@@ -4,11 +4,13 @@ import (
 	"context"
 	"os"
 	"strings"
+	"sync"
 
 	"github.com/photoprism/photoprism/internal/ai/vision/ollama"
 	"github.com/photoprism/photoprism/internal/entity"
 	"github.com/photoprism/photoprism/pkg/clean"
 	"github.com/photoprism/photoprism/pkg/http/scheme"
+	"github.com/photoprism/photoprism/pkg/media"
 )
 
 type ollamaDefaults struct{}
@@ -25,21 +27,21 @@ func init() {
 	})
 
 	registerOllamaEngineDefaults()
+	Config = NewConfig()
 }
 
-// registerOllamaEngineDefaults selects the default Ollama endpoint based on the
-// configured base URL and registers the engine alias accordingly. When
-// OLLAMA_BASE_URL points at the cloud host we only switch the default model to
-// the cloud preset; the actual base URL continues to come from
-// OLLAMA_BASE_URL (or falls back to the local compose default) so we don't
-// accidentally talk to the hosted service without an explicit endpoint.
+// registerOllamaEngineDefaults registers the Ollama engine alias with the default model from OLLAMA_MODEL,
+// or the cloud preset when OLLAMA_BASE_URL is the cloud host. The endpoint always comes from OLLAMA_BASE_URL,
+// so the hosted service is never used without an explicit base URL.
 func registerOllamaEngineDefaults() {
 	ensureEnv()
 
 	defaultModel := ollama.DefaultModel
 
-	// Use different default model for the Ollama cloud service.
-	if baseUrl := os.Getenv(ollama.BaseUrlEnv); baseUrl == ollama.CloudBaseUrl {
+	// Use the model set in the environment, or a different default model for the Ollama cloud service.
+	if envDefault := envModelTagged(ollama.ModelEnv); envDefault != "" {
+		defaultModel = envDefault
+	} else if baseUrl := os.Getenv(ollama.BaseUrlEnv); baseUrl == ollama.CloudBaseUrl {
 		defaultModel = ollama.CloudModel
 	}
 
@@ -53,6 +55,8 @@ func registerOllamaEngineDefaults() {
 		DefaultModel:      defaultModel,
 		DefaultResolution: ollama.DefaultResolution,
 		DefaultKey:        ollama.APIKeyPlaceholder,
+		DefaultThink:      ollama.DefaultThink,
+		DefaultNormalize:  NormalizeWord,
 	})
 
 	// Keep the default caption model config aligned with the defaults.
@@ -123,12 +127,12 @@ func (ollamaDefaults) Options(model *Model) *ModelOptions {
 }
 
 // Build builds the Ollama service request.
-func (ollamaBuilder) Build(ctx context.Context, model *Model, files Files) (*ApiRequest, error) {
+func (ollamaBuilder) Build(ctx context.Context, model *Model, files Files, mediaSrc media.Src) (*ApiRequest, error) {
 	if model == nil {
 		return nil, ErrInvalidModel
 	}
 
-	req, err := NewApiRequest(model.EndpointRequestFormat(), files, model.EndpointFileScheme())
+	req, err := NewApiRequest(model.EndpointRequestFormat(), files, model.EndpointFileScheme(), mediaSrc)
 	if err != nil {
 		return nil, err
 	}
@@ -148,8 +152,16 @@ func (ollamaBuilder) Build(ctx context.Context, model *Model, files Files) (*Api
 	return req, nil
 }
 
+// ollamaInvalidLabels holds the models whose invalid labels were logged until labels parse again.
+var ollamaInvalidLabels sync.Map
+
 // Parse processes the Ollama service response.
 func (ollamaParser) Parse(ctx context.Context, req *ApiRequest, raw []byte, status int) (*ApiResponse, error) {
+	// Return an error for a failed request, as its response text is not a result.
+	if err := serviceStatusError(req.engineName(ollama.EngineName), ApiFormatOllama, req.Model, status); err != nil {
+		return nil, err
+	}
+
 	ollamaResp, err := decodeOllamaResponse(raw)
 
 	if err != nil {
@@ -169,7 +181,7 @@ func (ollamaParser) Parse(ctx context.Context, req *ApiRequest, raw []byte, stat
 	parsedLabels := len(response.Result.Labels) > 0
 
 	// Qwen3-VL models stream their JSON payload in the "Thinking" field.
-	fallbackResponse := strings.TrimSpace(ollamaResp.Response)
+	fallbackResponse := strings.TrimSpace(stripReasoningBlock(ollamaResp.Response))
 	fallbackThinking := strings.TrimSpace(ollamaResp.Thinking)
 
 	fallbackJSON := fallbackResponse
@@ -184,7 +196,10 @@ func (ollamaParser) Parse(ctx context.Context, req *ApiRequest, raw []byte, stat
 
 	if !parsedLabels && fallbackJSON != "" && (req.Format == FormatJSON || strings.HasPrefix(fallbackJSON, "{")) {
 		if labels, parseErr := parseOllamaLabels(fallbackJSON); parseErr != nil {
-			log.Warnf("vision: %s (parse ollama labels)", clean.Error(parseErr))
+			if _, warned := ollamaInvalidLabels.LoadOrStore(req.Model, struct{}{}); !warned {
+				log.Warnf("vision: ollama returned invalid labels for model %s", clean.Log(req.Model))
+			}
+			log.Debugf("vision: %q (parse ollama labels)", parseErr.Error())
 		} else if len(labels) > 0 {
 			response.Result.Labels = append(response.Result.Labels, labels...)
 			parsedLabels = true
@@ -192,6 +207,8 @@ func (ollamaParser) Parse(ctx context.Context, req *ApiRequest, raw []byte, stat
 	}
 
 	if parsedLabels {
+		ollamaInvalidLabels.Delete(req.Model)
+		normalize := req.GetNormalize()
 		filtered := response.Result.Labels[:0]
 		for i := range response.Result.Labels {
 			if response.Result.Labels[i].Confidence <= 0 {
@@ -203,7 +220,7 @@ func (ollamaParser) Parse(ctx context.Context, req *ApiRequest, raw []byte, stat
 			}
 
 			// Apply thresholds and canonicalize the name.
-			normalizeLabelResult(&response.Result.Labels[i])
+			normalizeLabelResult(&response.Result.Labels[i], normalize)
 
 			if response.Result.Labels[i].Name == "" {
 				continue
@@ -224,6 +241,27 @@ func (ollamaParser) Parse(ctx context.Context, req *ApiRequest, raw []byte, stat
 	}
 
 	return response, nil
+}
+
+// stripReasoningBlock removes a single leading, well-delimited <think>...</think> block from s and
+// returns the trimmed remainder. It is a defensive fallback for thinking-capable models that ignore
+// the think=false hint and emit tagged reasoning inline; untagged text and an unterminated opening tag
+// are left unchanged so a legitimate caption is never truncated.
+func stripReasoningBlock(s string) string {
+	trimmed := strings.TrimSpace(s)
+
+	const openTag = "<think>"
+
+	if len(trimmed) < len(openTag) || !strings.EqualFold(trimmed[:len(openTag)], openTag) {
+		return s
+	}
+
+	end := strings.Index(strings.ToLower(trimmed), "</think>")
+	if end < 0 {
+		return s
+	}
+
+	return strings.TrimSpace(trimmed[end+len("</think>"):])
 }
 
 func convertOllamaLabels(payload []ollama.LabelPayload) []LabelResult {

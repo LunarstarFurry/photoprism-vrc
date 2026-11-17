@@ -4,24 +4,32 @@ import (
 	"strings"
 
 	"github.com/photoprism/photoprism/internal/entity"
+	"github.com/photoprism/photoprism/pkg/clean"
 	"github.com/photoprism/photoprism/pkg/rnd"
 )
 
-// Clients finds clients and returns them.
-func Clients(limit, offset int, sortOrder, search string) (result entity.Clients, err error) {
+// Clients finds clients and returns them. When deleted is true it reports the retired
+// records instead of the current ones, so an operator can see what a deletion left behind.
+func Clients(limit, offset int, sortOrder, search string, deleted bool) (result entity.Clients, err error) {
 	result = entity.Clients{}
 	stmt := Db()
 
+	if deleted {
+		stmt = UnscopedDb().Where("deleted_at IS NOT NULL")
+	}
+
 	search = strings.TrimSpace(search)
 
-	if search == "all" {
+	switch {
+	case search == "all":
 		// Don't filter.
-	} else if rnd.IsUID(search, entity.ClientUID) {
+	case rnd.IsUID(search, entity.ClientUID):
 		stmt = stmt.Where("client_uid = ?", search)
-	} else if rnd.IsUID(search, entity.UserUID) {
+	case rnd.IsUID(search, entity.UserUID):
 		stmt = stmt.Where("user_uid = ?", search)
-	} else if search != "" {
-		stmt = stmt.Where("client_name LIKE ? OR user_name LIKE ?", search+"%", search+"%")
+	case search != "":
+		like := clean.SqlLike(search) + "%"
+		stmt = stmt.Where(clean.SqlLikeAny(DbDialect(), false, "client_name", "user_name"), like, like)
 	}
 
 	if sortOrder == "" {

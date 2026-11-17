@@ -1,10 +1,9 @@
 package search
 
 import (
+	"errors"
 	"fmt"
 	"strings"
-
-	"github.com/jinzhu/gorm"
 
 	"github.com/photoprism/photoprism/internal/entity"
 	"github.com/photoprism/photoprism/internal/form"
@@ -12,10 +11,39 @@ import (
 	"github.com/photoprism/photoprism/pkg/txt"
 )
 
-// Subjects searches subjects and returns them.
+// SubjectSessionSeesPrivate reports whether a session may see people whose name is withheld, so
+// the search and the handlers that read a single subject answer the same question about the same
+// session. Marking someone private or hidden both withhold the name.
+func SubjectSessionSeesPrivate(sess *entity.Session) bool {
+	return sess.SeesPrivatePeople()
+}
+
+// Subjects searches subjects and returns them without checking rights or permissions.
 func Subjects(frm form.SearchSubjects) (results SubjectResults, err error) {
-	if err = frm.ParseQueryString(); err != nil {
+	return searchSubjects(frm, nil)
+}
+
+// UserSubjects searches subjects within what the given session is allowed to see.
+func UserSubjects(frm form.SearchSubjects, sess *entity.Session) (results SubjectResults, err error) {
+	return searchSubjects(frm, sess)
+}
+
+// searchSubjects searches subjects and returns them, applying the session's own limits when one is
+// given: a role without AccessPrivate must not reach a person marked private or hidden through any
+// filter. Hidden is off by default for everyone, so only asking for it is refused here.
+func searchSubjects(frm form.SearchSubjects, sess *entity.Session) (results SubjectResults, err error) {
+	if err = frm.ParseQueryString(); errors.Is(err, form.ErrNoMatch) {
+		return SubjectResults{}, nil
+	} else if err != nil {
 		return results, err
+	}
+
+	// Check session permissions and apply as needed.
+	if !SubjectSessionSeesPrivate(sess) {
+		// Cleared as well as forced, since "all" skips the visibility filters wholesale.
+		frm.Private = "no"
+		frm.Hidden = "no"
+		frm.All = false
 	}
 
 	subjTable := entity.Subject{}.TableName()
@@ -45,8 +73,39 @@ func Subjects(frm form.SearchSubjects) (results SubjectResults, err error) {
 		s = s.Order(OrderExpr("subj_favorite DESC, subj_name ASC", frm.Reverse))
 	}
 
+	// Applied before the uid shortcut below, so no branch can answer with a row the caller is not
+	// allowed to see. The shortcut skips the content filters on purpose - a caller reloading one
+	// person by uid wants that row whatever its file count - but never the visibility ones.
+	s = s.Where(fmt.Sprintf("%s.deleted_at IS NULL", subjTable))
+
+	if !frm.All {
+		if txt.Yes(frm.Favorite) {
+			s = s.Where("subj_favorite = TRUE")
+		} else if txt.No(frm.Favorite) {
+			s = s.Where("subj_favorite = FALSE")
+		}
+
+		if !txt.Yes(frm.Hidden) {
+			s = s.Where("subj_hidden = FALSE")
+		}
+
+		if txt.Yes(frm.Private) {
+			s = s.Where("subj_private = TRUE")
+		} else if txt.No(frm.Private) {
+			s = s.Where("subj_private = FALSE")
+		}
+
+		if txt.Yes(frm.Excluded) {
+			s = s.Where("subj_excluded = TRUE")
+		} else if txt.No(frm.Excluded) {
+			s = s.Where("subj_excluded = FALSE")
+		}
+	}
+
 	if frm.UID != "" {
 		s = s.Where(fmt.Sprintf("%s.subj_uid IN (?)", subjTable), strings.Split(strings.ToLower(frm.UID), txt.Or))
+
+		results = make(SubjectResults, 0)
 
 		if result := s.Scan(&results); result.Error != nil {
 			return results, result.Error
@@ -56,8 +115,9 @@ func Subjects(frm form.SearchSubjects) (results SubjectResults, err error) {
 	}
 
 	if frm.Query != "" {
-		for _, where := range LikeAllNames(Cols{"subj_name", "subj_alias"}, frm.Query) {
-			s = s.Where("?", gorm.Expr(where))
+		wheres, values := LikeAllNames(Cols{"subj_name", "subj_alias"}, frm.Query, false)
+		for i, where := range wheres {
+			s = s.Where("("+where+")", values[i]...)
 		}
 	}
 
@@ -73,32 +133,7 @@ func Subjects(frm form.SearchSubjects) (results SubjectResults, err error) {
 		s = s.Where("subj_type IN (?)", strings.Split(frm.Type, txt.Or))
 	}
 
-	if !frm.All {
-		if txt.Yes(frm.Favorite) {
-			s = s.Where("subj_favorite = 1")
-		} else if txt.No(frm.Favorite) {
-			s = s.Where("subj_favorite = 0")
-		}
-
-		if !txt.Yes(frm.Hidden) {
-			s = s.Where("subj_hidden = 0")
-		}
-
-		if txt.Yes(frm.Private) {
-			s = s.Where("subj_private = 1")
-		} else if txt.No(frm.Private) {
-			s = s.Where("subj_private = 0")
-		}
-
-		if txt.Yes(frm.Excluded) {
-			s = s.Where("subj_excluded = 1")
-		} else if txt.No(frm.Excluded) {
-			s = s.Where("subj_excluded = 0")
-		}
-	}
-
-	// Omit deleted rows.
-	s = s.Where(fmt.Sprintf("%s.deleted_at IS NULL", subjTable))
+	results = make(SubjectResults, 0)
 
 	if result := s.Scan(&results); result.Error != nil {
 		return results, result.Error
@@ -121,7 +156,7 @@ func SubjectUIDs(s string) (result []string, names []string, remaining string) {
 
 	var matches []Matches
 
-	wheres := LikeAllNames(Cols{"subj_name", "subj_alias"}, s)
+	wheres, values := LikeAllNames(Cols{"subj_name", "subj_alias"}, s, false)
 
 	if len(wheres) == 0 {
 		return result, names, s
@@ -129,11 +164,11 @@ func SubjectUIDs(s string) (result []string, names []string, remaining string) {
 
 	remaining = s
 
-	for _, where := range wheres {
+	for i, where := range wheres {
 		var subj []string
 
-		stmt := Db().Model(entity.Subject{})
-		stmt = stmt.Where("?", gorm.Expr(where))
+		stmt := Db().Model(&entity.Subject{})
+		stmt = stmt.Where("("+where+")", values[i]...)
 
 		if err := stmt.Scan(&matches).Error; err != nil {
 			log.Errorf("search: %s while finding subjects", err)

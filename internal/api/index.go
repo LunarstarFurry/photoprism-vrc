@@ -16,6 +16,7 @@ import (
 	"github.com/photoprism/photoprism/internal/photoprism/get"
 	"github.com/photoprism/photoprism/pkg/clean"
 	"github.com/photoprism/photoprism/pkg/i18n"
+	"github.com/photoprism/photoprism/pkg/log/status"
 	"github.com/photoprism/photoprism/pkg/txt"
 )
 
@@ -26,9 +27,9 @@ import (
 //	@Tags		Library
 //	@Accept		json
 //	@Produce	json
-//	@Success	200					{object}	i18n.Response
-//	@Failure	400,401,403,429,500	{object}	i18n.Response
-//	@Param		options				body		form.IndexOptions	true	"index options"
+//	@Success	200						{object}	i18n.Response
+//	@Failure	400,401,403,413,429,500	{object}	i18n.Response
+//	@Param		options					body		form.IndexOptions	true	"index options"
 //	@Router		/api/v1/index [post]
 func StartIndexing(router *gin.RouterGroup) {
 	router.POST("/index", func(c *gin.Context) {
@@ -43,6 +44,16 @@ func StartIndexing(router *gin.RouterGroup) {
 
 		if !settings.Features.Library {
 			AbortFeatureDisabled(c)
+			return
+		}
+
+		// Abort if the storage filesystem is critically low on free space. Indexing only
+		// writes sidecars and thumbnails, so the disk-low check is sufficient here; the
+		// FilesQuota gate used by import/upload/avatar/zip/video does not apply because
+		// indexing catalogs existing files rather than adding to the quota.
+		if _, low, _ := conf.StorageLow(); low {
+			event.AuditErr([]string{ClientIP(c), "session %s", "index files", status.InsufficientStorage}, s.RefID)
+			Abort(c, http.StatusInsufficientStorage, i18n.ErrInsufficientStorage)
 			return
 		}
 
@@ -63,8 +74,13 @@ func StartIndexing(router *gin.RouterGroup) {
 			return
 		}
 
+		// Reject index paths that would escape the originals directory.
+		if _, err := photoprism.ResolveIndexPath(conf.OriginalsPath(), frm.Path); err != nil {
+			AbortBadRequest(c)
+			return
+		}
+
 		// Configure index options.
-		path := conf.OriginalsPath()
 		convert := settings.Index.Convert && conf.SidecarWritable()
 		skipArchived := settings.Index.SkipArchived
 
@@ -166,21 +182,21 @@ func StartIndexing(router *gin.RouterGroup) {
 			}
 		}
 
-		elapsed := int(time.Since(start).Seconds())
+		elapsed := time.Since(start)
+		seconds := int(elapsed.Seconds())
 
-		msg := i18n.Msg(i18n.MsgIndexingCompletedIn, elapsed)
+		log.Infof("library: indexed %s in %s", english.Plural(len(found), "file", "files"), elapsed)
 
-		event.Success(msg)
-		event.Publish("index.completed", event.Data{
-			"uid":     indOpt.UID,
-			"action":  indOpt.Action,
-			"path":    path,
-			"seconds": elapsed,
-		})
+		// Report success only if at least one file was indexed.
+		if indexed > 0 {
+			event.PublishSuccessMsg(i18n.MsgIndexingCompletedIn, seconds)
+		}
+
+		event.PublishCompleted([]string{"index.completed"}, indOpt.UID, indOpt.Action, seconds)
 
 		UpdateClientConfig()
 
-		c.JSON(http.StatusOK, i18n.Response{Code: http.StatusOK, Msg: msg})
+		c.JSON(http.StatusOK, i18n.NewResponse(http.StatusOK, i18n.MsgIndexingCompletedIn, seconds))
 	})
 }
 

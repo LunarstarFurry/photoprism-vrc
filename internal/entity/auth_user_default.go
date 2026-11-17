@@ -17,50 +17,47 @@ const (
 
 // Admin is the default admin user.
 var Admin = User{
-	ID:            1,
-	UserName:      AdminUserName,
-	AuthProvider:  authn.ProviderLocal.String(),
-	UserRole:      acl.RoleAdmin.String(),
-	DisplayName:   AdminDisplayName,
-	SuperAdmin:    true,
-	CanLogin:      true,
-	WebDAV:        true,
-	CanInvite:     true,
-	InviteToken:   GenerateToken(),
-	PreviewToken:  GenerateToken(),
-	DownloadToken: GenerateToken(),
+	ID:           1,
+	UserName:     AdminUserName,
+	AuthProvider: authn.ProviderLocal.String(),
+	UserRole:     acl.RoleAdmin.String(),
+	DisplayName:  AdminDisplayName,
+	SuperAdmin:   true,
+	CanLogin:     true,
+	WebDAV:       true,
+	CanInvite:    true,
+	InviteToken:  GenerateToken(),
+	PreviewToken: GenerateToken(),
 }
 
 // UnknownUser is an anonymous, public user without own account.
 var UnknownUser = User{
-	ID:            -1,
-	UserUID:       "u000000000000001",
-	UserName:      "",
-	AuthProvider:  authn.ProviderNone.String(),
-	UserRole:      acl.RoleNone.String(),
-	CanLogin:      false,
-	WebDAV:        false,
-	CanInvite:     false,
-	DisplayName:   UnknownDisplayName,
-	InviteToken:   "",
-	PreviewToken:  "",
-	DownloadToken: "",
+	ID:           -1,
+	UserUID:      "u000000000000001",
+	UserName:     "",
+	AuthProvider: authn.ProviderNone.String(),
+	UserRole:     acl.RoleNone.String(),
+	CanLogin:     false,
+	WebDAV:       false,
+	CanInvite:    false,
+	DisplayName:  UnknownDisplayName,
+	InviteToken:  "",
+	PreviewToken: "",
 }
 
 // Visitor is a user without own account e.g. for link sharing.
 var Visitor = User{
-	ID:            -2,
-	UserUID:       "u000000000000002",
-	UserName:      "",
-	AuthProvider:  authn.ProviderLink.String(),
-	UserRole:      acl.RoleVisitor.String(),
-	DisplayName:   VisitorDisplayName,
-	CanLogin:      false,
-	WebDAV:        false,
-	CanInvite:     false,
-	InviteToken:   "",
-	PreviewToken:  "",
-	DownloadToken: "",
+	ID:           -2,
+	UserUID:      "u000000000000002",
+	UserName:     "",
+	AuthProvider: authn.ProviderLink.String(),
+	UserRole:     acl.RoleVisitor.String(),
+	DisplayName:  VisitorDisplayName,
+	CanLogin:     false,
+	WebDAV:       false,
+	CanInvite:    false,
+	InviteToken:  "",
+	PreviewToken: "",
 }
 
 // CreateDefaultUsers initializes the database with default user accounts.
@@ -68,11 +65,14 @@ func CreateDefaultUsers() {
 	if admin := FindUser(Admin); admin != nil {
 		Admin = *admin
 	} else {
+		legacyName := false
+
 		// Set legacy values.
 		if leg := FindLegacyUser(Admin); leg != nil {
 			Admin.UserUID = leg.UserUID
 			if leg.UserName != "" {
 				Admin.UserName = leg.UserName
+				legacyName = true
 			}
 			if leg.PrimaryEmail != "" {
 				Admin.UserEmail = leg.PrimaryEmail
@@ -96,8 +96,8 @@ func CreateDefaultUsers() {
 			Admin.UserName = "admin"
 		}
 
-		// Add initial admin account.
-		if err := Admin.Create(); err != nil {
+		// Add initial admin account; a name migrated from the legacy table is existing data and is kept.
+		if err := Admin.create(legacyName); err != nil {
 			event.AuditErr([]string{"user", "failed to create", status.Error(err)})
 		}
 	}

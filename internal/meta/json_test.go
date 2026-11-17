@@ -1,17 +1,45 @@
 package meta
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/photoprism/photoprism/pkg/clean"
+	"github.com/photoprism/photoprism/pkg/fs"
 	"github.com/photoprism/photoprism/pkg/media/projection"
 	"github.com/photoprism/photoprism/pkg/media/video"
 	"github.com/photoprism/photoprism/pkg/time/tz"
 )
 
 func TestJSON(t *testing.T) {
+	t.Run("AviVideoCodec", func(t *testing.T) {
+		data, err := JSON("testdata/avi-magicyuv.json", "")
+
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// The codec is read from the AVI VideoCodec tag (no CompressorID/VideoCodecID
+		// is present) and normalized to its canonical name.
+		assert.Equal(t, video.CodecMagicYUV, data.Codec)
+		assert.Equal(t, 160, data.Width)
+		assert.Equal(t, 120, data.Height)
+	})
+	t.Run("MkvVfwWrapper", func(t *testing.T) {
+		data, err := JSON("testdata/mkv-vfw.json", "")
+
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// The Matroska VFW wrapper codec ID normalizes to the canonical VFW name.
+		assert.Equal(t, video.CodecVFW, data.Codec)
+	})
 	t.Run("MovJson", func(t *testing.T) {
 		data, err := JSON("testdata/mov.json", "")
 
@@ -573,9 +601,49 @@ func TestJSON(t *testing.T) {
 		assert.Equal(t, "SM-C200", data.CameraModel)
 		assert.Equal(t, "", data.CameraOwner)
 		assert.Equal(t, "", data.CameraSerial)
-		assert.Equal(t, 1, data.FocalLength)
+		assert.Equal(t, 6, data.FocalLength)
 		assert.Equal(t, 1, data.Orientation)
 		assert.Equal(t, projection.Equirectangular.String(), data.Projection)
+	})
+	t.Run("PanoramaUsePanoramaViewer", func(t *testing.T) {
+		data, err := JSON("testdata/panorama_usepanoramaviewer.json", "")
+
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		assert.Equal(t, projection.Equirectangular.String(), data.Projection)
+		assert.Contains(t, data.Keywords.String(), "panorama")
+	})
+	t.Run("PanoramaIsPhotosphere", func(t *testing.T) {
+		data, err := JSON("testdata/panorama_isphotosphere.json", "")
+
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		assert.Equal(t, projection.Equirectangular.String(), data.Projection)
+		assert.Contains(t, data.Keywords.String(), "panorama")
+	})
+	t.Run("PanoramaCubemap", func(t *testing.T) {
+		data, err := JSON("testdata/panorama_cubemap.json", "")
+
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		assert.NotEqual(t, projection.Equirectangular.String(), data.Projection)
+		assert.NotContains(t, data.Keywords.String(), "panorama")
+	})
+	t.Run("PanoramaVideoMp4", func(t *testing.T) {
+		data, err := JSON("testdata/panorama360_video.json", "panorama360_video.mp4")
+
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		assert.Equal(t, projection.Equirectangular.String(), data.Projection)
+		assert.Contains(t, data.Keywords.String(), "panorama")
 	})
 	t.Run("PNum7250006Json", func(t *testing.T) {
 		data, err := JSON("testdata/P7250006.json", "P7250006.MOV")
@@ -658,7 +726,7 @@ func TestJSON(t *testing.T) {
 		assert.Equal(t, "", data.CameraSerial)
 		assert.Equal(t, "", data.LensMake)
 		assert.Equal(t, "", data.LensModel)
-		assert.Equal(t, 5, data.FocalLength)
+		assert.Equal(t, 27, data.FocalLength)
 		assert.Equal(t, 1, int(data.Orientation))
 	})
 	t.Run("DateMovJson", func(t *testing.T) {
@@ -895,7 +963,7 @@ func TestJSON(t *testing.T) {
 
 		// t.Logf("all: %+v", data.json)
 
-		assert.Equal(t, "Jens\r\tMander", data.Artist)
+		assert.Equal(t, "Jens\n\tMander", data.Artist)
 		assert.Equal(t, "UTC+2", data.TimeZone)
 		assert.Equal(t, "2004-10-07 20:49:16 +0000 UTC", data.TakenAt.String())
 		assert.Equal(t, "2004-10-07 22:49:16 +0000 UTC", data.TakenAtLocal.String())
@@ -1024,7 +1092,7 @@ func TestJSON(t *testing.T) {
 		assert.Equal(t, float32(32.843544), float32(data.Lat))
 		assert.Equal(t, float32(-117.28025), float32(data.Lng))
 		assert.Equal(t, 18, clean.Altitude(data.Altitude))
-		assert.Equal(t, "0.002", data.Exposure)
+		assert.Equal(t, "1/500", data.Exposure)
 		assert.Equal(t, "Canon", data.CameraMake)
 		assert.Equal(t, "Canon EOS 6D", data.CameraModel)
 		assert.Equal(t, "", data.CameraOwner)
@@ -1120,7 +1188,7 @@ func TestJSON(t *testing.T) {
 		assert.Equal(t, float32(65.05558), float32(data.Lat))
 		assert.Equal(t, float32(-16.625702), float32(data.Lng))
 		assert.Equal(t, 30, clean.Altitude(data.Altitude))
-		assert.Equal(t, "0.125", data.Exposure)
+		assert.Equal(t, "1/8", data.Exposure)
 		assert.Equal(t, "NIKON CORPORATION", data.CameraMake)
 		assert.Equal(t, "NIKON D800E", data.CameraModel)
 		assert.Equal(t, "", data.CameraOwner)
@@ -1335,5 +1403,128 @@ func TestJSON(t *testing.T) {
 		assert.Equal(t, "GCMC", data.CameraMake)
 		assert.Equal(t, "RODFS50", data.CameraModel)
 		assert.Equal(t, "", data.LensModel)
+	})
+}
+
+func TestData_Exiftool_Software(t *testing.T) {
+	// exiftoolSoftware parses a minimal ExifTool result and returns the mapped values.
+	exiftoolSoftware := func(t *testing.T, tags string) Data {
+		t.Helper()
+		var data Data
+		if err := data.Exiftool([]byte(`[{"SourceFile":"test.jpg",`+tags+`}]`), ""); err != nil {
+			t.Fatal(err)
+		}
+		return data
+	}
+
+	t.Run("CreatorIsNotSoftware", func(t *testing.T) {
+		// dc:creator names the author of a picture, not the software that wrote it,
+		// so it must not end up in Software and block a real value.
+		data := exiftoolSoftware(t, `"Creator":"Jane Doe"`)
+		assert.Equal(t, "", data.Software)
+		assert.Equal(t, "Jane Doe", data.Artist)
+	})
+	t.Run("CreatorToolWinsOverCreator", func(t *testing.T) {
+		data := exiftoolSoftware(t, `"Creator":"Jane Doe","CreatorTool":"Adobe Lightroom 14.2"`)
+		assert.Equal(t, "Adobe Lightroom 14.2", data.Software)
+		assert.Equal(t, "Jane Doe", data.Artist)
+	})
+	t.Run("EmbeddedSoftwareWins", func(t *testing.T) {
+		data := exiftoolSoftware(t, `"Software":"Adobe Photoshop 24.0","CreatorTool":"Adobe Lightroom 14.2"`)
+		assert.Equal(t, "Adobe Photoshop 24.0", data.Software)
+	})
+}
+
+// TestData_Exiftool_ModifiedAt verifies that the modify time keys are read into ModifiedAt only.
+func TestData_Exiftool_ModifiedAt(t *testing.T) {
+	for name, tc := range map[string]struct {
+		json       string
+		takenAt    string
+		modifiedAt string
+	}{
+		"XmpTiffDateTime":   {`[{"DateTime":"2020:01:01 10:00:06"}]`, "", "2020-01-01 10:00:06"},
+		"ModifyDate":        {`[{"ModifyDate":"2020:01:01 10:00:03","DateTime":"2020:01:01 10:00:06"}]`, "", "2020-01-01 10:00:03"},
+		"DateTimeOriginal":  {`[{"DateTime":"2020:01:01 10:00:06","DateTimeOriginal":"2020:01:01 10:00:01"}]`, "2020-01-01 10:00:01", "2020-01-01 10:00:06"},
+		"DateTimeDigitized": {`[{"ModifyDate":"2020:01:01 10:00:03","DateTimeDigitized":"2020:01:01 10:00:05"}]`, "2020-01-01 10:00:05", "2020-01-01 10:00:03"},
+		"CreateDate":        {`[{"ModifyDate":"2020:01:01 10:00:03","CreateDate":"2020:01:01 10:00:02"}]`, "2020-01-01 10:00:02", "2020-01-01 10:00:03"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var data Data
+			require.NoError(t, data.Exiftool([]byte(tc.json), ""))
+
+			if tc.takenAt == "" {
+				assert.True(t, data.TakenAt.IsZero())
+			} else {
+				assert.Equal(t, tc.takenAt, data.TakenAt.UTC().Format(time.DateTime))
+			}
+
+			assert.Equal(t, tc.modifiedAt, data.ModifiedAt.Format(time.DateTime))
+		})
+	}
+}
+
+func TestJSON_ControlCharacters(t *testing.T) {
+	t.Run("ExifTool", func(t *testing.T) {
+		fileName := filepath.Join(t.TempDir(), "control.json")
+		require.NoError(t, os.WriteFile(fileName, []byte(`[{
+  "SourceFile": "control.jpg",
+  "ExifToolVersion": 12.76,
+  "FileName": "control.jpg",
+  "MIMEType": "image/jpeg",
+  "Title": "Sea\u0000side \u001bSunset",
+  "ImageDescription": "First line\u0000\r\nSecond line",
+  "Artist": "Jane\u0007 Doe",
+  "Copyright": "© 2026\u007f Jane Doe",
+  "Make": "Canon\u0000",
+  "Model": "Canon EOS 5D\u0001",
+  "LensModel": "EF50mm\u0000 f/1.8",
+  "Software": "Soft\u0000ware",
+  "Subject": ["beach\u0000", "sun"],
+  "Keywords": ["sea\u0000", "sand"]
+}]`), fs.ModeFile))
+
+		data, err := JSON(fileName, "control.jpg")
+		require.NoError(t, err)
+		assert.Equal(t, "Seaside Sunset", data.Title)
+		assert.Equal(t, "First line\nSecond line", data.Caption)
+		assert.Equal(t, "Jane Doe", data.Artist)
+		assert.Equal(t, "© 2026 Jane Doe", data.Copyright)
+		assert.Equal(t, "Canon", data.CameraMake)
+		assert.Equal(t, "Canon EOS 5D", data.CameraModel)
+		assert.Equal(t, "EF50mm f/1.8", data.LensModel)
+		assert.Equal(t, "Software", data.Software)
+		assert.Equal(t, "beach, sun", data.Subject)
+		assert.NotContains(t, data.Keywords.String(), "\x00")
+	})
+	t.Run("GooglePhotos", func(t *testing.T) {
+		fileName := filepath.Join(t.TempDir(), "control.jpg.json")
+		require.NoError(t, os.WriteFile(fileName, []byte(`{
+  "title": "Sea\u0000side \u001bSunset",
+  "description": "First line\u0000\r\nSecond line",
+  "photoTakenTime": {"timestamp": "1449418710"}
+}`), fs.ModeFile))
+
+		data, err := JSON(fileName, "")
+		require.NoError(t, err)
+		assert.Equal(t, "Seaside Sunset", data.Title)
+		assert.Equal(t, "First line\nSecond line", data.Caption)
+	})
+	t.Run("TextKept", func(t *testing.T) {
+		fileName := filepath.Join(t.TempDir(), "kept.json")
+		require.NoError(t, os.WriteFile(fileName, []byte(`[{
+  "SourceFile": "kept.jpg",
+  "ExifToolVersion": 12.76,
+  "FileName": "kept.jpg",
+  "MIMEType": "image/jpeg",
+  "Title": "شاطئ البحر",
+  "ImageDescription": "日本語の説明\nשורה שנייה 👩\u200D👩\u200D👧",
+  "Artist": "می\u200Cخواهم"
+}]`), fs.ModeFile))
+
+		data, err := JSON(fileName, "kept.jpg")
+		require.NoError(t, err)
+		assert.Equal(t, "شاطئ البحر", data.Title)
+		assert.Equal(t, "日本語の説明\nשורה שנייה 👩\u200D👩\u200D👧", data.Caption)
+		assert.Equal(t, "می\u200Cخواهم", data.Artist)
 	})
 }

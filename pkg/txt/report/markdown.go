@@ -4,24 +4,83 @@ import (
 	"bytes"
 	"strings"
 
+	"github.com/photoprism/photoprism/pkg/clean"
+
 	"github.com/olekukonko/tablewriter"
 	"github.com/olekukonko/tablewriter/renderer"
 	"github.com/olekukonko/tablewriter/tw"
 )
 
+// escapeMarkdownCell escapes Markdown table-significant runes (`|`, the
+// horizontal-rule sequence `* * *`) and angle brackets in a single cell.
+// Angle brackets are backslash-escaped so a value that happens to look
+// like an HTML tag renders as plain text in both the Markdown source
+// and any HTML produced from it (e.g. on docs.photoprism.app). CommonMark
+// guarantees that `\<` renders as the literal `<` (entity `&lt;`) in
+// HTML, so the escaped form is safe in both pipelines.
+func escapeMarkdownCell(cell string) string {
+	if strings.ContainsRune(cell, '|') {
+		cell = strings.ReplaceAll(cell, "|", "\\|")
+	}
+	if strings.Contains(cell, "* * *") {
+		cell = strings.ReplaceAll(cell, "* * *", "\\* \\* \\*")
+	}
+	if strings.ContainsRune(cell, '<') {
+		cell = strings.ReplaceAll(cell, "<", "\\<")
+	}
+	if strings.ContainsRune(cell, '>') {
+		cell = strings.ReplaceAll(cell, ">", "\\>")
+	}
+	return cell
+}
+
+// rowAlignment returns the per-column alignment for the data rows, or nil where none was asked for.
+//
+// Padded to the column count, since the table writer indexes it positionally and a short slice would
+// otherwise leave the trailing columns unset rather than defaulted.
+func rowAlignment(cols []string, align []Align) []tw.Align {
+	if len(align) == 0 {
+		return nil
+	}
+
+	out := make([]tw.Align, len(cols))
+
+	for i := range out {
+		out[i] = tw.AlignLeft
+	}
+
+	for i, a := range align {
+		if i >= len(out) {
+			break
+		}
+
+		switch a {
+		case AlignRight:
+			out[i] = tw.AlignRight
+		case AlignCenter:
+			out[i] = tw.AlignCenter
+		case AlignLeft, AlignDefault:
+			out[i] = tw.AlignLeft
+		}
+	}
+
+	return out
+}
+
 // MarkdownTable returns a text-formatted table with caption, optionally as valid Markdown,
-// so the output can be pasted into the docs.
+// so the output can be pasted into the docs. Each cell is passed through clean.Display.
 func MarkdownTable(rows [][]string, cols []string, opt Options) string {
+	rows, cols = displayRows(rows), displayRow(cols)
+	opt.Caption = clean.Display(opt.Caption)
+
 	// Escape Markdown.
 	if opt.Valid {
+		for i := range cols {
+			cols[i] = escapeMarkdownCell(cols[i])
+		}
 		for i := range rows {
 			for j := range rows[i] {
-				if strings.ContainsRune(rows[i][j], '|') {
-					rows[i][j] = strings.ReplaceAll(rows[i][j], "|", "\\|")
-				}
-				if strings.ContainsRune(rows[i][j], '*') {
-					rows[i][j] = strings.ReplaceAll(rows[i][j], "* * *", "\\* \\* \\*")
-				}
+				rows[i][j] = escapeMarkdownCell(rows[i][j])
 			}
 		}
 	}
@@ -31,12 +90,19 @@ func MarkdownTable(rows [][]string, cols []string, opt Options) string {
 	var tableRenderer tw.Renderer
 	var tableConfig tablewriter.Config
 
+	rowAlign := rowAlignment(cols, opt.Align)
+
 	if opt.Valid {
+		// Set on both because Markdown carries alignment in the delimiter row for the whole column:
+		// the renderer takes it from the first body row, or from the header when there are no rows.
 		tableRenderer = renderer.NewMarkdown()
 		tableConfig = tablewriter.Config{
-			Header: tw.CellConfig{Alignment: tw.CellAlignment{Global: tw.AlignLeft}, Formatting: tw.CellFormatting{AutoFormat: -1}},
+			Header: tw.CellConfig{
+				Alignment:  tw.CellAlignment{Global: tw.AlignLeft, PerColumn: rowAlign},
+				Formatting: tw.CellFormatting{AutoFormat: -1},
+			},
 			Row: tw.CellConfig{
-				Alignment: tw.CellAlignment{Global: tw.AlignLeft},
+				Alignment: tw.CellAlignment{Global: tw.AlignLeft, PerColumn: rowAlign},
 			},
 		}
 	} else {
@@ -44,7 +110,7 @@ func MarkdownTable(rows [][]string, cols []string, opt Options) string {
 		tableConfig = tablewriter.Config{
 			Header: tw.CellConfig{Alignment: tw.CellAlignment{Global: tw.AlignCenter}, Formatting: tw.CellFormatting{AutoFormat: -1}},
 			Row: tw.CellConfig{
-				Alignment: tw.CellAlignment{Global: tw.AlignLeft},
+				Alignment: tw.CellAlignment{Global: tw.AlignLeft, PerColumn: rowAlign},
 			},
 		}
 	}

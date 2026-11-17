@@ -1,0 +1,338 @@
+package mcp
+
+import (
+	"context"
+	"fmt"
+	"slices"
+	"strings"
+
+	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
+)
+
+// Result and input limits shared by every MCP tool registered on the server.
+// They keep responses compact enough for LLM clients and prevent input-size
+// abuse on substring-based matching.
+const (
+	// defaultResultLimit is the number of matches returned when a tool
+	// call does not specify an explicit "limit" argument.
+	defaultResultLimit = 20
+	// maxResultLimit is the hard upper bound applied to any "limit"
+	// argument larger than this value.
+	maxResultLimit = 50
+	// maxQueryLength is the maximum length of any free-text input
+	// ("query", "section", …) accepted by a tool.
+	maxQueryLength = 200
+)
+
+// pageWarningTemplate is the fmt.Sprintf template of the warning returned when more
+// items follow a page. Arguments are: returned count, total count, offset, and the
+// offset of the next page.
+const pageWarningTemplate = "returned %d of %d matches starting at offset %d; call again with offset %d to retrieve more"
+
+// allowedEditions is the closed allowlist of values accepted by the
+// "edition" argument of list_config_keys. An empty edition defaults to
+// "all"; anything outside this set is rejected with a validation error.
+var allowedEditions = map[string]struct{}{
+	"all":    {},
+	"ce":     {},
+	"plus":   {},
+	"pro":    {},
+	"portal": {},
+}
+
+// ListConfigKeysInput defines the supported inputs for the config lookup tool.
+type ListConfigKeysInput struct {
+	Section string `json:"section,omitempty" jsonschema:"optional section title filter"`
+	Query   string `json:"query,omitempty" jsonschema:"optional case-insensitive search query"`
+	Edition string `json:"edition,omitempty" jsonschema:"optional edition: ce, plus, pro, portal, or all"`
+	Limit   int    `json:"limit,omitempty" jsonschema:"optional maximum number of matches to return"`
+}
+
+// ListConfigKeysOutput defines the structured output for the config lookup tool.
+type ListConfigKeysOutput struct {
+	Matches        []ConfigKeyMatch `json:"matches"`
+	TotalMatches   int              `json:"total_matches"`
+	Truncated      bool             `json:"truncated"`
+	QueryApplied   string           `json:"query_applied,omitempty"`
+	SectionApplied string           `json:"section_applied,omitempty"`
+	EditionApplied string           `json:"edition_applied"`
+	Warnings       []string         `json:"warnings,omitempty"`
+}
+
+// ConfigKeyMatch represents a single config option match returned by the tool.
+type ConfigKeyMatch struct {
+	Section        string `json:"section"`
+	Environment    string `json:"environment"`
+	CLIFlag        string `json:"cli_flag"`
+	Default        string `json:"default"`
+	Description    string `json:"description"`
+	EditionSupport string `json:"edition_support"`
+}
+
+// readOnly returns the annotations of a read-only tool.
+func readOnly() *sdkmcp.ToolAnnotations {
+	return &sdkmcp.ToolAnnotations{ReadOnlyHint: true}
+}
+
+// registerTools registers the tools in ToolNames against the shared *Dataset.
+func registerTools(server *sdkmcp.Server, data *Dataset) {
+	AddTool(server, staticAccess, &sdkmcp.Tool{
+		Name:        "list_config_keys",
+		Description: "Lists read-only PhotoPrism config keys from the existing config report.",
+		Annotations: readOnly(),
+	}, func(ctx context.Context, req *sdkmcp.CallToolRequest, input ListConfigKeysInput) (*sdkmcp.CallToolResult, ListConfigKeysOutput, error) {
+		return listConfigKeys(ctx, req, input, data)
+	})
+
+	AddTool(server, staticAccess, &sdkmcp.Tool{
+		Name:        "find_search_filters",
+		Description: "Finds PhotoPrism search filters from the existing search filter reference.",
+		Annotations: readOnly(),
+	}, func(ctx context.Context, req *sdkmcp.CallToolRequest, input FindSearchFiltersInput) (*sdkmcp.CallToolResult, FindSearchFiltersOutput, error) {
+		return findSearchFilters(ctx, req, input, data)
+	})
+
+	AddTool(server, staticAccess, &sdkmcp.Tool{
+		Name: "list_cli_commands",
+		Description: "Lists the photoprism CLI commands of this edition with their usage, arguments, aliases, and own flags, " +
+			"as reported by `photoprism show commands`. Search command paths such as \"users add\", descriptions, and flag " +
+			"names with query. Global options are not listed; call list_config_keys for those. " +
+			"Returns at most limit items (default 20, max 50) starting at offset.",
+		Annotations: readOnly(),
+	}, func(ctx context.Context, req *sdkmcp.CallToolRequest, input ListCliCommandsInput) (*sdkmcp.CallToolResult, ListCliCommandsOutput, error) {
+		return listCliCommands(ctx, req, input, data)
+	})
+
+	AddTool(server, staticAccess, &sdkmcp.Tool{
+		Name: "list_file_formats",
+		Description: "Lists the file formats PhotoPrism supports, with their type, description, and file extensions, " +
+			"as reported by `photoprism show file-formats`. Filter by type, e.g. image, raw, or video, or search format " +
+			"names, extensions, and descriptions. Returns at most limit items (default 20, max 50) starting at offset.",
+		Annotations: readOnly(),
+	}, func(ctx context.Context, req *sdkmcp.CallToolRequest, input ListFileFormatsInput) (*sdkmcp.CallToolResult, ListFileFormatsOutput, error) {
+		return listFileFormats(ctx, req, input, data)
+	})
+
+	AddTool(server, staticAccess, &sdkmcp.Tool{
+		Name: "list_metadata_fields",
+		Description: "Lists the metadata fields PhotoPrism reads from files, with the ExifTool, Adobe XMP, and Dublin Core " +
+			"tags each one is read from, as reported by `photoprism show metadata`. Search field and tag names with query. " +
+			"Returns at most limit items (default 20, max 50) starting at offset.",
+		Annotations: readOnly(),
+	}, func(ctx context.Context, req *sdkmcp.CallToolRequest, input ListMetadataFieldsInput) (*sdkmcp.CallToolResult, ListMetadataFieldsOutput, error) {
+		return listMetadataFields(ctx, req, input, data)
+	})
+
+	AddTool(server, staticAccess, &sdkmcp.Tool{
+		Name: "list_thumbnail_sizes",
+		Description: "Lists the thumbnail sizes PhotoPrism generates, with their dimensions, availability, and use, " +
+			"as reported by `photoprism show thumb-sizes`. Sizes marked as video are the standard video sizes of " +
+			"`photoprism show video-sizes`; set type to video to list only those.",
+		Annotations: readOnly(),
+	}, func(ctx context.Context, req *sdkmcp.CallToolRequest, input ListThumbnailSizesInput) (*sdkmcp.CallToolResult, ListThumbnailSizesOutput, error) {
+		return listThumbnailSizes(ctx, req, input, data)
+	})
+}
+
+// listConfigKeys validates the caller's input, applies the section/query
+// filters over data.ConfigOptions, and returns at most `limit` matches
+// alongside the total match count. When an explicit edition filter is
+// supplied and differs from the current build, an advisory warning is
+// attached to the response.
+func listConfigKeys(_ context.Context, _ *sdkmcp.CallToolRequest, input ListConfigKeysInput, data *Dataset) (*sdkmcp.CallToolResult, ListConfigKeysOutput, error) {
+	edition, err := validateEdition(input.Edition)
+	if err != nil {
+		return nil, ListConfigKeysOutput{}, err
+	}
+
+	limit, err := validateLimit(input.Limit)
+	if err != nil {
+		return nil, ListConfigKeysOutput{}, err
+	}
+
+	query, err := validateString("query", input.Query)
+	if err != nil {
+		return nil, ListConfigKeysOutput{}, err
+	}
+
+	section, err := validateString("section", input.Section)
+	if err != nil {
+		return nil, ListConfigKeysOutput{}, err
+	}
+	matches := make([]ConfigKeyMatch, 0, limit)
+	total := 0
+
+	for _, option := range data.ConfigOptions {
+		if !matchesSection(option, section) {
+			continue
+		}
+
+		if !matchesQuery(option, query) {
+			continue
+		}
+
+		total++
+
+		if len(matches) < limit {
+			matches = append(matches, ConfigKeyMatch{
+				Section:        option.Section,
+				Environment:    option.Environment,
+				CLIFlag:        option.CLIFlag,
+				Default:        option.Default,
+				Description:    option.Description,
+				EditionSupport: editionSupportFor(option, data.CurrentEdition),
+			})
+		}
+	}
+
+	result := ListConfigKeysOutput{
+		Matches:        matches,
+		TotalMatches:   total,
+		Truncated:      total > len(matches),
+		QueryApplied:   strings.TrimSpace(input.Query),
+		SectionApplied: strings.TrimSpace(input.Section),
+		EditionApplied: edition,
+	}
+
+	if edition != "all" && edition != data.CurrentEdition {
+		result.Warnings = []string{
+			fmt.Sprintf("edition filtering is advisory; results come from the current %s build metadata", data.CurrentEdition),
+		}
+	}
+
+	return nil, result, nil
+}
+
+// validateEdition normalizes the requested edition and checks it against
+// allowedEditions. An empty input defaults to "all"; any value outside
+// the allowlist yields a validation error surfaced to the caller.
+func validateEdition(edition string) (string, error) {
+	if strings.TrimSpace(edition) == "" {
+		return "all", nil
+	}
+
+	normalized := normalizeEdition(edition)
+
+	if _, ok := allowedEditions[normalized]; !ok {
+		return "", fmt.Errorf("edition must be one of ce, plus, pro, portal, or all")
+	}
+
+	return normalized, nil
+}
+
+// validateLimit normalizes the requested result limit: zero becomes
+// defaultResultLimit, values above maxResultLimit are clamped, and
+// negative values are rejected with a validation error.
+func validateLimit(limit int) (int, error) {
+	if limit == 0 {
+		return defaultResultLimit, nil
+	}
+
+	if limit < 1 {
+		return 0, fmt.Errorf("limit must be greater than 0")
+	}
+
+	if limit > maxResultLimit {
+		return maxResultLimit, nil
+	}
+
+	return limit, nil
+}
+
+// validateOffset checks the requested result offset and rejects negative values.
+func validateOffset(offset int) (int, error) {
+	if offset < 0 {
+		return 0, fmt.Errorf("offset must be 0 or greater")
+	}
+
+	return offset, nil
+}
+
+// pageOf returns a copy of the items selected by offset and limit, and reports
+// whether more items follow.
+func pageOf[T any](items []T, limit, offset int) ([]T, bool) {
+	if offset >= len(items) {
+		return []T{}, false
+	}
+
+	end := offset + min(limit, len(items)-offset)
+
+	return slices.Clone(items[offset:end]), end < len(items)
+}
+
+// pageWarnings returns the warning for a page of results that more items follow.
+func pageWarnings(count, total, offset int, truncated bool) []string {
+	if !truncated {
+		return nil
+	}
+
+	return []string{fmt.Sprintf(pageWarningTemplate, count, total, offset, offset+count)}
+}
+
+// validateString validates and normalizes a free-text input field, using the
+// supplied field name in error messages so callers can reuse it for query,
+// section, or any other string parameter.
+func validateString(field, value string) (string, error) {
+	value = strings.TrimSpace(strings.ToLower(value))
+
+	if len(value) > maxQueryLength {
+		return "", fmt.Errorf("%s must not exceed %d characters", field, maxQueryLength)
+	}
+
+	return value, nil
+}
+
+// matchesSection reports whether an option matches the requested section filter.
+func matchesSection(option ConfigOption, section string) bool {
+	if section == "" {
+		return true
+	}
+
+	return strings.Contains(strings.ToLower(option.Section), section)
+}
+
+// matchesQuery reports whether an option matches the requested free-text query.
+func matchesQuery(option ConfigOption, query string) bool {
+	if query == "" {
+		return true
+	}
+
+	haystacks := []string{
+		option.Environment,
+		option.CLIFlag,
+		option.Description,
+	}
+
+	for _, haystack := range haystacks {
+		if strings.Contains(strings.ToLower(haystack), query) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// editionSupportFor returns a conservative edition hint for a config
+// option based on its flag tags. Returns "unknown" if the current build
+// edition is unknown, the first matching tag in priority order
+// (portal > pro > plus > essentials) when one is present, and "all"
+// otherwise. The hint is advisory and reflects the tag metadata only,
+// not runtime capability detection.
+func editionSupportFor(option ConfigOption, currentEdition string) string {
+	if currentEdition == "unknown" {
+		return "unknown"
+	}
+
+	if len(option.Tags) == 0 {
+		return "all"
+	}
+
+	// Check tags in priority order (most restrictive first).
+	for _, tag := range []string{"portal", "pro", "plus", "essentials"} {
+		if slices.Contains(option.Tags, tag) {
+			return tag
+		}
+	}
+
+	return "all"
+}

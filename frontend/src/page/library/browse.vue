@@ -9,7 +9,7 @@
 
           <router-link v-for="dir in breadcrumbs" :key="dir.key" :to="dir.uri">
             <v-icon>{{ navIcon }}</v-icon>
-            {{ dir.name }}
+            <bdi dir="ltr">{{ $util.stripBidiControls(dir.name) }}</bdi>
           </router-link>
         </v-toolbar-title>
 
@@ -62,16 +62,16 @@
               </div>
 
               <div v-if="m.isFile()" class="meta">
-                <button :title="m.Name" class="meta-title" @click.exact="openFile(index)">
-                  {{ m.baseName() }}
+                <button :title="$util.stripBidiControls(m.Name)" class="meta-title" @click.exact="openFile(index)">
+                  <bdi dir="ltr">{{ m.baseName() }}</bdi>
                 </button>
                 <div class="meta-description">
                   {{ m.getInfo() }}
                 </div>
               </div>
               <div v-else class="meta">
-                <button :title="m.Title" class="meta-title" @click.exact="openFile(index)">
-                  {{ m.baseName() }}
+                <button :title="$util.stripBidiControls(m.Title)" class="meta-title" @click.exact="openFile(index)">
+                  <bdi dir="ltr">{{ m.baseName() }}</bdi>
                 </button>
                 <div class="meta-description">
                   {{ $gettext(`Folder`) }}
@@ -92,6 +92,7 @@ import $notify from "common/notify";
 import { MaxItems } from "common/clipboard";
 import download from "common/download";
 import { Input, InputInvalid, ClickShort, ClickLong } from "common/input";
+import { ACTION_CREATED, ACTION_UPDATED, ACTION_DELETED } from "common/event";
 import PLoading from "component/loading.vue";
 
 export default {
@@ -131,7 +132,6 @@ export default {
         limit: 999,
         offset: 0,
       },
-      titleRule: (v) => v.length <= this.$config.get("clip") || this.$gettext("Name too long"),
       input: new Input(),
       lastId: "",
       breadcrumbs: [],
@@ -151,7 +151,7 @@ export default {
       this.filter.all = query["all"] ? query["all"] : "";
       this.lastFilter = {};
       this.routeName = this.$route.name;
-      this.path = this.$route.params.pathMatch;
+      this.path = this.routePath();
 
       this.search();
     },
@@ -162,10 +162,14 @@ export default {
       return;
     }
 
-    this.path = this.$route.params.pathMatch;
+    this.path = this.routePath();
 
     this.search();
 
+    // No code currently publishes folders.* events — neither the frontend ($event bus) nor
+    // the backend (and "folders" is not in the WebsocketTopics forward allowlist), so this
+    // subscription is dormant. If wired up, it must emit UID-only payloads and onUpdate's
+    // `updated` branch needs converting to a by-UID refetch (it still assumes a full entity).
     this.subscriptions.push(this.$event.subscribe("folders", (ev, data) => this.onUpdate(ev, data)));
     this.subscriptions.push(this.$event.subscribe("touchmove.top", () => this.refresh()));
   },
@@ -192,6 +196,12 @@ export default {
           }
           return true;
       }
+    },
+    // routePath returns the folder segments of the current route, or none for the Originals root,
+    // where the router leaves the optional pathMatch param undefined.
+    routePath() {
+      const segments = this.$route.params.pathMatch;
+      return Array.isArray(segments) ? segments : [];
     },
     getBreadcrumbs() {
       let result = [];
@@ -455,11 +465,11 @@ export default {
           } else if (response.files === 0 && response.folders === 1) {
             this.$notify.info(this.$gettext("One folder found"));
           } else if (response.files === 0 && response.folders > 1) {
-            this.$notify.info(this.$gettextInterpolate(this.$gettext("%{n} folders found"), { n: response.folders }));
+            this.$notify.info(this.$gettext("%{n} folders found", { n: response.folders }));
           } else if (response.files < this.files.limit) {
-            this.$notify.info(this.$gettextInterpolate(this.$gettext("Folder contains %{n} files"), { n: response.files }));
+            this.$notify.info(this.$gettext("Folder contains %{n} files", { n: response.files }));
           } else {
-            this.$notify.warn(this.$gettextInterpolate(this.$gettext("Limit reached, showing first %{n} files"), { n: response.files }));
+            this.$notify.warn(this.$gettext("Limit reached, showing first %{n} files", { n: response.files }));
           }
         })
         .catch(() => {
@@ -483,7 +493,7 @@ export default {
       const type = ev.split(".")[1];
 
       switch (type) {
-        case "updated":
+        case ACTION_UPDATED:
           for (let i = 0; i < data.entities.length; i++) {
             const values = data.entities[i];
             const model = this.results.find((m) => m.UID === values.UID);
@@ -495,7 +505,7 @@ export default {
             }
           }
           break;
-        case "deleted":
+        case ACTION_DELETED:
           this.dirty = true;
 
           for (let i = 0; i < data.entities.length; i++) {
@@ -510,7 +520,7 @@ export default {
           }
 
           break;
-        case "created":
+        case ACTION_CREATED:
           this.dirty = true;
           break;
         default:

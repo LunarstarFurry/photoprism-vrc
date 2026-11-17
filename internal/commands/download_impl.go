@@ -36,8 +36,7 @@ type DownloadOpts struct {
 	FormatSort         string
 }
 
-// runDownload executes the download/import flow for the given inputs and options.
-// It is the testable core used by the CLI action.
+// runDownload executes the download/import flow for the given inputs and options; downloadAction calls it.
 func runDownload(conf *config.Config, opts DownloadOpts, inputURLs []string) error {
 	start := time.Now()
 	if conf == nil {
@@ -62,6 +61,11 @@ func runDownload(conf *config.Config, opts DownloadOpts, inputURLs []string) err
 		destFolder = clean.UserPath(destFolder)
 	}
 
+	// Downloads are imported, so the destination must give names that the index accepts.
+	if err := get.Import().CheckDest(destFolder); err != nil {
+		return err
+	}
+
 	// Create session download directory
 	downloadPath := filepath.Join(conf.TempPath(), fs.DownloadDir+"_"+rnd.Base36(12))
 	if err := fs.MkdirAll(downloadPath); err != nil {
@@ -69,7 +73,7 @@ func runDownload(conf *config.Config, opts DownloadOpts, inputURLs []string) err
 	}
 	defer func() {
 		if rmErr := os.RemoveAll(downloadPath); rmErr != nil {
-			log.Debugf("download: %s (remove temporary download path)", clean.Error(rmErr))
+			log.Debugf("download: %s (remove temporary download path)", clean.ErrorFull(rmErr))
 		}
 	}()
 
@@ -94,7 +98,7 @@ func runDownload(conf *config.Config, opts DownloadOpts, inputURLs []string) err
 	switch fileRemux {
 	case "always", "auto", "skip":
 	default:
-		return fmt.Errorf("invalid file remux policy: %s", fileRemux)
+		return fmt.Errorf("invalid --remux: %s (expected 'always', 'auto', or 'skip')", fileRemux)
 	}
 
 	impersonate := strings.TrimSpace(opts.Impersonate)
@@ -112,12 +116,12 @@ func runDownload(conf *config.Config, opts DownloadOpts, inputURLs []string) err
 	for _, raw := range inputURLs {
 		u, perr := url.Parse(strings.TrimSpace(raw))
 		if perr != nil {
-			log.Errorf("invalid URL: %s", clean.Log(raw))
+			log.Errorf("invalid URL: %s", clean.LogUri(raw))
 			failures++
 			continue
 		}
 		if u.Scheme != scheme.Http && u.Scheme != scheme.Https {
-			log.Errorf("invalid URL scheme %s: %s", clean.Log(u.Scheme), clean.Log(raw))
+			log.Errorf("invalid URL scheme %s: %s", clean.Log(u.Scheme), clean.LogUri(raw))
 			failures++
 			continue
 		}
@@ -128,21 +132,17 @@ func runDownload(conf *config.Config, opts DownloadOpts, inputURLs []string) err
 
 		switch mt {
 		case media.Image, media.Vector, media.Raw, media.Document, media.Audio:
-			log.Infof("downloading %s from %s", mt, clean.Log(u.String()))
-			if dlName := clean.DlName(fs.BasePrefix(u.Path, true)); dlName != "" {
-				downloadFile = dlName + ext
-			} else {
-				downloadFile = time.Now().Format("20060102_150405") + ext
-			}
+			log.Infof("downloading %s from %s", mt, clean.LogUri(u.String()))
+			downloadFile = downloadName(downloadPath, fs.BasePrefix(u.Path, true), ext)
 			downloadFilePath := filepath.Join(downloadPath, downloadFile)
 			if downloadErr := fs.Download(downloadFilePath, u.String()); downloadErr != nil {
-				log.Errorf("download failed: %v", downloadErr)
+				log.Errorf("download failed: %s", clean.ErrorFull(downloadErr))
 				failures++
 				continue
 			}
 		default:
 			mt = media.Video
-			log.Infof("downloading %s from %s", mt, clean.Log(u.String()))
+			log.Infof("downloading %s from %s", mt, clean.LogUri(u.String()))
 			opt := dl.Options{
 				SortingFormat:      sortingFormat,
 				Cookies:            opts.Cookies,
@@ -157,10 +157,16 @@ func runDownload(conf *config.Config, opts DownloadOpts, inputURLs []string) err
 			}
 			result, err := dl.NewMetadata(context.Background(), u.String(), opt)
 			if err != nil {
-				log.Errorf("metadata failed: %v", err)
+				log.Errorf("metadata failed: %s", clean.ErrorFull(err))
 				if hint, ok := missingFormatsHint(err); ok {
 					log.Info(hint)
 				}
+				failures++
+				continue
+			}
+
+			if matched := ffmpeg.Exclude().Match(result.Info.VCodec, result.Info.Ext, result.Info.Container); matched != "" {
+				log.Warnf("skipping %s because format %s is on the FFmpeg exclude list", clean.LogUri(u.String()), clean.Log(matched))
 				failures++
 				continue
 			}
@@ -172,60 +178,34 @@ func runDownload(conf *config.Config, opts DownloadOpts, inputURLs []string) err
 					result.Options.FFmpegPostArgs = "-metadata creation_time=" + created.UTC().Format(time.RFC3339)
 				}
 			}
-			if dlName := clean.DlName(result.Info.Title); dlName != "" {
-				downloadFile = dlName + fs.ExtMp4
-			} else {
-				downloadFile = time.Now().Format("20060102_150405") + fs.ExtMp4
-			}
+			downloadFile = downloadName(downloadPath, result.Info.Title, fs.ExtMp4)
 			downloadFilePath := filepath.Join(downloadPath, downloadFile)
 
 			if method == "pipe" {
-				downloadResult, err := dl.Download(context.Background(), u.String(), opt, "best")
+				downloadResult, err := dl.Download(context.Background(), u.String(), opt, dl.FormatBest)
 				if err != nil {
-					log.Errorf("download failed: %v", err)
+					if downloadResult != nil {
+						_ = downloadResult.Close()
+					}
+					log.Errorf("download failed: %s", clean.ErrorFull(err))
 					failures++
 					continue
 				}
-				func() {
-					f, ferr := os.Create(downloadFilePath) //nolint:gosec // download target path chosen by user
-					if ferr != nil {
-						if closeErr := downloadResult.Close(); closeErr != nil {
-							log.Debugf("download: %s (close stream after create failure)", clean.Error(closeErr))
-						}
-						log.Errorf("create file failed: %v", ferr)
-						failures++
-						return
-					}
-					_, copyErr := io.Copy(f, downloadResult)
-					closeFileErr := f.Close()
-					closeDownloadErr := downloadResult.Close()
-					if copyErr != nil {
-						log.Errorf("write file failed: %v", copyErr)
-						failures++
-						return
-					}
-					if closeFileErr != nil {
-						log.Errorf("close file failed: %v", closeFileErr)
-						failures++
-						return
-					}
-					if closeDownloadErr != nil {
-						log.Errorf("close download stream failed: %v", closeDownloadErr)
-						failures++
-						return
-					}
-				}()
+				if !savePipeDownload(downloadResult, downloadFilePath) {
+					failures++
+					continue
+				}
 
 				remuxOpt := dl.RemuxOptionsFromInfo(conf.FFmpegBin(), fs.VideoMp4, result.Info, u.String())
 				if remuxErr := ffmpeg.RemuxFile(downloadFilePath, "", remuxOpt); remuxErr != nil {
-					log.Errorf("remux failed: %v", remuxErr)
+					log.Errorf("remux failed: %s", clean.ErrorFull(remuxErr))
 					failures++
 					continue
 				}
 			} else {
 				outTpl := filepath.Join(downloadPath, "ppdl_%(id)s.%(ext)s")
 				files, err := result.DownloadToFileWithOptions(context.Background(), dl.DownloadOptions{
-					Filter:            "best",
+					Filter:            dl.FormatBest,
 					DownloadAudioOnly: false,
 					EmbedMetadata:     true,
 					EmbedSubs:         false,
@@ -235,7 +215,11 @@ func runDownload(conf *config.Config, opts DownloadOpts, inputURLs []string) err
 					Output:            outTpl,
 				})
 				if err != nil {
-					log.Errorf("download failed: %v", err)
+					log.Errorf("download failed: %s", clean.ErrorFull(err))
+					if len(files) == 0 {
+						failures++
+						continue
+					}
 				}
 				if fileRemux != "skip" {
 					for _, fp := range files {
@@ -244,7 +228,7 @@ func runDownload(conf *config.Config, opts DownloadOpts, inputURLs []string) err
 						}
 						remuxOpt := dl.RemuxOptionsFromInfo(conf.FFmpegBin(), fs.VideoMp4, result.Info, u.String())
 						if remuxErr := ffmpeg.RemuxFile(fp, "", remuxOpt); remuxErr != nil {
-							log.Errorf("remux failed: %v", remuxErr)
+							log.Errorf("remux failed: %s", clean.ErrorFull(remuxErr))
 							failures++
 							continue
 						}
@@ -261,13 +245,48 @@ func runDownload(conf *config.Config, opts DownloadOpts, inputURLs []string) err
 
 	elapsed := time.Since(start)
 	if failures > 0 {
-		log.Warnf("completed with %d error(s) in %s", failures, elapsed)
-		return fmt.Errorf("some downloads failed: %d", failures)
+		log.Warnf("completed with %s in %s", formatCount(failures, "error", "errors"), elapsed)
+		return fmt.Errorf("%s", formatFailedCount(failures, "download", "downloads"))
 	}
 	log.Infof("completed in %s", elapsed)
 	return nil
 }
 
+// savePipeDownload writes a pipe download to the file path and removes the file if the stream
+// failed, so an incomplete download is neither remuxed nor imported.
+func savePipeDownload(stream io.ReadCloser, filePath string) bool {
+	f, err := os.Create(filePath) //nolint:gosec // download target path chosen by user
+	if err != nil {
+		if closeErr := stream.Close(); closeErr != nil {
+			log.Debugf("download: %s (close stream after create failure)", clean.ErrorFull(closeErr))
+		}
+		log.Errorf("create file failed: %s", clean.ErrorFull(err))
+		return false
+	}
+
+	_, copyErr := io.Copy(f, stream)
+	closeFileErr := f.Close()
+	closeStreamErr := stream.Close()
+
+	switch {
+	case copyErr != nil:
+		log.Errorf("write file failed: %s", clean.ErrorFull(copyErr))
+	case closeFileErr != nil:
+		log.Errorf("close file failed: %s", clean.ErrorFull(closeFileErr))
+	case closeStreamErr != nil:
+		log.Errorf("download failed: %s", clean.ErrorFull(closeStreamErr))
+	default:
+		return true
+	}
+
+	if rmErr := os.Remove(filePath); rmErr != nil {
+		log.Debugf("download: %s (remove incomplete file)", clean.ErrorFull(rmErr))
+	}
+
+	return false
+}
+
+// missingFormatsHint returns a hint for yt-dlp errors that indicate missing formats.
 func missingFormatsHint(err error) (string, bool) {
 	if err == nil {
 		return "", false
@@ -279,4 +298,22 @@ func missingFormatsHint(err error) (string, bool) {
 	}
 
 	return "", false
+}
+
+// downloadName returns a file name in dir that is not used yet for a download from a title or remote name, or a
+// time-based name if nothing usable is left of it, or the result is not portable and would therefore not be imported.
+func downloadName(dir, name, ext string) string {
+	base := clean.DlName(name)
+
+	if base == "" || !clean.PortableName(base+ext) {
+		base = time.Now().Format("20060102_150405")
+	}
+
+	result := base + ext
+
+	for i := 2; fs.FileExists(filepath.Join(dir, result)) || fs.IsSymlink(filepath.Join(dir, result)); i++ {
+		result = fmt.Sprintf("%s_%d%s", base, i, ext)
+	}
+
+	return result
 }

@@ -29,10 +29,10 @@ import (
 //	@Tags		Users
 //	@Accept		json
 //	@Produce	json
-//	@Param		uid				path		string			true	"user uid"
-//	@Param		request			body		form.Passcode	true	"passcode setup (password required)"
-//	@Success	201				{object}	entity.Passcode
-//	@Failure	400,401,403,429	{object}	i18n.Response
+//	@Param		uid					path		string			true	"user uid"
+//	@Param		request				body		form.Passcode	true	"passcode setup (password required)"
+//	@Success	201					{object}	entity.Passcode
+//	@Failure	400,401,403,413,429	{object}	i18n.Response
 //	@Router		/api/v1/users/{uid}/passcode [post]
 func CreateUserPasscode(router *gin.RouterGroup) {
 	router.POST("/users/:uid/passcode", func(c *gin.Context) {
@@ -56,7 +56,7 @@ func CreateUserPasscode(router *gin.RouterGroup) {
 
 		// Check user password and abort if invalid.
 		if code, msg, err := checkUserPasscodePassword(c, user, frm.Password); err != nil {
-			event.AuditErr([]string{clientIp, "session %s", authn.Users, user.UserName, authn.ErrPasscodeGenerateFailed.Error(), strings.ToLower(clean.Error(err))}, s.RefID)
+			event.AuditErr([]string{clientIp, "session %s", authn.Users, "%s", authn.ErrPasscodeGenerateFailed.Error(), strings.ToLower(clean.Error(err))}, s.RefID, clean.LogQuote(user.UserName))
 			Abort(c, code, msg)
 			return
 		}
@@ -70,20 +70,20 @@ func CreateUserPasscode(router *gin.RouterGroup) {
 		// Generate and save new passcode key.
 		var passcode *entity.Passcode
 		if key, err := rnd.AuthKey(conf.AppName(), user.UserName); err != nil {
-			event.AuditErr([]string{ClientIP(c), "session %s", authn.Users, user.UserName, authn.ErrPasscodeGenerateFailed.Error(), clean.Error(err)}, s.RefID)
+			event.AuditErr([]string{ClientIP(c), "session %s", authn.Users, "%s", authn.ErrPasscodeGenerateFailed.Error(), clean.Error(err)}, s.RefID, clean.LogQuote(user.UserName))
 			Abort(c, http.StatusInternalServerError, i18n.ErrUnexpected)
 			return
 		} else if passcode, err = entity.NewPasscode(user.GetUID(), key.String(), rnd.RecoveryCode()); err != nil {
-			event.AuditErr([]string{ClientIP(c), "session %s", authn.Users, user.UserName, authn.ErrPasscodeCreateFailed.Error(), clean.Error(err)}, s.RefID)
+			event.AuditErr([]string{ClientIP(c), "session %s", authn.Users, "%s", authn.ErrPasscodeCreateFailed.Error(), clean.Error(err)}, s.RefID, clean.LogQuote(user.UserName))
 			Abort(c, http.StatusInternalServerError, i18n.ErrUnexpected)
 			return
 		} else if err = passcode.Save(); err != nil {
-			event.AuditErr([]string{ClientIP(c), "session %s", authn.Users, user.UserName, authn.ErrPasscodeSaveFailed.Error(), clean.Error(err)}, s.RefID)
+			event.AuditErr([]string{ClientIP(c), "session %s", authn.Users, "%s", authn.ErrPasscodeSaveFailed.Error(), clean.Error(err)}, s.RefID, clean.LogQuote(user.UserName))
 			Abort(c, http.StatusConflict, i18n.ErrSaveFailed)
 			return
 		}
 
-		event.AuditInfo([]string{ClientIP(c), "session %s", authn.Users, user.UserName, authn.Passcode, status.Created}, s.RefID)
+		event.AuditInfo([]string{ClientIP(c), "session %s", authn.Users, "%s", authn.Passcode, status.Created}, s.RefID, clean.LogQuote(user.UserName))
 
 		header.SetLocation(c)
 		c.JSON(http.StatusCreated, passcode)
@@ -97,10 +97,10 @@ func CreateUserPasscode(router *gin.RouterGroup) {
 //	@Tags		Users
 //	@Accept		json
 //	@Produce	json
-//	@Param		uid				path		string			true	"user uid"
-//	@Param		request			body		form.Passcode	true	"verification code"
-//	@Success	200				{object}	entity.Passcode
-//	@Failure	400,401,403,429	{object}	i18n.Response
+//	@Param		uid					path		string			true	"user uid"
+//	@Param		request				body		form.Passcode	true	"verification code"
+//	@Success	200					{object}	entity.Passcode
+//	@Failure	400,401,403,413,429	{object}	i18n.Response
 //	@Router		/api/v1/users/{uid}/passcode/confirm [post]
 func ConfirmUserPasscode(router *gin.RouterGroup) {
 	router.POST("/users/:uid/passcode/confirm", func(c *gin.Context) {
@@ -123,11 +123,11 @@ func ConfirmUserPasscode(router *gin.RouterGroup) {
 		valid, passcode, err := user.VerifyPasscode(frm.Passcode())
 
 		if err != nil {
-			event.AuditErr([]string{ClientIP(c), "session %s", authn.Users, user.UserName, authn.ErrPasscodeVerificationFailed.Error(), clean.Error(err)}, s.RefID)
+			event.AuditErr([]string{ClientIP(c), "session %s", authn.Users, "%s", authn.ErrPasscodeVerificationFailed.Error(), clean.Error(err)}, s.RefID, clean.LogQuote(user.UserName))
 			Abort(c, http.StatusForbidden, i18n.ErrInvalidPasscode)
 			return
 		} else if !valid {
-			event.AuditWarn([]string{ClientIP(c), "session %s", authn.Users, user.UserName, authn.ErrInvalidPasscode.Error()}, s.RefID)
+			event.AuditWarn([]string{ClientIP(c), "session %s", authn.Users, "%s", authn.ErrInvalidPasscode.Error()}, s.RefID, clean.LogQuote(user.UserName))
 			Abort(c, http.StatusForbidden, i18n.ErrInvalidPasscode)
 			return
 		}
@@ -135,7 +135,7 @@ func ConfirmUserPasscode(router *gin.RouterGroup) {
 		// Return the reserved request rate limit tokens after successful authentication.
 		r.Success()
 
-		event.AuditInfo([]string{ClientIP(c), "session %s", authn.Users, user.UserName, authn.Passcode, status.Verified}, s.RefID)
+		event.AuditInfo([]string{ClientIP(c), "session %s", authn.Users, "%s", authn.Passcode, status.Verified}, s.RefID, clean.LogQuote(user.UserName))
 
 		// Clear session cache.
 		s.ClearCache()
@@ -150,9 +150,9 @@ func ConfirmUserPasscode(router *gin.RouterGroup) {
 //	@Id			ActivateUserPasscode
 //	@Tags		Users
 //	@Produce	json
-//	@Param		uid				path		string	true	"user uid"
-//	@Success	200				{object}	entity.Passcode
-//	@Failure	401,403,404,429	{object}	i18n.Response
+//	@Param		uid					path		string	true	"user uid"
+//	@Success	200					{object}	entity.Passcode
+//	@Failure	401,403,404,413,429	{object}	i18n.Response
 //	@Router		/api/v1/users/{uid}/passcode/activate [post]
 func ActivateUserPasscode(router *gin.RouterGroup) {
 	router.POST("/users/:uid/passcode/activate", func(c *gin.Context) {
@@ -167,18 +167,18 @@ func ActivateUserPasscode(router *gin.RouterGroup) {
 		passcode, err := user.ActivatePasscode()
 
 		if err != nil {
-			event.AuditErr([]string{ClientIP(c), "session %s", authn.Users, user.UserName, authn.ErrPasscodeActivationFailed.Error(), clean.Error(err)}, s.RefID)
+			event.AuditErr([]string{ClientIP(c), "session %s", authn.Users, "%s", authn.ErrPasscodeActivationFailed.Error(), clean.Error(err)}, s.RefID, clean.LogQuote(user.UserName))
 			Abort(c, http.StatusForbidden, i18n.ErrSaveFailed)
 			return
 		}
 
 		// Log event.
-		event.AuditInfo([]string{ClientIP(c), "session %s", authn.Users, user.UserName, authn.Passcode, status.Activated}, s.RefID)
+		event.AuditInfo([]string{ClientIP(c), "session %s", authn.Users, "%s", authn.Passcode, status.Activated}, s.RefID, clean.LogQuote(user.UserName))
 
-		// Invalidate any other user sessions to protect the account:
-		// https://cheatsheetseries.owasp.org/cheatsheets/Session_Management_Cheat_Sheet.html
-		event.AuditInfo([]string{ClientIP(c), "session %s", authn.Users, user.UserName, "invalidated %s"}, s.RefID,
-			english.Plural(user.DeleteSessions([]string{s.ID}), authn.Session, authn.Sessions))
+		// Revoke other user sessions after a privilege level change,
+		// except for app passwords and client access tokens.
+		event.AuditInfo([]string{ClientIP(c), "session %s", authn.Users, "%s", "revoked %s"}, s.RefID, clean.LogQuote(user.UserName),
+			english.Plural(user.RevokeDerivedSessions([]string{s.ID}), authn.Session, authn.Sessions))
 
 		// Clear session cache.
 		s.ClearCache()
@@ -194,10 +194,10 @@ func ActivateUserPasscode(router *gin.RouterGroup) {
 //	@Tags		Users
 //	@Accept		json
 //	@Produce	json
-//	@Param		uid					path		string			true	"user uid"
-//	@Param		request				body		form.Passcode	true	"password for confirmation"
-//	@Success	200					{object}	i18n.Response
-//	@Failure	400,401,403,404,429	{object}	i18n.Response
+//	@Param		uid						path		string			true	"user uid"
+//	@Param		request					body		form.Passcode	true	"password for confirmation"
+//	@Success	200						{object}	i18n.Response
+//	@Failure	400,401,403,404,413,429	{object}	i18n.Response
 //	@Router		/api/v1/users/{uid}/passcode/deactivate [post]
 func DeactivateUserPasscode(router *gin.RouterGroup) {
 	router.POST("/users/:uid/passcode/deactivate", func(c *gin.Context) {
@@ -221,7 +221,7 @@ func DeactivateUserPasscode(router *gin.RouterGroup) {
 
 		// Check user password and abort if invalid.
 		if code, msg, err := checkUserPasscodePassword(c, user, frm.Password); err != nil {
-			event.AuditErr([]string{clientIp, "session %s", authn.Users, user.UserName, authn.ErrPasscodeDeactivationFailed.Error(), strings.ToLower(clean.Error(err))}, s.RefID)
+			event.AuditErr([]string{clientIp, "session %s", authn.Users, "%s", authn.ErrPasscodeDeactivationFailed.Error(), strings.ToLower(clean.Error(err))}, s.RefID, clean.LogQuote(user.UserName))
 			Abort(c, code, msg)
 			return
 		}
@@ -231,12 +231,12 @@ func DeactivateUserPasscode(router *gin.RouterGroup) {
 
 		// Delete passcode.
 		if _, err := user.DeactivatePasscode(); err != nil {
-			event.AuditErr([]string{ClientIP(c), "session %s", authn.Users, user.UserName, authn.ErrPasscodeDeactivationFailed.Error(), clean.Error(err)}, s.RefID)
+			event.AuditErr([]string{ClientIP(c), "session %s", authn.Users, "%s", authn.ErrPasscodeDeactivationFailed.Error(), clean.Error(err)}, s.RefID, clean.LogQuote(user.UserName))
 			Abort(c, http.StatusNotFound, i18n.ErrNotFound)
 			return
 		}
 
-		event.AuditInfo([]string{ClientIP(c), "session %s", authn.Users, user.UserName, authn.Passcode, status.Deactivated}, s.RefID)
+		event.AuditInfo([]string{ClientIP(c), "session %s", authn.Users, "%s", authn.Passcode, status.Deactivated}, s.RefID, clean.LogQuote(user.UserName))
 
 		// Clear session cache.
 		s.ClearCache()
@@ -249,16 +249,16 @@ func DeactivateUserPasscode(router *gin.RouterGroup) {
 func checkUserPasscodeAuth(c *gin.Context, action acl.Permission) (*entity.Session, *entity.User, *form.Passcode, error) {
 	conf := get.Config()
 
-	// Prevent caching of API response.
+	// Prevent API response caching.
 	c.Header(header.CacheControl, header.CacheControlNoStore)
 
-	// You cannot change any passwords without authentication and settings enabled.
+	// Passcode changes require authentication and enabled settings.
 	if conf.Public() || conf.DisableSettings() {
 		Abort(c, http.StatusForbidden, i18n.ErrPublic)
 		return nil, nil, nil, authn.ErrPasscodeNotSupported
 	}
 
-	// Check limit for failed auth requests (max. 10 per minute).
+	// Enforce the failed authentication rate limit.
 	if limiter.Login.Reject(ClientIP(c)) {
 		limiter.AbortJSON(c)
 		return nil, nil, nil, authn.ErrRateLimitExceeded
@@ -271,13 +271,13 @@ func checkUserPasscodeAuth(c *gin.Context, action acl.Permission) (*entity.Sessi
 		return s, nil, nil, authn.ErrUnauthorized
 	}
 
-	// Check if the current user has management privileges.
+	// Normalize the target user UID.
 	uid := clean.UID(c.Param("uid"))
 
 	// Get user from session.
 	user := s.GetUser()
 
-	// Regular users can only set up a passcode for their own account.
+	// Users may only manage passcodes for their own account.
 	if user.UserUID != uid || !user.CanLogIn() {
 		AbortForbidden(c)
 		return s, nil, nil, authn.ErrUnauthorized
@@ -342,13 +342,14 @@ func checkUserPasscodePassword(c *gin.Context, user *entity.User, password strin
 			Password: password,
 		}
 
-		// Check if user login credentials are valid.
+		// Check whether user login credentials are valid.
 		authUser, provider, method, authErr := entity.Auth(f, nil, c)
 
+		// A passcode-required result counts as verified only for the session user's own account.
+		passcodeRequired := method == authn.Method2FA && errors.Is(authErr, authn.ErrPasscodeRequired)
+
 		switch {
-		case method == authn.Method2FA && errors.Is(authErr, authn.ErrPasscodeRequired):
-			return http.StatusOK, i18n.MsgVerified, nil
-		case authErr != nil:
+		case authErr != nil && !passcodeRequired:
 			// Abort if authentication has failed otherwise.
 			return code, msg, authErr
 		case authUser == nil:
@@ -357,6 +358,8 @@ func checkUserPasscodePassword(c *gin.Context, user *entity.User, password strin
 		case !authUser.Equal(user):
 			// Abort if user accounts do not match.
 			return code, msg, authn.ErrUserDoesNotMatch
+		case passcodeRequired:
+			return http.StatusOK, i18n.MsgVerified, nil
 		case !provider.SupportsPasscodeAuthentication() || method != authn.MethodDefault:
 			// Abort if e.g. an app password was provided.
 			return code, msg, authn.ErrInvalidCredentials

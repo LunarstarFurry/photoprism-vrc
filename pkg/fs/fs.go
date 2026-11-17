@@ -1,7 +1,7 @@
 /*
 Package fs provides filesystem related constants and functions.
 
-Copyright (c) 2018 - 2025 PhotoPrism UG. All rights reserved.
+Copyright (c) 2018 - 2026 PhotoPrism UG. All rights reserved.
 
 	This program is free software: you can redistribute it and/or modify
 	it under Version 3 of the GNU Affero General Public License (the "AGPL"):
@@ -14,7 +14,7 @@ Copyright (c) 2018 - 2025 PhotoPrism UG. All rights reserved.
 
 	The AGPL is supplemented by our Trademark and Brand Guidelines,
 	which describe how our Brand Assets may be used:
-	<https://www.photoprism.app/trademark>
+	<https://www.photoprism.app/trademark/>
 
 Feel free to send an email to hello@photoprism.app if you have questions,
 want to support our work, or just want to say hello.
@@ -84,8 +84,9 @@ func SocketExists(socketName string) bool {
 	return true
 }
 
-// Exists returns true if the specified file system path exists,
-// regardless of whether it is a file, directory, or link.
+// Exists returns true if the specified file system path exists and resolves,
+// whether it is a file, a directory, or a link to one. A link with no target
+// resolves to nothing, so use IsSymlink to test the name itself.
 func Exists(fsPath string) bool {
 	if fsPath == "" {
 		return false
@@ -94,6 +95,22 @@ func Exists(fsPath string) bool {
 	_, err := os.Stat(fsPath)
 
 	return err == nil
+}
+
+// OpenNoFollow refuses an open whose final path element is a symbolic link,
+// so the call carries the rule rather than only the check before it.
+const OpenNoFollow = syscall.O_NOFOLLOW
+
+// IsSymlink returns true if a symbolic link exists under the specified name,
+// whether or not it resolves.
+func IsSymlink(fsPath string) bool {
+	if fsPath == "" {
+		return false
+	}
+
+	info, err := os.Lstat(fsPath)
+
+	return err == nil && info.Mode()&os.ModeSymlink != 0
 }
 
 // FileExists returns true if a file exists at the specified path.

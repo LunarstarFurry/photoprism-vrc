@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/urfave/cli/v2"
 )
 
@@ -32,11 +33,12 @@ func TestRowsToObjectsAndJSONExport(t *testing.T) {
 	assert.NoError(t, json.Unmarshal([]byte(s), &back))
 	assert.Equal(t, objs, back)
 
-	// Duplicate column names collide to the same key; last wins
+	// Columns that canonicalize to one key are suffixed rather than collapsed, so a table holding
+	// two of the same name - a marker source beside a subject source - exports both.
 	rows = [][]string{{"x", "y"}}
 	cols = []string{"A-A", "A A"}
 	objs = RowsToObjects(rows, cols)
-	assert.Equal(t, map[string]string{"a_a": "y"}, objs[0])
+	assert.Equal(t, map[string]string{"a_a": "x", "a_a_2": "y"}, objs[0])
 }
 
 func TestCliFormatStrict(t *testing.T) {
@@ -89,4 +91,68 @@ func TestCliFormatStrict(t *testing.T) {
 			t.Fatalf("expected cli.ExitCoder, got %T", err)
 		}
 	}
+}
+
+func TestUniqueKeys(t *testing.T) {
+	t.Run("Distinct", func(t *testing.T) {
+		assert.Equal(t, []string{"a", "b"}, uniqueKeys([]string{"A", "B"}))
+	})
+	t.Run("Repeated", func(t *testing.T) {
+		// A marker source beside a subject source, both titled "Src" for the reader.
+		assert.Equal(t, []string{"src", "src_2", "src_3"}, uniqueKeys([]string{"Src", "Src", "Src"}))
+	})
+}
+
+func TestRowsToObjectsKeys(t *testing.T) {
+	rows := [][]string{{"x", "y"}}
+
+	t.Run("GivenKeys", func(t *testing.T) {
+		objs := RowsToObjectsKeys(rows, []string{"Src", "Src"}, []string{"marker_src", "subj_src"})
+		assert.Equal(t, map[string]string{"marker_src": "x", "subj_src": "y"}, objs[0])
+	})
+	t.Run("FallsBackToTheHeadings", func(t *testing.T) {
+		objs := RowsToObjectsKeys(rows, []string{"A", "B"}, nil)
+		assert.Equal(t, map[string]string{"a": "x", "b": "y"}, objs[0])
+	})
+	t.Run("PartialKeysFallBackForTheRest", func(t *testing.T) {
+		// Short rather than wrong: the named ones are used and the rest keep a heading-derived key.
+		objs := RowsToObjectsKeys(rows, []string{"A", "B"}, []string{"first"})
+		assert.Equal(t, map[string]string{"first": "x", "b": "y"}, objs[0])
+	})
+}
+
+func TestMarshalJSON(t *testing.T) {
+	t.Run("Escaped", func(t *testing.T) {
+		in := map[string]string{"name": "a\u202Eb\u007Fc\u0085d"}
+		b, err := MarshalJSON(in)
+		require.NoError(t, err)
+		assert.Equal(t, `{"name":"a\u202eb\u007fc\u0085d"}`, string(b))
+
+		var out map[string]string
+		require.NoError(t, json.Unmarshal(b, &out))
+		assert.Equal(t, in, out)
+	})
+	t.Run("Unchanged", func(t *testing.T) {
+		in := map[string]string{"name": "صورة 日本.jpg"}
+		b, err := MarshalJSON(in)
+		require.NoError(t, err)
+		expected, _ := json.Marshal(in)
+		assert.Equal(t, string(expected), string(b))
+	})
+	t.Run("Error", func(t *testing.T) {
+		_, err := MarshalJSON(make(chan int))
+		assert.Error(t, err)
+	})
+}
+
+func TestMarshalJSONIndent(t *testing.T) {
+	t.Run("Escaped", func(t *testing.T) {
+		b, err := MarshalJSONIndent(map[string]string{"name": "a\u202Eb"}, "", "  ")
+		require.NoError(t, err)
+		assert.Equal(t, "{\n  \"name\": \"a\\u202eb\"\n}", string(b))
+	})
+	t.Run("Error", func(t *testing.T) {
+		_, err := MarshalJSONIndent(make(chan int), "", "  ")
+		assert.Error(t, err)
+	})
 }

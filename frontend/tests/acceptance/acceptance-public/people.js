@@ -76,7 +76,7 @@ test.meta("testID", "people-001").meta({ type: "short", mode: "public" })(
     await menu.openPage("people");
     await subject.renameSubject(JaneUID, "Otto Visible");
     await t
-      .expect(Selector("p").withText("Merge Jane Doe with Otto Visible").visible)
+      .expect(Selector("p").withText(/Merge \u2068?Jane Doe\u2069? with \u2068?Otto Visible\u2069?\?/).visible)
       .ok()
       .click(Selector("div.dialog-merge button.action-cancel"));
     await subject.renameSubject(JaneUID, "Max Mu");
@@ -173,7 +173,7 @@ test.meta("testID", "people-004").meta({ mode: "public" })("Common: Test new fac
   await t
     .expect(Selector('div[role="option"]').nth(0).visible)
     .notOk()
-    .typeText(Selector("div[data-id=" + FirstFaceID + "] div.input-name input"), "Otto");
+    .typeText(Selector("div[data-id=" + FirstFaceID + "] div.input-name input:not([type='hidden'])"), "Otto");
 
   await t.expect(Selector('div[role="option"]').nth(0).withText("Otto Visible").visible).ok();
 });

@@ -1,5 +1,11 @@
 package cluster
 
+import (
+	"strings"
+
+	"github.com/photoprism/photoprism/pkg/dsn"
+)
+
 // OptionsUpdate represents a set of configuration values that should be
 // persisted to options.yml after a Portal cluster operation.
 type OptionsUpdate struct {
@@ -7,6 +13,7 @@ type OptionsUpdate struct {
 	ClusterCIDR      *string
 	NodeClientID     *string
 	JWKSUrl          *string
+	PortalLoginUrl   *string
 	NodeUUID         *string
 	DatabaseDriver   *string
 	DatabaseDSN      *string
@@ -22,6 +29,7 @@ func (u OptionsUpdate) IsZero() bool {
 		u.ClusterCIDR == nil &&
 		u.NodeClientID == nil &&
 		u.JWKSUrl == nil &&
+		u.PortalLoginUrl == nil &&
 		u.NodeUUID == nil &&
 		u.DatabaseDriver == nil &&
 		u.DatabaseDSN == nil &&
@@ -39,6 +47,42 @@ func (u OptionsUpdate) HasDatabaseUpdate() bool {
 		u.DatabaseName != nil ||
 		u.DatabaseUser != nil ||
 		u.DatabasePassword != nil
+}
+
+// ClearDatabase removes all database-related fields from the update.
+func (u *OptionsUpdate) ClearDatabase() {
+	u.DatabaseDriver = nil
+	u.DatabaseDSN = nil
+	u.DatabaseServer = nil
+	u.DatabaseName = nil
+	u.DatabaseUser = nil
+	u.DatabasePassword = nil
+}
+
+// SetDatabase adds the separate database settings of a registration response, which are complete only
+// with a password, and returns their server address. They are left out as a whole if it is unusable.
+func (u *OptionsUpdate) SetDatabase(d RegisterDatabase) (server string, ok bool) {
+	if d.Incomplete || d.Name == "" || d.User == "" || d.Password == "" {
+		return "", true
+	}
+
+	if server, ok = d.Server(); !ok {
+		return server, false
+	}
+
+	driver := strings.TrimSpace(d.Driver)
+
+	if driver == "" {
+		driver = dsn.DriverMySQL
+	}
+
+	u.SetDatabaseDriver(driver)
+	u.SetDatabaseName(d.Name)
+	u.SetDatabaseServer(server)
+	u.SetDatabaseUser(d.User)
+	u.SetDatabasePassword(d.Password)
+
+	return server, true
 }
 
 // Setter helpers ----------------------------------------------------------------
@@ -61,6 +105,11 @@ func (u *OptionsUpdate) SetNodeClientID(value string) {
 // SetJWKSUrl sets the JWKS URL.
 func (u *OptionsUpdate) SetJWKSUrl(value string) {
 	u.JWKSUrl = stringPtr(value)
+}
+
+// SetPortalLoginUrl sets the browser-facing Portal login page URL.
+func (u *OptionsUpdate) SetPortalLoginUrl(value string) {
+	u.PortalLoginUrl = stringPtr(value)
 }
 
 // SetNodeUUID sets the node UUID.
@@ -111,6 +160,9 @@ func (u OptionsUpdate) Visit(fn func(string, any)) {
 	}
 	if u.JWKSUrl != nil {
 		fn("JWKSUrl", *u.JWKSUrl)
+	}
+	if u.PortalLoginUrl != nil {
+		fn("PortalLoginUrl", *u.PortalLoginUrl)
 	}
 	if u.NodeUUID != nil {
 		fn("NodeUUID", *u.NodeUUID)

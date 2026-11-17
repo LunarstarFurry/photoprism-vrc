@@ -43,11 +43,11 @@ func TestUsersCommand(t *testing.T) {
 		assert.Contains(t, output4, "Johnny")
 		assert.Contains(t, output4, "admin")
 		assert.Contains(t, output4, "johnnny@test.de")
-		assert.Contains(t, output4, "│ DeletedAt     │ <nil>")
+		assert.Contains(t, output4, "│ DeletedAt    │ <nil>")
 
 		// Remove John
 		// Run command with test context.
-		output5, err := RunWithTestContext(UsersRemoveCommand, []string{"rm", "--force", "john.admin"})
+		output5, err := RunWithTestContext(UsersRemoveCommand, []string{"rm", "--yes", "john.admin"})
 
 		// Check command output for plausibility.
 		// t.Logf(output5)
@@ -62,7 +62,19 @@ func TestUsersCommand(t *testing.T) {
 		assert.Contains(t, output6, "Johnny")
 		assert.Contains(t, output6, "admin")
 		assert.Contains(t, output6, "johnnny@test.de")
-		assert.Contains(t, output6, "│ DeletedAt     │ time.Date")
-		assert.NotContains(t, output6, "│ DeletedAt     │ <nil>")
+		assert.Contains(t, output6, "│ DeletedAt    │ time.Date")
+		assert.NotContains(t, output6, "│ DeletedAt    │ <nil>")
+	})
+}
+
+func TestUserMCPFlag(t *testing.T) {
+	t.Run("Help", func(t *testing.T) {
+		flag := UserMCPFlag()
+		assert.Equal(t, "mcp", flag.Name)
+		assert.Contains(t, flag.String(), "--mcp=false disallows it")
+	})
+	t.Run("NoDefault", func(t *testing.T) {
+		// An absent flag keeps the stored value with users mod, so the help shows no default.
+		assert.NotContains(t, UserMCPFlag().String(), "(default")
 	})
 }

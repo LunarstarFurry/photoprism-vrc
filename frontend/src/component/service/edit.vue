@@ -32,7 +32,7 @@
           </v-btn>
         </v-card-title>
         <v-card-text class="dense">
-          <v-row v-if="scope === 'sharing'" dense>
+          <v-row v-if="scope === 'sharing'" density="compact">
             <v-col cols="12">
               <v-autocomplete
                 v-model="model.SharePath"
@@ -73,8 +73,17 @@
                 :items="options.Expires()"
               ></v-select>
             </v-col>
+            <v-col cols="12">
+              <v-checkbox
+                v-model="syncYaml"
+                density="comfortable"
+                :disabled="!model.AccShare || model.ShareSize !== ''"
+                :label="$gettext('Upload YAML sidecar files')"
+                hide-details
+              ></v-checkbox>
+            </v-col>
           </v-row>
-          <v-row v-else-if="scope === 'sync'" dense>
+          <v-row v-else-if="scope === 'sync'" density="compact">
             <v-col cols="12" sm="6">
               <v-autocomplete
                 v-model="model.SyncPath"
@@ -149,8 +158,17 @@
                 hide-details
               ></v-checkbox>
             </v-col>
+            <v-col cols="12" sm="6">
+              <v-checkbox
+                v-model="syncYaml"
+                density="comfortable"
+                :disabled="!model.AccSync"
+                :label="$gettext('Sync YAML sidecar files')"
+                hide-details
+              ></v-checkbox>
+            </v-col>
           </v-row>
-          <v-row v-else dense>
+          <v-row v-else density="compact">
             <v-col cols="12">
               <v-text-field v-model="model.AccName" autofocus autocomplete="off" :label="$gettext('Name')" placeholder=""></v-text-field>
             </v-col>
@@ -167,10 +185,16 @@
                 autocomplete="new-password"
                 :label="$gettext('Password')"
                 placeholder="********"
-                :append-inner-icon="showPassword ? 'mdi-eye-off' : 'mdi-eye'"
                 :type="showPassword ? 'text' : 'password'"
-                @click:append-inner="showPassword = !showPassword"
-              ></v-text-field>
+              >
+                <template #append-inner>
+                  <p-input-action
+                    :icon="showPassword ? 'mdi-eye-off' : 'mdi-eye'"
+                    :label="showPassword ? $gettext('Hide Password') : $gettext('Show Password')"
+                    @click="showPassword = !showPassword"
+                  ></p-input-action>
+                </template>
+              </v-text-field>
             </v-col>
             <v-col cols="12" sm="6">
               <v-text-field
@@ -253,11 +277,17 @@ export default {
       type: String,
       default: "",
     },
-    model: {
+    // The parent passes `service.clone()` (see page/services.vue) so the
+    // dialog operates on a parent-owned clone — mutations are intentional and
+    // do not bleed into the parent's list state. We accept it as `service` and
+    // alias it as `model` via the computed below so the existing template and
+    // script bindings keep working without tripping vue/no-mutating-props.
+    service: {
       type: Object,
-      default: () => {},
+      default: () => ({}),
     },
   },
+  emits: ["close", "remove", "confirm"],
   data() {
     return {
       options: options,
@@ -271,10 +301,30 @@ export default {
       readonly: this.$config.get("readonly"),
     };
   },
-  computed: {},
+  computed: {
+    // Read-only alias of the `service` prop. Returning the prop reference
+    // means `v-model="model.X"` writes through to the same caller-supplied
+    // clone, matching the dialog's pre-rename behavior. The lint rule stays
+    // silent because `model` is no longer a declared prop.
+    model() {
+      return this.service;
+    },
+    // syncYaml maps the YAML sidecar option (-1 disabled, 0 default, 1 enabled) to a checkbox state.
+    // The getter tolerates the plain object the page assigns while the dialog closes.
+    syncYaml: {
+      get() {
+        return this.model.flagEnabled?.("SyncYaml") ?? true;
+      },
+      set(enabled) {
+        this.model.setFlag("SyncYaml", enabled);
+      },
+    },
+  },
   watch: {
     search(q) {
-      if (this.loading) return;
+      if (this.loading) {
+        return;
+      }
 
       const exists = this.paths.findIndex((p) => p.abs === q);
 

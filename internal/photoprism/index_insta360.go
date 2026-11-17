@@ -1,0 +1,236 @@
+package photoprism
+
+import (
+	"errors"
+	"strings"
+	"sync"
+
+	"github.com/photoprism/photoprism/internal/entity"
+	"github.com/photoprism/photoprism/pkg/dsn"
+)
+
+var insta360ReconcileMutex sync.Mutex
+
+// reconcileInsta360Photos combines previously separate capture records during a forced reindex.
+func reconcileInsta360Photos(related RelatedFiles) error {
+	if related.Main == nil {
+		return nil
+	}
+
+	capture := FindInsta360Capture(related.Main)
+	if capture == nil || !capture.ValidPair() {
+		return nil
+	}
+
+	fileNames := make([]string, 0, 3)
+	for _, file := range capture.Files() {
+		fileNames = append(fileNames, file.RootRelName())
+	}
+
+	insta360ReconcileMutex.Lock()
+	defer insta360ReconcileMutex.Unlock()
+
+	var indexedFiles []entity.File
+	if err := entity.UnscopedDb().Where("file_root = ? AND file_name IN (?)", entity.RootOriginals, fileNames).Find(&indexedFiles).Error; err != nil {
+		return err
+	}
+
+	photoIDs := make([]uint, 0, len(indexedFiles))
+	seen := make(map[uint]bool, len(indexedFiles))
+	for _, file := range indexedFiles {
+		if file.PhotoID > 0 && !seen[file.PhotoID] {
+			seen[file.PhotoID] = true
+			photoIDs = append(photoIDs, file.PhotoID)
+		}
+	}
+
+	if len(photoIDs) < 2 {
+		return nil
+	}
+
+	var photos entity.Photos
+	if err := entity.UnscopedDb().Where("id IN (?)", photoIDs).Order("id ASC").Find(&photos).Error; err != nil {
+		return err
+	} else if len(photos) < 2 {
+		return nil
+	}
+
+	// Flags are combined, while the archive state and quality are kept, see insta360CaptureState.
+	canonical := photos[0]
+	state := insta360CaptureState(photos)
+
+	favorite, private, panorama := false, false, false
+	title, titleSrc := canonical.PhotoTitle, canonical.TitleSrc
+	caption, captionSrc := canonical.PhotoCaption, canonical.CaptionSrc
+
+	for _, photo := range photos {
+		favorite = favorite || photo.PhotoFavorite
+		private = private || photo.PhotoPrivate
+		panorama = panorama || photo.PhotoPanorama
+
+		if photo.PhotoTitle != "" && (title == "" || entity.SrcPriority[photo.TitleSrc] > entity.SrcPriority[titleSrc]) {
+			title, titleSrc = photo.PhotoTitle, photo.TitleSrc
+		}
+		if photo.PhotoCaption != "" && (caption == "" || entity.SrcPriority[photo.CaptionSrc] > entity.SrcPriority[captionSrc]) {
+			caption, captionSrc = photo.PhotoCaption, photo.CaptionSrc
+		}
+	}
+
+	values := entity.Values{
+		"photo_favorite": favorite,
+		"photo_private":  private,
+		"photo_panorama": panorama,
+		"photo_title":    title,
+		"title_src":      titleSrc,
+		"photo_caption":  caption,
+		"caption_src":    captionSrc,
+	}
+	if state.ID != canonical.ID {
+		values["deleted_at"] = state.DeletedAt
+		values["photo_quality"] = state.PhotoQuality
+	}
+
+	tx := entity.UnscopedDb().Begin()
+	if tx.Error != nil {
+		return tx.Error
+	}
+
+	rollback := func(err error) error {
+		if rollbackErr := tx.Rollback().Error; rollbackErr != nil {
+			return errors.Join(err, rollbackErr)
+		}
+		return err
+	}
+
+	if err := tx.Model(&entity.Photo{}).Where("id = ?", canonical.ID).UpdateColumns(values).Error; err != nil {
+		return rollback(err)
+	}
+
+	for _, duplicate := range photos[1:] {
+		if err := tx.Model(&entity.File{}).Where("photo_id = ?", duplicate.ID).UpdateColumns(entity.Values{
+			"photo_id":     canonical.ID,
+			"photo_uid":    canonical.PhotoUID,
+			"file_primary": false,
+		}).Error; err != nil {
+			return rollback(err)
+		}
+
+		var statements []string
+		args := [][]any{{canonical.ID, duplicate.ID}, {canonical.ID, duplicate.ID}, {canonical.PhotoUID, duplicate.PhotoUID}}
+
+		switch entity.DbDialect() {
+		case dsn.DialectMySQL:
+			statements = []string{
+				"UPDATE IGNORE photos_keywords SET photo_id = ? WHERE photo_id = ?",
+				"UPDATE IGNORE photos_labels SET photo_id = ? WHERE photo_id = ?",
+				"UPDATE IGNORE photos_albums SET photo_uid = ? WHERE photo_uid = ?",
+			}
+		case dsn.DialectSQLite:
+			statements = []string{
+				"UPDATE OR IGNORE photos_keywords SET photo_id = ? WHERE photo_id = ?",
+				"UPDATE OR IGNORE photos_labels SET photo_id = ? WHERE photo_id = ?",
+				"UPDATE OR IGNORE photos_albums SET photo_uid = ? WHERE photo_uid = ?",
+			}
+		case dsn.DialectPostgreSQL:
+			// Like the statements above, rows that would duplicate one of the canonical photo are left unchanged.
+			statements = []string{
+				"UPDATE photos_keywords SET photo_id = ? WHERE photo_id = ? AND NOT EXISTS " +
+					"(SELECT 1 FROM photos_keywords k WHERE k.photo_id = ? AND k.keyword_id = photos_keywords.keyword_id)",
+				"UPDATE photos_labels SET photo_id = ? WHERE photo_id = ? AND NOT EXISTS " +
+					"(SELECT 1 FROM photos_labels l WHERE l.photo_id = ? AND l.label_id = photos_labels.label_id)",
+				"UPDATE photos_albums SET photo_uid = ? WHERE photo_uid = ? AND NOT EXISTS " +
+					"(SELECT 1 FROM photos_albums a WHERE a.photo_uid = ? AND a.album_uid = photos_albums.album_uid)",
+			}
+
+			for i := range args {
+				args[i] = append(args[i], args[i][0])
+			}
+		default:
+			return rollback(errors.New("unsupported database dialect"))
+		}
+
+		if err := tx.Exec(statements[0], args[0]...).Error; err != nil {
+			return rollback(err)
+		} else if err = tx.Exec(statements[1], args[1]...).Error; err != nil {
+			return rollback(err)
+		} else if err = tx.Exec(statements[2], args[2]...).Error; err != nil {
+			return rollback(err)
+		}
+
+		if err := tx.Exec("DELETE FROM photos_keywords WHERE photo_id = ?", duplicate.ID).Error; err != nil {
+			return rollback(err)
+		} else if err = tx.Exec("DELETE FROM photos_labels WHERE photo_id = ?", duplicate.ID).Error; err != nil {
+			return rollback(err)
+		} else if err = tx.Exec("DELETE FROM photos_albums WHERE photo_uid = ?", duplicate.PhotoUID).Error; err != nil {
+			return rollback(err)
+		}
+
+		if err := tx.Model(&entity.Photo{}).Where("id = ?", duplicate.ID).UpdateColumns(entity.Values{
+			"photo_quality": -1,
+			"deleted_at":    entity.Now(),
+		}).Error; err != nil {
+			return rollback(err)
+		}
+	}
+
+	if err := tx.Commit().Error; err != nil {
+		return err
+	}
+
+	mergedUIDs := make([]string, 0, len(photos)-1)
+	for _, duplicate := range photos[1:] {
+		mergedUIDs = append(mergedUIDs, duplicate.PhotoUID)
+	}
+
+	log.Infof("index: merged %s into %s for Insta360 capture %s", strings.Join(mergedUIDs, ", "), canonical.PhotoUID, related.MainLogName())
+
+	entity.File{PhotoID: canonical.ID, PhotoUID: canonical.PhotoUID}.RegenerateIndex()
+	return nil
+}
+
+// insta360CaptureState returns the photo whose archive state and quality a merged capture keeps.
+// That is the lowest-ID photo unless it was removed automatically: then a visible member that existed
+// when another was archived after the removal decides, else that archived one, else the lowest ID.
+func insta360CaptureState(photos entity.Photos) *entity.Photo {
+	if len(photos) == 0 || photos[0] == nil {
+		return nil
+	}
+
+	canonical := photos[0]
+	if !insta360PhotoRemoved(canonical) {
+		return canonical
+	}
+
+	var archived *entity.Photo
+	visible := make(entity.Photos, 0, len(photos)-1)
+
+	for _, photo := range photos[1:] {
+		switch {
+		case photo == nil, insta360PhotoRemoved(photo):
+			continue
+		case !photo.DeletedAt.Valid:
+			if photo.PhotoQuality >= 0 {
+				visible = append(visible, photo)
+			}
+		case archived == nil && !photo.DeletedAt.Time.Before(canonical.DeletedAt.Time):
+			archived = photo
+		}
+	}
+
+	for _, photo := range visible {
+		if archived == nil || photo.CreatedAt.Before(archived.DeletedAt.Time) {
+			return photo
+		}
+	}
+
+	if archived != nil {
+		return archived
+	}
+
+	return canonical
+}
+
+// insta360PhotoRemoved reports whether a photo was removed automatically rather than archived.
+func insta360PhotoRemoved(photo *entity.Photo) bool {
+	return photo != nil && photo.DeletedAt.Valid && photo.PhotoQuality < 0
+}

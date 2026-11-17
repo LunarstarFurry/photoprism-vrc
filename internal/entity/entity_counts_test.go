@@ -1,9 +1,14 @@
 package entity
 
 import (
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/photoprism/photoprism/pkg/rnd"
 	"github.com/photoprism/photoprism/pkg/time/unix"
 )
 
@@ -60,5 +65,191 @@ func TestUpdateLabelCountsIfNeeded(t *testing.T) {
 	}
 	if time.Unix(after, 0).Before(before.Add(-time.Minute)) {
 		t.Fatalf("timestamp not refreshed")
+	}
+}
+
+func TestUpdateCounts_NilDbReturnsCleanly(t *testing.T) {
+	// Simulate the post-CloseDb shutdown state where the entity DB
+	// provider has been nilled. UpdateCounts must return nil instead of
+	// panicking on a nil dialect lookup, otherwise an in-flight async
+	// goroutine spawned by UpdateCountsAsync would crash the process.
+	prev := dbConn
+	defer SetDbProvider(prev)
+	SetDbProvider(nil)
+
+	if err := UpdateCounts(); err != nil {
+		t.Fatalf("UpdateCounts on nil DB should return nil, got %v", err)
+	}
+}
+
+func TestWaitForAsyncJobs_DrainsRegisteredWork(t *testing.T) {
+	// Models the contract that config.CloseDb relies on: WaitForAsyncJobs
+	// must block until every AsyncJobAdd has a matching AsyncJobDone, so
+	// async count/cover update goroutines finish before the DB connection
+	// is torn down.
+	const workers = 8
+
+	started := make(chan struct{}, workers)
+	release := make(chan struct{})
+	var done sync.WaitGroup
+
+	done.Add(workers)
+	for range workers {
+		AsyncJobAdd()
+		go func() {
+			defer AsyncJobDone()
+			defer done.Done()
+			started <- struct{}{}
+			<-release
+		}()
+	}
+
+	// Make sure every goroutine is parked before we start the wait so the
+	// test exercises a real drain rather than a fast path on an empty WG.
+	for range workers {
+		<-started
+	}
+
+	waitDone := make(chan struct{})
+	go func() {
+		WaitForAsyncJobs()
+		close(waitDone)
+	}()
+
+	select {
+	case <-waitDone:
+		t.Fatalf("WaitForAsyncJobs returned before any worker called AsyncJobDone")
+	case <-time.After(20 * time.Millisecond):
+		// Expected — workers are still parked.
+	}
+
+	close(release)
+	done.Wait()
+
+	select {
+	case <-waitDone:
+		// Expected.
+	case <-time.After(2 * time.Second):
+		t.Fatalf("WaitForAsyncJobs did not return after all workers finished")
+	}
+}
+
+func TestWaitForAsyncJobsTimeout(t *testing.T) {
+	// Ensure any prior async work has drained so the counter starts clean.
+	WaitForAsyncJobs()
+
+	t.Run("Drained", func(t *testing.T) {
+		assert.True(t, WaitForAsyncJobsTimeout(time.Second))
+	})
+	t.Run("TimesOutWhileJobInFlight", func(t *testing.T) {
+		AsyncJobAdd()
+		release := make(chan struct{})
+		go func() {
+			<-release
+			AsyncJobDone()
+		}()
+
+		// The job is still in flight, so a short wait must time out and report false.
+		assert.False(t, WaitForAsyncJobsTimeout(20*time.Millisecond))
+
+		// After the job finishes, the wait must drain and report true.
+		close(release)
+		assert.True(t, WaitForAsyncJobsTimeout(2*time.Second))
+	})
+}
+
+func TestLabelPhotoCounts(t *testing.T) {
+	t.Run("NilTesting", func(t *testing.T) {
+		if testing.Short() {
+			t.Skip("skipping test in short mode.")
+		}
+		t.Cleanup(func() {
+			ResetTestFixtures()
+		})
+		// Clean the database as if it's brand new
+		Entities.Truncate(Db())
+		CreateDefaultFixtures()
+		FlushCaches()
+		File{}.RegenerateIndex()
+
+		result := LabelCounts()
+
+		log.Debugf("result := %#v", result)
+
+		assert.NotNil(t, result)
+		assert.Len(t, result, 0)
+	})
+}
+
+func TestUpdateSubjectCounts(t *testing.T) {
+	t.Run("Success", func(t *testing.T) {
+		require.NoError(t, UpdateSubjectCounts(true))
+		require.NoError(t, UpdateSubjectCounts(false))
+	})
+}
+
+// TestUpdateLabelCounts_Categories checks that a photo counts once for a label, however many of its labels
+// belong to that label's category.
+func TestUpdateLabelCounts_Categories(t *testing.T) {
+	suffix := rnd.Base36(8)
+	parent := NewLabel("Counts Parent "+suffix, 0)
+	childA := NewLabel("Counts Child A "+suffix, 0)
+	childB := NewLabel("Counts Child B "+suffix, 0)
+
+	for _, l := range []*Label{parent, childA, childB} {
+		require.NoError(t, l.Create())
+	}
+
+	newPhoto := func(private bool) *Photo {
+		m := NewPhoto(false)
+		m.PhotoQuality = 3
+		m.PhotoPrivate = private
+		require.NoError(t, m.Create())
+		return &m
+	}
+
+	// p1 has the parent label and one child, p2 has both children, p3 is private.
+	p1, p2, p3 := newPhoto(false), newPhoto(false), newPhoto(true)
+
+	rows := []any{
+		&Category{LabelID: childA.ID, CategoryID: parent.ID},
+		&Category{LabelID: childB.ID, CategoryID: parent.ID},
+		NewPhotoLabel(p1.ID, parent.ID, 10, SrcManual),
+		NewPhotoLabel(p1.ID, childA.ID, 10, SrcManual),
+		NewPhotoLabel(p2.ID, childA.ID, 10, SrcManual),
+		NewPhotoLabel(p2.ID, childB.ID, 10, SrcManual),
+		NewPhotoLabel(p3.ID, childA.ID, 10, SrcManual),
+	}
+
+	for _, r := range rows {
+		require.NoError(t, UnscopedDb().Create(r).Error)
+	}
+
+	t.Cleanup(func() {
+		ids := []uint{p1.ID, p2.ID, p3.ID}
+		UnscopedDb().Where("photo_id IN (?)", ids).Delete(&PhotoLabel{})
+		UnscopedDb().Where("category_id = ?", parent.ID).Delete(&Category{})
+		UnscopedDb().Where("id IN (?)", ids).Delete(&Photo{})
+		UnscopedDb().Where("id IN (?)", []uint{parent.ID, childA.ID, childB.ID}).Delete(&Label{})
+	})
+
+	expected := map[uint]int{parent.ID: 2, childA.ID: 2, childB.ID: 1}
+
+	require.NoError(t, UpdateLabelCounts())
+
+	for id, count := range expected {
+		var m Label
+		require.NoError(t, UnscopedDb().First(&m, id).Error)
+		assert.Equal(t, count, m.PhotoCount, m.LabelName)
+	}
+
+	counts := make(map[uint]int)
+
+	for _, c := range LabelCounts() {
+		counts[uint(c.LabelID)] = c.PhotoCount //nolint:gosec // label IDs are positive
+	}
+
+	for id, count := range expected {
+		assert.Equal(t, count, counts[id], "LabelCounts %d", id)
 	}
 }

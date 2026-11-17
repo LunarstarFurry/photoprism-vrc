@@ -8,7 +8,7 @@ AuthMode: "password"
 DatabaseDriver: "sqlite"
 HttpHost: "127.0.0.1"
 HttpPort: 2342
-HttpCompression: "gzip"
+HttpCompression: "zstd,gzip"
 DisableTLS: false
 DefaultTLS: true
 Experimental: false
@@ -16,10 +16,10 @@ DisableWebDAV: false
 DisableSettings: false
 DisableTensorFlow: false
 DisableFaces: false
-DisableClassification: false
 DisableVectors: false
 DisableRaw: false
 RawPresets: false
 JpegQuality: 85
 DetectNSFW: false
+XMPFaces: true
 UploadNSFW: true

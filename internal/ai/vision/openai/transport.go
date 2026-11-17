@@ -28,6 +28,7 @@ type HTTPRequest struct {
 	TopP             float64        `json:"top_p,omitempty"`
 	PresencePenalty  float64        `json:"presence_penalty,omitempty"`
 	FrequencyPenalty float64        `json:"frequency_penalty,omitempty"`
+	ServiceTier      string         `json:"service_tier,omitempty"`
 }
 
 // TextOptions carries formatting preferences for textual responses.
@@ -117,25 +118,6 @@ func (r *Response) FirstText() string {
 				return text
 			}
 		}
-	}
-
-	return ""
-}
-
-// ParseErrorMessage extracts a human readable error message from a Responses API payload.
-func ParseErrorMessage(raw []byte) string {
-	var errResp struct {
-		Error *struct {
-			Message string `json:"message"`
-		} `json:"error"`
-	}
-
-	if err := json.Unmarshal(raw, &errResp); err != nil {
-		return ""
-	}
-
-	if errResp.Error != nil {
-		return strings.TrimSpace(errResp.Error.Message)
 	}
 
 	return ""

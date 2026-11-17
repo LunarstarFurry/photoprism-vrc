@@ -14,9 +14,14 @@ import (
 // DefaultAppColor specifies the default app background and splash screen color.
 var DefaultAppColor = "#19191a"
 
-// AppName returns the app name when installed on a device.
+// AppName returns the app name shown when installed as a PWA, preferring an explicit
+// AppName, then the distinctive SiteName (SITE_NAME), then the SiteTitle.
 func (c *Config) AppName() string {
 	name := strings.TrimSpace(c.options.AppName)
+
+	if name == "" {
+		name = c.SiteName()
+	}
 
 	if name == "" {
 		name = c.SiteTitle()
@@ -61,6 +66,24 @@ func (c *Config) AppIcon() string {
 	return defaultIcon
 }
 
+// AppTouchIcon returns the icon set used for the iOS home-screen apple-touch-icon. Every built-in
+// set ships a full-bleed "touch" variant whose background fills the whole square opaquely: iOS
+// masks the icon into a squircle and, during the app-open zoom, composites it over the light
+// launch background, so a source with transparent rounded corners would flash white around it.
+// Custom theme/URL icons have no variant and fall back to the built-in "app" touch squircle.
+func (c *Config) AppTouchIcon() string {
+	icon := c.AppIcon()
+
+	if fs.FileExistsNotEmpty(c.AppIconsPath(icon, "touch", "180.png")) {
+		return path.Join(icon, "touch")
+	}
+
+	// Every built-in icon set ships a full-bleed touch variant, so this fallback is reached only
+	// by custom theme/URL icons (which contain a slash): they have no touch variant and cannot
+	// drive the sized ladder, so they use the built-in "app" touch squircle.
+	return path.Join("app", "touch")
+}
+
 // AppColor returns the app background and splash screen color.
 func (c *Config) AppColor() string {
 	if appColor := clean.Color(c.options.AppColor); appColor == "" {
@@ -93,6 +116,7 @@ func (c *Config) AppConfig() pwa.Config {
 		BaseUri:       c.BaseUri("/"),
 		FrontendUri:   c.FrontendUri(""),
 		StaticUri:     c.StaticUri(),
+		StaticPath:    c.StaticPath(),
 		SiteUrl:       c.SiteUrl(),
 		CdnUrl:        c.CdnUrl("/"),
 		ThemeUri:      ThemeUri,

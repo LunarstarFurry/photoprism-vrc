@@ -15,19 +15,23 @@ type Options struct {
 	SizeLimit   int           // Maximum width and height of the output video file in pixels.
 	Quality     int           // See https://ffmpeg.org/ffmpeg-codecs.html
 	Preset      string        // See https://trac.ffmpeg.org/wiki/Encode/H.264#Preset
-	Device      string        // See https://trac.ffmpeg.org/wiki/Limiting%20the%20output%20bitrate
+	MaxBitrate  int           // Peak video bitrate in Mbit/s for encoders that support a limit, 0 for no limit.
+	Device      string        // Hardware device path or index, see https://trac.ffmpeg.org/wiki/HWAccelIntro
 	MapVideo    string        // See https://trac.ffmpeg.org/wiki/Map#Videostreamsonly
 	MapAudio    string        // See https://trac.ffmpeg.org/wiki/Map#Audiostreamsonly
 	MapMetadata string        // See https://ffmpeg.org/ffmpeg.html
 	SeekOffset  string        // See https://trac.ffmpeg.org/wiki/Seeking and https://ffmpeg.org/ffmpeg-utils.html#time-duration-syntax
 	TimeOffset  string        // See https://trac.ffmpeg.org/wiki/Seeking and https://ffmpeg.org/ffmpeg-utils.html#time-duration-syntax
 	Duration    time.Duration // See https://ffmpeg.org/ffmpeg.html#Main-options
-	MovFlags    string
+	MovFlags    string        // FFmpeg "-movflags" value for the MP4 muxer (e.g. "use_metadata_tags+faststart"). See https://ffmpeg.org/ffmpeg-formats.html#Options-12
+	VideoTag    string        // FFmpeg "-tag:v" override (e.g. "hvc1" for HEVC in MP4/MOV containers)
+	V360        string        // Optional FFmpeg "v360" filter applied before scaling, e.g. to dewarp dual-fisheye 360° video to equirectangular. See https://ffmpeg.org/ffmpeg-filters.html#v360
 	Title       string
 	Description string
 	Comment     string
 	Author      string
 	Created     time.Time
+	Timeout     time.Duration // Wall-clock budget for the command, 0 for no limit.
 	Force       bool
 }
 
@@ -119,23 +123,30 @@ func NewPreviewImageOptions(ffmpegBin string, videoDuration time.Duration) *Opti
 
 // VideoFilter returns the FFmpeg video filter string based on the size limit in pixels and the pixel format.
 func (o *Options) VideoFilter(format PixelFormat) string {
+	// prefix is an optional geometry filter (e.g. a v360 dewarp) applied before scaling. It is a
+	// software filter, so it is only expected on the CPU transcode path (not hardware pixel formats).
+	var prefix string
+	if o.V360 != "" {
+		prefix = o.V360 + ","
+	}
+
 	// scale specifies the FFmpeg downscale filter, see http://trac.ffmpeg.org/wiki/Scaling.
 	switch format {
 	case "":
-		return fmt.Sprintf("scale='if(gte(iw,ih), min(%d, iw), -2):if(gte(iw,ih), -2, min(%d, ih))'", o.SizeLimit, o.SizeLimit)
+		return prefix + fmt.Sprintf("scale='if(gte(iw,ih), min(%d, iw), -2):if(gte(iw,ih), -2, min(%d, ih))'", o.SizeLimit, o.SizeLimit)
 	case FormatQSV:
-		return fmt.Sprintf("scale_qsv=w='if(gte(iw,ih), min(%d, iw), -1)':h='if(gte(iw,ih), -1, min(%d, ih))':format=nv12", o.SizeLimit, o.SizeLimit)
+		return prefix + fmt.Sprintf("scale_qsv=w='if(gte(iw,ih), min(%d, iw), -1)':h='if(gte(iw,ih), -1, min(%d, ih))':format=nv12", o.SizeLimit, o.SizeLimit)
 	}
 
-	return fmt.Sprintf("scale='if(gte(iw,ih), min(%d, iw), -2):if(gte(iw,ih), -2, min(%d, ih))',format=%s", o.SizeLimit, o.SizeLimit, format)
+	return prefix + fmt.Sprintf("scale='if(gte(iw,ih), min(%d, iw), -2):if(gte(iw,ih), -2, min(%d, ih))',format=%s", o.SizeLimit, o.SizeLimit, format)
 }
 
-// QvQuality  returns the video encoding quality as "-q:v" parameter string.
+// QvQuality returns the video encoding quality as "-q:v" parameter string.
 func (o *Options) QvQuality() string {
 	return QvQuality(o.Quality)
 }
 
-// GlobalQuality returns the video encoding quality as "-global_quality" parameter string.
+// GlobalQuality returns the video encoding quality as Intel QSV "-global_quality" parameter string.
 func (o *Options) GlobalQuality() string {
 	return GlobalQuality(o.Quality)
 }
@@ -150,7 +161,21 @@ func (o *Options) QpQuality() string {
 	return QpQuality(o.Quality)
 }
 
-// CqQuality returns the video encoding quality as "-cq" parameter string.
+// VaapiQuality returns the video encoding quality as VA-API "-qp" parameter string.
+func (o *Options) VaapiQuality() string {
+	return VaapiQuality(o.Quality)
+}
+
+// CqQuality returns the video encoding quality as NVENC "-cq" parameter string.
 func (o *Options) CqQuality() string {
 	return CqQuality(o.Quality)
+}
+
+// MaxRate returns the peak video bitrate as "-maxrate" parameter string, or an empty string for no limit.
+func (o *Options) MaxRate() string {
+	if o.MaxBitrate <= 0 {
+		return ""
+	}
+
+	return fmt.Sprintf("%dM", o.MaxBitrate)
 }

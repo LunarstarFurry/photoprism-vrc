@@ -2,6 +2,53 @@
 
 export PATH="/usr/local/sbin:/usr/sbin:/sbin:/usr/local/bin:/usr/bin:/bin:/scripts"
 
+# Overview of the most commonly used targets, shown by "make help" and when no target is specified.
+# Keep this in sync when renaming or adding an important target; "make list" shows all of them.
+define HELP_TEXT
+PhotoPrism Docker Image Makefile
+
+Installs optional packages and drivers in PhotoPrism Docker images. Run the
+targets as root with "make -C /scripts <target>", or add their names to
+PHOTOPRISM_INIT so that they are installed when the container starts.
+
+System:
+  update           Update the package lists and installed packages
+  clean            Remove the cached package files and package lists
+  clitools         Install the zsh, nano, exa, and duf command-line tools
+
+Security:
+  https            Create a default HTTPS/TLS certificate
+
+Graphics & Video:
+  gpu              Detect and install the GPU drivers for this system
+  intel            Install the Intel GPU drivers, VA-API, and Vulkan tools
+  amd              Install the AMD VA-API and Vulkan GPU drivers
+  vulkan           Install the Mesa Vulkan drivers and tools
+  ffmpeg           Install the latest FFmpeg build in "/opt"
+  darktable        Install darktable for RAW image conversion
+  Related: ffmpeg-release, ffmpeg-master
+
+Machine Learning:
+  onnxruntime      Install the ONNX Runtime library
+  onnxruntime-gpu  Install the ONNX Runtime library with CUDA support, and the cuda target
+  cuda             Install the NVIDIA CUDA runtime libraries on their own
+
+Other:
+  mariadb-client   Install the MariaDB command-line client
+  proxysql-admin   Install the ProxySQL admin and scheduler tools
+  davfs            Install the davfs2 WebDAV filesystem driver
+  yt-dlp           Update yt-dlp to the latest release
+  Related: yt-dlp-nightly, yt-dlp-master, deno
+
+Run "make -C /scripts list" to show all targets, including those not listed here.
+endef
+export HELP_TEXT
+
+all: help
+help:
+	@printf '%s\n' "$$HELP_TEXT"
+list:
+	@awk '/^define /{skip=1} /^endef/{skip=0;next} skip{next} /^[[:alnum:]]+[^[:space:]]+:/ {printf "%s",substr($$1,1,length($$1)-1); if (match($$0,/#/)) {desc=substr($$0,RSTART+1); sub(/^[[:space:]]+/,"",desc); printf " - %s\n",desc} else printf "\n" }' "$(firstword $(MAKEFILE_LIST))"
 apt-upgrade: update
 update:
 	apt-get update
@@ -29,36 +76,42 @@ mariadb: mariadb-client
 mariadb-client: install-mariadb-client
 install-mariadb-client:
 	/scripts/install-mariadb.sh mariadb-client
+proxysql: proxysql-admin
+proxysql-admin: install-proxysql-admin
+install-proxysql-admin:
+	/scripts/install-proxysql-admin.sh
 gpu: install-gpu
 install-gpu:
 	/scripts/install-gpu.sh
-tensorflow: install-tensorflow
-tensorflow-amd64-cpu: install-tensorflow
-tensorflow-amd64-avx: install-tensorflow
-tensorflow-amd64-avx2: install-tensorflow
-install-tensorflow:
-	/scripts/install-tensorflow.sh auto
 onnxruntime: install-onnx
 install-onnx:
 	/scripts/install-onnx.sh
-tensorflow-gpu: install-tensorflow-gpu
-install-tensorflow-gpu:
-	/scripts/install-tensorflow.sh gpu
+onnxruntime-gpu: install-cuda install-onnx-gpu
+install-onnx-gpu:
+	/scripts/install-onnx.sh --gpu
+cuda: install-cuda
+install-cuda:
+	/scripts/install-cuda.sh
 codex:
 	/scripts/install-codex.sh
 davfs: install-davfs
 install-davfs:
 	/scripts/install-davfs.sh
-intel: update install-intel
+intel: update install-intel install-vulkan
 install-intel-graphics: intel
 intel-graphics: intel
 install-intel:
 	@echo "Installing Intel GPU Drivers..."
 	apt-get -qq install intel-opencl-icd intel-media-va-driver-non-free i965-va-driver-shaders mesa-va-drivers libmfx-gen1.2 va-driver-all vainfo libva2 libvpl2
-amd: update install-amd
+amd: update install-amd install-vulkan
 install-amd:
 	@echo "Installing AMD VA-API GPU Drivers..."
 	apt-get -qq install mesa-va-drivers vainfo libva2
+vulkan: update install-vulkan
+vulkan-drivers: vulkan
+install-vulkan:
+	@echo "Installing Mesa Vulkan Drivers and Tools..."
+	apt-get -qq install mesa-vulkan-drivers vulkan-tools libvulkan1
 clitools: update install-clitools
 cli-tools: clitools
 nano: clitools
@@ -80,6 +133,9 @@ install-yt-dlp-nightly:
 yt-dlp-master: install-yt-dlp-master
 install-yt-dlp-master:
 	@/scripts/install-yt-dlp.sh --master
+deno: install-deno
+install-deno:
+	@/scripts/install-deno.sh
 
 # Declare all targets as "PHONY", see https://www.gnu.org/software/make/manual/html_node/Phony-Targets.html.
 MAKEFLAGS += --always-make

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -10,12 +11,19 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/dustin/go-humanize/english"
 	"github.com/urfave/cli/v2"
 
 	"github.com/photoprism/photoprism/pkg/clean"
 	"github.com/photoprism/photoprism/pkg/fs"
+	"github.com/photoprism/photoprism/pkg/fs/disk"
 	"github.com/photoprism/photoprism/pkg/rnd"
 )
+
+// DefaultStorageFree is the default value of the "storage-free" option. It is negative so the
+// runtime free-space probe is disabled by default, as the probe can misreport on some network
+// mounts, fuse layers, and container overlays; operators opt in with a 1-99 percentage.
+const DefaultStorageFree = -1.0
 
 // binPaths stores known executable paths.
 var (
@@ -236,6 +244,58 @@ func (c *Config) CreateDirectories() error {
 	return nil
 }
 
+// StoragePath returns the absolute path for generated files like cache and index.
+func (c *Config) StoragePath() string {
+	if c.options.StoragePath == "" {
+		// Default directories.
+		originalsDir := fs.Abs(filepath.Join(c.OriginalsPath(), fs.PPHiddenPathname, fs.StorageDir))
+		storageDir := fs.Abs(fs.StorageDir)
+
+		// Find existing directories.
+		if fs.PathWritable(originalsDir) && !c.ReadOnly() {
+			return originalsDir
+		} else if fs.PathWritable(storageDir) && c.ReadOnly() {
+			return storageDir
+		}
+
+		// Fallback to backup storage path.
+		if fs.PathWritable(c.options.BackupPath) {
+			return fs.Abs(filepath.Join(c.options.BackupPath, fs.StorageDir))
+		}
+
+		// Use .photoprism in home directory?
+		if usr, _ := user.Current(); usr.HomeDir != "" {
+			p := fs.Abs(filepath.Join(usr.HomeDir, fs.PPHiddenPathname, fs.StorageDir))
+
+			if fs.PathWritable(p) || c.ReadOnly() {
+				return p
+			}
+		}
+
+		// Fallback directory in case nothing else works.
+		if c.ReadOnly() {
+			return fs.Abs(filepath.Join(fs.PPHiddenPathname, fs.StorageDir))
+		}
+
+		// Store cache and index in "originals/.photoprism/storage".
+		return originalsDir
+	}
+
+	return fs.Abs(c.options.StoragePath)
+}
+
+// StorageFree returns the percentage of total storage space below which it is considered critically low.
+// A negative value disables the check (the default); 0 or values >= 100 fall back to the disk package default.
+func (c *Config) StorageFree() float64 {
+	if c.options.StorageFree < 0 {
+		return -1
+	} else if c.options.StorageFree == 0 || c.options.StorageFree >= 100 {
+		return disk.StorageLowPct
+	}
+
+	return c.options.StorageFree
+}
+
 // ConfigPath returns the config path.
 func (c *Config) ConfigPath() string {
 	if c.options.ConfigPath == "" {
@@ -255,12 +315,19 @@ func (c *Config) ConfigPath() string {
 	return fs.Abs(c.options.ConfigPath)
 }
 
+// KeysPath returns the directory that stores the instance's secret signing keys, e.g. the URL token
+// signing key (config/keys). Portal-role keys (cluster JWT, OIDC session cookie) live under
+// PortalConfigPath instead.
+func (c *Config) KeysPath() string {
+	return filepath.Join(c.ConfigPath(), fs.KeysDir)
+}
+
 // OptionsYaml returns the absolute path to the options configuration file.
 // It relies on fs.ConfigFilePath so legacy `.yml` files keep working while
 // newly created instances may use `.yaml` without additional wiring.
 func (c *Config) OptionsYaml() string {
 	if c.options.OptionsYaml == "" {
-		return fs.ConfigFilePath(c.ConfigPath(), "options", fs.ExtYml)
+		return fs.ConfigFilePath(c.ConfigPath(), fs.ConfigOptionsName, fs.ExtYml)
 	}
 
 	return fs.Abs(c.options.OptionsYaml)
@@ -297,7 +364,7 @@ func defaultsYaml(ctx *cli.Context) string {
 		return fs.Abs(fileName)
 	}
 
-	fileName = fs.ConfigFilePath(resolveConfigPath(ctx), "defaults", fs.ExtYml)
+	fileName = fs.ConfigFilePath(resolveConfigPath(ctx), fs.ConfigDefaultsName, fs.ExtYml)
 
 	if fs.FileExistsNotEmpty(fileName) {
 		return fs.Abs(fileName)
@@ -318,14 +385,14 @@ func (c *Config) DefaultsYaml() string {
 // traditional `.yml` suffix or an existing `.yaml` variant in the config
 // directory.
 func (c *Config) HubConfigFile() string {
-	return fs.ConfigFilePath(c.ConfigPath(), "hub", fs.ExtYml)
+	return fs.ConfigFilePath(c.ConfigPath(), fs.ConfigHubName, fs.ExtYml)
 }
 
 // SettingsYaml returns the path to the UI settings file. Like other helpers it
 // defers to fs.ConfigFilePath so administrators can store the file as
 // `settings.yml` or `settings.yaml`.
 func (c *Config) SettingsYaml() string {
-	return fs.ConfigFilePath(c.ConfigPath(), "settings", fs.ExtYml)
+	return fs.ConfigFilePath(c.ConfigPath(), fs.ConfigSettingsName, fs.ExtYml)
 }
 
 // SettingsYamlDefaults returns the defaults file that should seed new settings
@@ -338,7 +405,7 @@ func (c *Config) SettingsYamlDefaults(settingsYml string) string {
 		// Use regular settings YAML file.
 	} else if dir := filepath.Dir(defaultsYml); dir == "" || dir == "." {
 		// Use regular settings YAML file.
-	} else if fileName := fs.ConfigFilePath(dir, "settings", fs.ExtYml); settingsYml == "" || fs.FileExistsNotEmpty(fileName) {
+	} else if fileName := fs.ConfigFilePath(dir, fs.ConfigSettingsName, fs.ExtYml); settingsYml == "" || fs.FileExistsNotEmpty(fileName) {
 		// Use default settings YAML file.
 		return fileName
 	}
@@ -364,13 +431,138 @@ func (c *Config) LogFilename() string {
 	return fs.Abs(c.options.LogFilename)
 }
 
-// CaseInsensitive checks if the storage path is case-insensitive.
-func (c *Config) CaseInsensitive() (result bool, err error) {
-	storagePath := c.StoragePath()
-	return fs.CaseInsensitive(storagePath)
+// storageCaseInsensitive, originalsCaseInsensitive, and originalsMounts detect the case mode of the storage
+// and originals paths, and the file systems mounted below originals.
+var (
+	storageCaseInsensitive   = fs.CaseInsensitive
+	originalsCaseInsensitive = fs.CaseInsensitiveDir
+	originalsMounts          = fs.MountPoints
+)
+
+// Case modes of the storage-case and originals-case options.
+const (
+	CaseModeAuto        = Auto
+	CaseModeSensitive   = "sensitive"
+	CaseModeInsensitive = "insensitive"
+)
+
+// StorageCase returns the configured case mode of the storage file system.
+func (c *Config) StorageCase() string {
+	c.options.StorageCase = caseMode("storage-case", c.options.StorageCase)
+	return c.options.StorageCase
 }
 
-// OriginalsPath returns the originals.
+// OriginalsCase returns the configured case mode of the originals file system.
+func (c *Config) OriginalsCase() string {
+	c.options.OriginalsCase = caseMode("originals-case", c.options.OriginalsCase)
+	return c.options.OriginalsCase
+}
+
+// caseMode normalizes the value of a case mode option and returns CaseModeAuto, with a warning, if it is invalid.
+func caseMode(name, value string) string {
+	switch mode := strings.ToLower(strings.TrimSpace(value)); mode {
+	case "", CaseModeAuto:
+		return CaseModeAuto
+	case CaseModeSensitive, CaseModeInsensitive:
+		return mode
+	default:
+		log.Warnf("config: invalid %s value %s, using %s", name, clean.LogQuote(value), CaseModeAuto)
+		return CaseModeAuto
+	}
+}
+
+// CaseInsensitive checks if the storage path is case-insensitive.
+func (c *Config) CaseInsensitive() (result bool, err error) {
+	return storageCaseInsensitive(c.StoragePath())
+}
+
+// OriginalsCaseInsensitive checks if the originals path is case-insensitive, without writing to it or opening
+// the folders in skip, and returns an error naming the reason if it cannot tell.
+func (c *Config) OriginalsCaseInsensitive(skip ...string) (insensitive bool, err error) {
+	return originalsCaseInsensitive(c.OriginalsPath(), skip...)
+}
+
+// caseLookups returns the name of the lookup mode for logs.
+func caseLookups(insensitive bool) string {
+	if insensitive {
+		return "case-insensitive"
+	}
+
+	return "case-sensitive"
+}
+
+// initCaseMode makes file lookups case-insensitive where the storage or originals path is, as configured or
+// detected. Detected originals follow the storage mode if their own is unknown, and file systems mounted below
+// them check all case variants; a configured originals mode applies to all folders below originals.
+func (c *Config) initCaseMode() error {
+	logf := log.Debugf
+
+	if c.start {
+		logf = log.Infof
+	}
+
+	var storage bool
+
+	switch c.StorageCase() {
+	case CaseModeAuto:
+		var err error
+
+		if storage, err = c.CaseInsensitive(); err != nil {
+			return err
+		}
+
+		logf("config: using %s lookups for storage (detected)", caseLookups(storage))
+	default:
+		storage = c.StorageCase() == CaseModeInsensitive
+		logf("config: using %s lookups for storage (configured)", caseLookups(storage))
+	}
+
+	fs.SetIgnoreCase(storage)
+
+	originalsPath := c.OriginalsPath()
+
+	if mode := c.OriginalsCase(); mode != CaseModeAuto {
+		originals := mode == CaseModeInsensitive
+		logf("config: using %s lookups for originals (configured)", caseLookups(originals))
+		fs.SetCaseScopes(fs.CaseScope{Dir: originalsPath, Ignore: originals})
+		return nil
+	}
+
+	mounts, mountsErr := originalsMounts(originalsPath)
+
+	switch {
+	case mountsErr == nil:
+	case !errors.Is(mountsErr, os.ErrNotExist):
+		log.Debugf("config: file systems mounted below originals not fully detected (%s)", mountsErr)
+	case runtime.GOOS == "linux":
+		log.Debugf("config: file systems mounted below originals not detected (mount table not found)")
+	}
+
+	scopes := make([]fs.CaseScope, 0, len(mounts)+1)
+
+	if originals, originalsErr := c.OriginalsCaseInsensitive(mounts...); originalsErr != nil {
+		log.Debugf("config: case sensitivity of originals not detected (%s)", originalsErr)
+		logf("config: using %s lookups for originals (storage)", caseLookups(storage))
+	} else {
+		logf("config: using %s lookups for originals (detected)", caseLookups(originals))
+		scopes = append(scopes, fs.CaseScope{Dir: originalsPath, Ignore: originals})
+	}
+
+	if len(mounts) > 0 {
+		log.Debugf("config: %s mounted below originals, checking all case variants there", english.Plural(len(mounts), "file system", "file systems"))
+	}
+
+	for _, m := range mounts {
+		scopes = append(scopes, fs.CaseScope{Dir: m, Ignore: false})
+	}
+
+	fs.SetCaseScopes(scopes...)
+
+	return nil
+}
+
+// OriginalsPath returns the absolute path of the originals, or an empty string if none is configured or
+// found. Converters receive media file names below it as arguments, so the names must not be relative.
 func (c *Config) OriginalsPath() string {
 	if c.options.OriginalsPath == "" {
 		// Try to find the right directory by iterating through a list.
@@ -385,7 +577,7 @@ func (c *Config) OriginalsDeletable() bool {
 	return !c.ReadOnly() && fs.Writable(c.OriginalsPath()) && c.Settings().Features.Delete
 }
 
-// ImportPath returns the import directory.
+// ImportPath returns the absolute path of the import directory, or an empty string, see OriginalsPath.
 func (c *Config) ImportPath() string {
 	if c.options.ImportPath == "" {
 		// Try to find the right directory by iterating through a list.
@@ -459,19 +651,49 @@ func (c *Config) UserStoragePath(userUid string) string {
 	return dir
 }
 
-// UserUploadPath returns the upload path for the specified user.
+// UserUploadPath returns the upload path for the specified user, or an error if the user's storage folder
+// is not available.
 func (c *Config) UserUploadPath(userUid, token string) (string, error) {
 	if !rnd.IsUID(userUid, 0) {
 		return "", fmt.Errorf("invalid uid")
 	}
 
-	dir := filepath.Join(c.UserStoragePath(userUid), fs.UploadDir, clean.Token(token))
+	userDir := c.UserStoragePath(userUid)
+
+	if userDir == "" {
+		return "", fmt.Errorf("user storage folder is not available")
+	}
+
+	dir := filepath.Join(userDir, fs.UploadDir, clean.Token(token))
 
 	if err := fs.MkdirAll(dir); err != nil {
 		return "", err
 	}
 
 	return dir, nil
+}
+
+// UserUploadBatchPath returns the folder in which the files a user uploads under the batch name are
+// staged, creating it if needed. It refuses a name that is empty after cleaning, so a batch never
+// resolves to the upload folder itself.
+func (c *Config) UserUploadBatchPath(userUid, batch string) (string, error) {
+	if name := clean.Token(batch); name == "" {
+		return "", fmt.Errorf("invalid upload batch")
+	} else {
+		return c.UserUploadPath(userUid, name)
+	}
+}
+
+// UserUploadBatchDir returns the folder of an upload batch like UserUploadBatchPath, but creates
+// neither it nor the user's storage folder, so it can be used to look up an existing batch.
+func (c *Config) UserUploadBatchDir(userUid, batch string) (string, error) {
+	if !rnd.IsUID(userUid, 0) {
+		return "", fmt.Errorf("invalid uid")
+	} else if name := clean.Token(batch); name == "" {
+		return "", fmt.Errorf("invalid upload batch")
+	} else {
+		return filepath.Join(c.UsersStoragePath(), userUid, fs.UploadDir, name), nil
+	}
 }
 
 // WebStoragePath returns the path used for serving web content.
@@ -595,46 +817,6 @@ func (c *Config) ThumbCachePath() string {
 	return filepath.Join(c.CachePath(), fs.ThumbnailsDir)
 }
 
-// StoragePath returns the path for generated files like cache and index.
-func (c *Config) StoragePath() string {
-	if c.options.StoragePath == "" {
-		// Default directories.
-		originalsDir := fs.Abs(filepath.Join(c.OriginalsPath(), fs.PPHiddenPathname, fs.StorageDir))
-		storageDir := fs.Abs(fs.StorageDir)
-
-		// Find existing directories.
-		if fs.PathWritable(originalsDir) && !c.ReadOnly() {
-			return originalsDir
-		} else if fs.PathWritable(storageDir) && c.ReadOnly() {
-			return storageDir
-		}
-
-		// Fallback to backup storage path.
-		if fs.PathWritable(c.options.BackupPath) {
-			return fs.Abs(filepath.Join(c.options.BackupPath, fs.StorageDir))
-		}
-
-		// Use .photoprism in home directory?
-		if usr, _ := user.Current(); usr.HomeDir != "" {
-			p := fs.Abs(filepath.Join(usr.HomeDir, fs.PPHiddenPathname, fs.StorageDir))
-
-			if fs.PathWritable(p) || c.ReadOnly() {
-				return p
-			}
-		}
-
-		// Fallback directory in case nothing else works.
-		if c.ReadOnly() {
-			return fs.Abs(filepath.Join(fs.PPHiddenPathname, fs.StorageDir))
-		}
-
-		// Store cache and index in "originals/.photoprism/storage".
-		return originalsDir
-	}
-
-	return fs.Abs(c.options.StoragePath)
-}
-
 // AssetsPath returns the path to static assets for models and templates.
 func (c *Config) AssetsPath() string {
 	if c.options.AssetsPath == "" {
@@ -725,6 +907,16 @@ func (c *Config) MariadbBin() string {
 // MariadbDumpBin returns the mariadb-dump executable file name.
 func (c *Config) MariadbDumpBin() string {
 	return FindBin("", "mariadb-dump", "mysqldump")
+}
+
+// PsqlBin returns the psql executable file name.
+func (c *Config) PsqlBin() string {
+	return FindBin("", "psql")
+}
+
+// PgDumpBin returns the pg_dump executable file name.
+func (c *Config) PgDumpBin() string {
+	return FindBin("", "pg_dump")
 }
 
 // SqliteBin returns the sqlite executable file name.

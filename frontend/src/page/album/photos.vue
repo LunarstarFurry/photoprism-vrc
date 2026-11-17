@@ -64,6 +64,7 @@
 import { Photo } from "model/photo";
 import Album from "model/album";
 import Thumb from "model/thumb";
+import { ACTION_UPDATED, ACTION_DELETED, ACTION_ARCHIVED, ACTION_RESTORED } from "common/event";
 import * as contexts from "options/contexts";
 import PAlbumToolbar from "component/album/toolbar.vue";
 import PPhotoClipboard from "component/photo/clipboard.vue";
@@ -75,6 +76,20 @@ import PLoading from "component/loading.vue";
 import { getAppStorage } from "common/storage";
 
 const appStorage = getAppStorage();
+
+// Maximum number of affected entities reloaded in place per event;
+// larger batches set the dirty flag and are refetched lazily instead.
+const maxLiveRefetch = 50;
+
+// Per-photo file headroom for a scoped refetch. The photos search `count` is a
+// FILE limit, not a photo limit, so the budget must exceed the photo count — a
+// photo can own several files (e.g. a vector or PDF with a generated preview),
+// and with a photo-sized budget those extra rows truncate still-visible photos
+// out of the merged result, wrongly dropping them from the selection. Typical
+// stacks hold ~3 files (photo + video + XMP), so 8 leaves ample margin while
+// keeping the count under the API max even at the maxLiveRefetch batch cap;
+// refetchResults' truncation guard backstops the rare deeper stack.
+const maxRefetchFilesPerPhoto = 8;
 
 export default {
   name: "PPageAlbumPhotos",
@@ -186,26 +201,26 @@ export default {
 
       if (this.uid !== this.$route.params.album) {
         this.uid = this.$route.params.album;
-        this.findAlbum().then(() => this.search());
+        this.loadAlbum();
       } else {
         this.search();
       }
     },
   },
   created() {
-    this.findAlbum().then(() => this.search());
+    this.loadAlbum();
 
     this.subscriptions.push(this.$event.subscribe("albums.updated", (ev, data) => this.onAlbumsUpdated(ev, data)));
     this.subscriptions.push(this.$event.subscribe("albums.deleted", (ev, data) => this.onAlbumsDeleted(ev, data)));
     this.subscriptions.push(this.$event.subscribe("photos", (ev, data) => this.onUpdate(ev, data)));
 
     this.subscriptions.push(
-      this.$event.subscribe("lightbox.opened", (ev, data) => {
+      this.$event.subscribe("lightbox.opened", () => {
         this.lightbox.open = true;
       })
     );
     this.subscriptions.push(
-      this.$event.subscribe("lightbox.closed", (ev, data) => {
+      this.$event.subscribe("lightbox.closed", () => {
         this.lightbox.open = false;
       })
     );
@@ -377,7 +392,7 @@ export default {
             this.offset = offset;
             if (this.results.length > 1) {
               if (!this.lightbox.open) {
-                this.$notify.info(this.$gettextInterpolate(this.$gettext("%{n} pictures found"), { n: this.results.length }));
+                this.$notify.info(this.$gettext("%{n} pictures found", { n: this.results.length }));
               }
             }
           } else if (this.results.length >= Photo.limit()) {
@@ -568,10 +583,9 @@ export default {
             } else if (this.results.length === 1) {
               this.$notify.info(this.$gettext("One picture found"));
             } else {
-              this.$notify.info(this.$gettextInterpolate(this.$gettext("%{n} pictures found"), { n: this.results.length }));
+              this.$notify.info(this.$gettext("%{n} pictures found", { n: this.results.length }));
             }
           } else {
-            // this.$notify.info(this.$gettextInterpolate(this.$gettext("More than %{n} pictures found"), {n: 100}));
             this.$nextTick(() => {
               if (this.$root.$el.clientHeight <= window.document.documentElement.clientHeight + 300) {
                 this.loadMore();
@@ -588,21 +602,35 @@ export default {
           this.listen = true;
         });
     },
+    // loadAlbum finds the album and searches its photos once it was found.
+    loadAlbum() {
+      return this.findAlbum().then((m) => {
+        if (m) {
+          this.search();
+        }
+      });
+    },
+    // findAlbum fetches the album by its UID, or leaves the view and resolves with null if that fails.
     findAlbum() {
       return this.model
         .find(this.uid)
         .then((m) => {
           this.model = m;
 
-          window.document.title = `${this.$config.get("siteTitle")}: ${this.model.Title}`;
+          window.document.title = `${this.$config.get("siteTitle")}: ${this.$util.isolate(this.model.Title)}`;
 
-          return Promise.resolve(this.model);
+          return this.model;
         })
-        .catch((e) => {
+        .catch(() => {
           this.$router.push({ name: this.collectionRoute });
-          return Promise.reject(e);
+          return null;
         });
     },
+    // onAlbumsUpdated reloads the open album when an albums.updated event
+    // reports it changed; the event carries only UIDs, so the refreshed
+    // values are fetched through the scoped REST API. When the album is
+    // no longer visible to this session, the view is left instead of
+    // rendering stale data.
     onAlbumsUpdated(ev, data) {
       if (!this.listen) {
         return;
@@ -612,17 +640,14 @@ export default {
         return;
       }
 
-      for (let i = 0; i < data.entities.length; i++) {
-        if (this.model.UID === data.entities[i].UID) {
-          let values = data.entities[i];
+      if (!data.entities.includes(this.model.UID)) {
+        return;
+      }
 
-          for (let key in values) {
-            if (values.hasOwnProperty(key)) {
-              this.model[key] = values[key];
-            }
-          }
-
-          window.document.title = `${this.$config.get("siteTitle")}: ${this.model.Title}`;
+      this.model
+        .load()
+        .then(() => {
+          window.document.title = `${this.$config.get("siteTitle")}: ${this.$util.isolate(this.model.Title)}`;
 
           this.dirty = true;
           this.complete = false;
@@ -630,14 +655,21 @@ export default {
 
           if (this.lastParams?.order !== this.model?.Order) {
             this.updateQuery();
-            this.loadMore(true);
-          } else {
-            this.loadMore(true);
           }
 
-          return;
-        }
-      }
+          this.loadMore(true);
+        })
+        .catch((err) => {
+          if (err?.response?.status === 404) {
+            this.$router.push({ name: this.collectionRoute });
+            return;
+          }
+
+          // Transient failure: flag the view dirty so the next
+          // interaction refetches instead of trusting stale state.
+          this.dirty = true;
+          this.complete = false;
+        });
     },
     onAlbumsDeleted(ev, data) {
       if (!this.listen) {
@@ -650,7 +682,7 @@ export default {
 
       const type = ev.split(".")[1];
       switch (type) {
-        case "deleted":
+        case ACTION_DELETED:
           if (data.entities.includes(this.uid)) {
             this.$notify.success(this.$gettext("Album deleted"));
             this.$router.push({ name: this.collectionRoute });
@@ -658,6 +690,9 @@ export default {
           return;
       }
     },
+    // updateResults patches the scalar fields of all loaded copies of
+    // the given photo, so an edit reflects in the open view without
+    // re-running the full result query.
     updateResults(entity) {
       this.results
         .filter((m) => m.UID === entity.UID)
@@ -679,6 +714,54 @@ export default {
           }
         });
     },
+    // refetchResults reloads the affected photos through the scoped
+    // search API and patches the loaded results in place, so a single
+    // edit costs one uid-filtered query instead of re-running the full
+    // result query. Larger batches fall back to the dirty flag and are
+    // refetched lazily on the next return-to-view.
+    refetchResults(uids) {
+      const affected = uids.filter((uid) => this.results.some((m) => m.UID === uid) || this.lightbox.results.some((m) => m.UID === uid));
+
+      if (affected.length === 0) {
+        return;
+      }
+
+      if (affected.length > maxLiveRefetch) {
+        this.dirty = true;
+        this.complete = false;
+        return;
+      }
+
+      Photo.search({ uid: affected.join("|"), merged: true, count: affected.length * maxRefetchFilesPerPhoto })
+        .then((resp) => {
+          const found = new Set();
+
+          resp.models.forEach((values) => {
+            found.add(values.UID);
+            this.updateResults(values);
+          });
+
+          // Rows the scoped search no longer returns are not visible to this
+          // session anymore — drop them like a full refresh would. Skip this
+          // when the response hit the file limit (resp.count >= resp.limit):
+          // a truncated result can omit a still-visible multi-file photo, and
+          // pruning it would wrongly deselect it.
+          const truncated = resp.limit > 0 && resp.count >= resp.limit;
+          if (!truncated) {
+            affected
+              .filter((uid) => !found.has(uid))
+              .forEach((uid) => {
+                this.removeResult(this.results, uid);
+                this.removeResult(this.lightbox.results, uid);
+                this.$clipboard.removeId(uid);
+              });
+          }
+        })
+        .catch(() => {
+          this.dirty = true;
+          this.complete = false;
+        });
+    },
     removeResult(results, uid) {
       const index = results.findIndex((m) => m.UID === uid);
 
@@ -698,12 +781,7 @@ export default {
       const type = ev.split(".")[1];
 
       switch (type) {
-        case "updated":
-          for (let i = 0; i < data.entities.length; i++) {
-            this.updateResults(data.entities[i]);
-          }
-          break;
-        case "restored":
+        case ACTION_RESTORED:
           this.dirty = true;
           this.scrollDisabled = false;
           this.complete = false;
@@ -711,8 +789,8 @@ export default {
           this.loadMore();
 
           break;
-        case "deleted":
-        case "archived":
+        case ACTION_DELETED:
+        case ACTION_ARCHIVED:
           this.dirty = true;
           this.complete = false;
 
@@ -723,6 +801,15 @@ export default {
             this.removeResult(this.lightbox.results, uid);
             this.$clipboard.removeId(uid);
           }
+
+          break;
+        case ACTION_UPDATED:
+          // photos.updated is a lightweight UID-only signal that carries
+          // no entity fields; affected photos are reloaded through the
+          // scoped search API and patched in place. The model-layer
+          // subscriber in model/photo.js handles the lightbox-cache
+          // eviction independently.
+          this.refetchResults(data.entities);
 
           break;
       }

@@ -2,8 +2,8 @@ package api
 
 import (
 	"crypto/subtle"
+	"errors"
 	"fmt"
-	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -11,7 +11,9 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/photoprism/photoprism/internal/auth/acl"
+	"github.com/photoprism/photoprism/internal/auth/oidc"
 	"github.com/photoprism/photoprism/internal/config"
+	"github.com/photoprism/photoprism/internal/entity"
 	"github.com/photoprism/photoprism/internal/event"
 	"github.com/photoprism/photoprism/internal/photoprism/get"
 	"github.com/photoprism/photoprism/internal/server/limiter"
@@ -20,7 +22,9 @@ import (
 	reg "github.com/photoprism/photoprism/internal/service/cluster/registry"
 	"github.com/photoprism/photoprism/internal/service/cluster/theme"
 	"github.com/photoprism/photoprism/pkg/clean"
+	"github.com/photoprism/photoprism/pkg/http/dns"
 	"github.com/photoprism/photoprism/pkg/http/header"
+	"github.com/photoprism/photoprism/pkg/http/scheme"
 	"github.com/photoprism/photoprism/pkg/i18n"
 	"github.com/photoprism/photoprism/pkg/log/status"
 	"github.com/photoprism/photoprism/pkg/rnd"
@@ -33,9 +37,9 @@ import (
 //	@Tags		Cluster
 //	@Accept		json
 //	@Produce	json
-//	@Param		request				body		object	true	"registration payload (NodeName required; optional: NodeRole, Labels, AdvertiseUrl, SiteUrl, AppName, AppVersion, Theme, NodeUUID, RotateDatabase, RotateSecret). New-node joins require the Bearer join token. Existing-node mutations require a Bearer OAuth access token that belongs to the same node client."
-//	@Success	200,201				{object}	cluster.RegisterResponse
-//	@Failure	400,401,403,409,429	{object}	i18n.Response
+//	@Param		request								body		object	true	"registration payload (NodeName required; optional: NodeRole, Labels, AdvertiseUrl, SiteUrl, AppName, AppVersion, Theme, NodeUUID, RotateDatabase, RotateSecret). New-node joins require the Bearer join token. Existing-node mutations require a Bearer OAuth access token that belongs to the same node client."
+//	@Success	200,201								{object}	cluster.RegisterResponse
+//	@Failure	400,401,403,404,409,413,429,500,503	{object}	i18n.Response
 //	@Router		/api/v1/cluster/nodes/register [post]
 func ClusterNodesRegister(router *gin.RouterGroup) {
 	router.POST("/cluster/nodes/register", func(c *gin.Context) {
@@ -60,8 +64,8 @@ func ClusterNodesRegister(router *gin.RouterGroup) {
 		clientIp := ClientIP(c)
 		r := limiter.Auth.Request(clientIp)
 
-		if r.Reject() || limiter.Auth.Reject(clientIp) {
-			event.AuditWarn([]string{clientIp, string(acl.ResourceCluster), "register", status.RateLimited})
+		if r.Reject() {
+			event.AuditDebug([]string{clientIp, string(acl.ResourceCluster), "register", status.RateLimited})
 			limiter.AbortJSON(c)
 			return
 		}
@@ -69,7 +73,13 @@ func ClusterNodesRegister(router *gin.RouterGroup) {
 		// Optional IP-based allowance via ClusterCIDR.
 		if cidr := strings.TrimSpace(conf.ClusterCIDR()); cidr != "" {
 			if !clusterCIDRAllowsClientIP(cidr, clientIp) {
-				event.AuditWarn([]string{clientIp, string(acl.ResourceCluster), "register", "client ip outside cluster-cidr", status.Denied})
+				// A valid join token is audited as a warning, other requests at debug level.
+				if clusterJoinTokenValid(c, conf.JoinToken()) {
+					event.AuditWarn([]string{clientIp, string(acl.ResourceCluster), "register", "client ip outside cluster-cidr", status.Denied})
+				} else {
+					event.AuditDebug([]string{clientIp, string(acl.ResourceCluster), "register", "client ip outside cluster-cidr", status.Denied})
+				}
+
 				r.Success() // Return reserved tokens before aborting.
 				AbortUnauthorized(c)
 				return
@@ -136,6 +146,12 @@ func ClusterNodesRegister(router *gin.RouterGroup) {
 		// Sanitize requested NodeUUID; generation happens later depending on path (existing vs new).
 		requestedUUID := rnd.SanitizeUUID(req.NodeUUID)
 
+		if req.NodeUUID != "" && !rnd.IsCanonicalUUID(requestedUUID) {
+			event.AuditWarn([]string{clientIp, string(acl.ResourceCluster), "register", "invalid node uuid", status.Failed})
+			AbortBadRequest(c)
+			return
+		}
+
 		// Registry (client-backed).
 		regy, err := reg.NewClientRegistryWithConfig(conf)
 
@@ -151,17 +167,14 @@ func ClusterNodesRegister(router *gin.RouterGroup) {
 		}
 
 		// Join token is only valid in Authorization Bearer format for first-time joins.
-		joinTokenValid := false
-		if expected := strings.TrimSpace(conf.JoinToken()); expected != "" {
-			if bearer := header.BearerToken(c); bearer != "" &&
-				subtle.ConstantTimeCompare([]byte(expected), []byte(bearer)) == 1 {
-				joinTokenValid = true
-			}
-		}
+		joinTokenValid := clusterJoinTokenValid(c, conf.JoinToken())
 
 		// Resolve existing node by requested name before selecting auth mode.
 		existingNode, _ := regy.FindByName(name)
 		node := existingNode
+
+		// authSessionID is the access token of an existing-node request, which a secret rotation keeps.
+		var authSessionID string
 
 		// Existing-name requests are mutation paths and require node OAuth ownership.
 		if existingNode != nil {
@@ -173,15 +186,28 @@ func ClusterNodesRegister(router *gin.RouterGroup) {
 				return
 			}
 
-			if s := Auth(c, acl.ResourceCluster, acl.ActionUpdateOwn); s.Abort(c) {
+			s := Auth(c, acl.ResourceCluster, acl.ActionUpdateOwn)
+
+			switch {
+			case s.Abort(c):
 				return
-			} else if !s.IsClient() || s.ClientUID == "" {
+			case !s.IsClient() || s.ClientUID == "":
 				event.AuditWarn([]string{clientIp, string(acl.ResourceCluster), "node", "%s", "register mutation requires client token", status.Denied}, clean.Log(name))
 				AbortUnauthorized(c)
 				return
-			} else if s.ClientUID != existingNode.ClientID {
+			case s.ClientUID != existingNode.ClientID:
 				event.AuditWarn([]string{clientIp, string(acl.ResourceCluster), "node", "%s", "name claimed by different client", status.Denied}, clean.Log(name))
 				c.JSON(http.StatusConflict, gin.H{"error": registerNameConflictError(name)})
+				return
+			}
+
+			authSessionID = s.ID
+
+			// Only a node client registers a node, and the registry shares its name space
+			// with ordinary OAuth clients.
+			if role := cluster.NormalizeNodeRole(existingNode.Role); role != cluster.RoleInstance && role != cluster.RoleService {
+				event.AuditWarn([]string{clientIp, string(acl.ResourceCluster), "node", "%s", "client role not allowed", status.Denied}, clean.Log(name))
+				AbortForbidden(c)
 				return
 			}
 		} else if !joinTokenValid {
@@ -217,13 +243,18 @@ func ClusterNodesRegister(router *gin.RouterGroup) {
 			}
 
 			node = owner
+			authSessionID = s.ID
 		}
 
 		// Existing-node mutation path (including node-owned rename to an unused name).
 		if node != nil {
+			// Identifier changes are audited once the write lands, so a denied or failed
+			// request does not report an update it never persisted.
+			renamedFrom := ""
+
 			if oldName := node.Name; oldName != "" && oldName != name {
 				node.Name = name
-				event.AuditInfo([]string{clientIp, string(acl.ResourceCluster), "node", "%s", "change name old %s new %s", status.Updated}, clean.Log(name), clean.Log(oldName), clean.Log(name))
+				renamedFrom = oldName
 			}
 
 			if req.AdvertiseUrl != "" {
@@ -235,6 +266,10 @@ func ClusterNodesRegister(router *gin.RouterGroup) {
 			if s := normalizeSiteURL(req.SiteUrl); s != "" {
 				node.SiteUrl = s
 			}
+			if dn := clean.TypeUnicode(req.DisplayName); dn != "" {
+				// Instance-reported name; NameSrc defaults to SrcAuto ("").
+				node.DisplayName = dn
+			}
 			if appName != "" {
 				node.AppName = appName
 			}
@@ -245,41 +280,48 @@ func ClusterNodesRegister(router *gin.RouterGroup) {
 				node.Theme = nodeTheme
 			}
 
-			if requestedUUID != "" {
-				oldUUID := node.UUID
-				if oldUUID != requestedUUID {
-					node.UUID = requestedUUID
-					event.AuditInfo([]string{clientIp, string(acl.ResourceCluster), "node", "%s", "change uuid old %s new %s", status.Updated}, clean.Log(name), clean.Log(oldUUID), clean.Log(requestedUUID))
+			applyRequestGroupConfig(node, &req)
+
+			uuidChangedFrom, uuidAssigned := "", false
+
+			if requestedUUID != "" && requestedUUID != node.UUID {
+				if nodeUUIDClaimedBy(requestedUUID, node.ClientID) {
+					event.AuditWarn([]string{clientIp, string(acl.ResourceCluster), "client %s", "node", "%s", "uuid %s registered to a different client", status.Denied}, clean.Log(node.ClientID), clean.Log(name), clean.Log(requestedUUID))
+					AbortForbidden(c)
+					return
 				}
+
+				uuidChangedFrom = node.UUID
+				node.UUID = requestedUUID
 			} else if node.UUID == "" {
 				node.UUID = rnd.UUIDv7()
-				event.AuditInfo([]string{clientIp, string(acl.ResourceCluster), "node", "%s", "assign uuid %s", status.Created}, clean.Log(name), clean.Log(node.UUID))
+				uuidAssigned = true
 			}
 
 			if putErr := regy.Put(node); putErr != nil {
+				if errors.Is(putErr, reg.ErrIdentifierMismatch) {
+					event.AuditWarn([]string{clientIp, string(acl.ResourceCluster), "client %s", "node", "%s", "uuid %s registered to a different client", status.Denied}, clean.Log(node.ClientID), clean.Log(name), clean.Log(node.UUID))
+					c.JSON(http.StatusConflict, gin.H{"error": registerUUIDConflictError(node.UUID)})
+					return
+				}
+
 				event.AuditErr([]string{clientIp, string(acl.ResourceCluster), "node", "%s", "persist", status.Error(putErr)}, clean.Log(name))
 				AbortUnexpectedError(c)
 				return
 			}
 
-			var respSecret *cluster.RegisterSecrets
-
-			if req.RotateSecret {
-				if node, err = regy.RotateSecret(node.UUID); err != nil {
-					event.AuditErr([]string{clientIp, string(acl.ResourceCluster), "node", "%s", "rotate secret", status.Error(err)}, clean.Log(name))
-					AbortUnexpectedError(c)
-					return
-				}
-
-				respSecret = &cluster.RegisterSecrets{ClientSecret: node.ClientSecret, RotatedAt: node.RotatedAt}
-				event.AuditInfo([]string{clientIp, string(acl.ResourceCluster), "node", "%s", "rotate secret", status.Succeeded}, clean.Log(name))
-
-				if putErr := regy.Put(node); putErr != nil {
-					event.AuditErr([]string{clientIp, string(acl.ResourceCluster), "node", "%s", "persist rotated secret", status.Error(putErr)}, clean.Log(name))
-					AbortUnexpectedError(c)
-					return
-				}
+			if renamedFrom != "" {
+				event.AuditInfo([]string{clientIp, string(acl.ResourceCluster), "node", "%s", "change name old %s new %s", status.Updated}, clean.Log(name), clean.Log(renamedFrom), clean.Log(name))
 			}
+
+			switch {
+			case uuidChangedFrom != "":
+				event.AuditInfo([]string{clientIp, string(acl.ResourceCluster), "node", "%s", "change uuid old %s new %s", status.Updated}, clean.Log(name), clean.Log(uuidChangedFrom), clean.Log(node.UUID))
+			case uuidAssigned:
+				event.AuditInfo([]string{clientIp, string(acl.ResourceCluster), "node", "%s", "assign uuid %s", status.Created}, clean.Log(name), clean.Log(node.UUID))
+			}
+
+			var respSecret *cluster.RegisterSecrets
 
 			var creds provisioner.Credentials
 			haveCreds := false
@@ -292,7 +334,9 @@ func ClusterNodesRegister(router *gin.RouterGroup) {
 
 				if credsErr != nil {
 					event.AuditWarn([]string{clientIp, string(acl.ResourceCluster), "node", "%s", "ensure database", status.Error(credsErr)}, clean.Log(name))
-					c.JSON(http.StatusConflict, gin.H{"error": credsErr.Error()})
+					recordIncompleteDatabase(clientIp, regy, node, creds, credsErr)
+					code, reason := registerProvisionError(credsErr)
+					c.JSON(code, gin.H{"error": reason})
 					return
 				}
 
@@ -321,12 +365,25 @@ func ClusterNodesRegister(router *gin.RouterGroup) {
 				}
 			}
 
+			// The secret is rotated last, so a failed database step leaves the current one valid.
+			if req.RotateSecret {
+				if node, err = regy.RotateSecretByClientID(node.ClientID, authSessionID); err != nil {
+					event.AuditErr([]string{clientIp, string(acl.ResourceCluster), "node", "%s", "rotate secret", status.Error(err)}, clean.Log(name))
+					AbortUnexpectedError(c)
+					return
+				}
+
+				respSecret = &cluster.RegisterSecrets{ClientSecret: node.ClientSecret, RotatedAt: node.RotatedAt}
+				event.AuditInfo([]string{clientIp, string(acl.ResourceCluster), "node", "%s", "rotate secret", status.Succeeded}, clean.Log(name))
+			}
+
 			resp := cluster.RegisterResponse{
 				UUID:               conf.ClusterUUID(),
 				ClusterCIDR:        conf.ClusterCIDR(),
-				Node:               reg.BuildClusterNode(*node, reg.NodeOptsForSession(nil)),
+				Node:               reg.BuildClusterNode(*node, reg.NodeOptsForSelf()),
 				Secrets:            respSecret,
 				JWKSUrl:            buildJWKSURL(conf),
+				PortalLoginUrl:     buildPortalLoginURL(conf),
 				AlreadyRegistered:  true,
 				AlreadyProvisioned: node.Database != nil && node.Database.Name != "",
 			}
@@ -341,7 +398,7 @@ func ClusterNodesRegister(router *gin.RouterGroup) {
 				if driver == "" {
 					driver = provisioner.DatabaseDriver
 				}
-				resp.Database = cluster.RegisterDatabase{Host: conf.DatabaseHost(), Port: conf.DatabasePort(), Name: node.Database.Name, User: node.Database.User, Driver: driver, RotatedAt: node.Database.RotatedAt}
+				resp.Database = cluster.RegisterDatabase{Host: provisioner.DatabaseHost, Port: provisioner.DatabasePort, Name: node.Database.Name, User: node.Database.User, Driver: driver, RotatedAt: node.Database.RotatedAt}
 			}
 
 			if req.RotateDatabase && haveCreds {
@@ -362,11 +419,34 @@ func ClusterNodesRegister(router *gin.RouterGroup) {
 			return
 		}
 
-		// New node (client UID will be generated in registry.Put).
+		// A join token admits a new node, so a UUID that already belongs to a registration
+		// is refused.
+		if nodeUUIDClaimedBy(requestedUUID, "") {
+			event.AuditWarn([]string{clientIp, string(acl.ResourceCluster), "register", "%s", "uuid %s already registered", status.Denied}, clean.Log(name), clean.Log(requestedUUID))
+			c.JSON(http.StatusConflict, gin.H{"error": registerUUIDConflictError(requestedUUID)})
+			return
+		}
+
+		// A join creates an OAuth client, so the role it may carry is limited to the node
+		// roles rather than taken from the request.
+		nodeRole := cluster.RoleInstance
+
+		if strings.TrimSpace(req.NodeRole) != "" {
+			switch role := cluster.NormalizeNodeRole(req.NodeRole); role {
+			case cluster.RoleInstance, cluster.RoleService:
+				nodeRole = role
+			default:
+				event.AuditWarn([]string{clientIp, string(acl.ResourceCluster), "register", "%s", "node role not allowed", status.Denied}, clean.Log(name))
+				AbortBadRequest(c)
+				return
+			}
+		}
+
+		// New node (client UID will be generated in registry.Create).
 		n := &reg.Node{
 			Node: cluster.Node{
 				Name:       name,
-				Role:       clean.TypeLowerDash(req.NodeRole),
+				Role:       nodeRole,
 				UUID:       requestedUUID,
 				Labels:     req.Labels,
 				AppName:    appName,
@@ -390,43 +470,67 @@ func ClusterNodesRegister(router *gin.RouterGroup) {
 			n.SiteUrl = s
 		}
 
+		if dn := clean.TypeUnicode(req.DisplayName); dn != "" {
+			// Instance-reported name; NameSrc defaults to SrcAuto ("").
+			n.DisplayName = dn
+		}
+
+		applyRequestGroupConfig(n, &req)
+
 		// Generate node secret (must satisfy client secret format for entity.Client).
 		n.ClientSecret = rnd.ClientSecret()
 		n.RotatedAt = nowRFC3339()
 
-		// Ensure DB (force rotation at create path to return password).
+		// The database is recorded before it is created, so the registry names any database that may exist.
 		shouldProvisionDB := req.RotateDatabase
 		var creds provisioner.Credentials
+		dbIncomplete := false
 
-		if shouldProvisionDB {
-			if creds, _, err = provisioner.EnsureCredentials(c, conf, n.UUID, name, true); err != nil {
-				event.AuditWarn([]string{clientIp, string(acl.ResourceCluster), "register", "ensure database", status.Error(err)})
-				c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+		if err = createJoiningNode(conf, regy, n, shouldProvisionDB); err != nil {
+			if errors.Is(err, provisioner.ErrUnsupportedDriver) || errors.Is(err, provisioner.ErrNotConfigured) {
+				event.AuditWarn([]string{clientIp, string(acl.ResourceCluster), "register", "ensure database", "node %s", status.Error(err)}, clean.Log(name))
+				code, reason := registerProvisionError(err)
+				c.JSON(code, gin.H{"error": reason})
+				return
+			} else if errors.Is(err, reg.ErrIdentifierMismatch) {
+				event.AuditWarn([]string{clientIp, string(acl.ResourceCluster), "register", "%s", "uuid %s already registered", status.Denied}, clean.Log(name), clean.Log(n.UUID))
+				c.JSON(http.StatusConflict, gin.H{"error": registerUUIDConflictError(n.UUID)})
 				return
 			}
 
-			if n.Database == nil {
-				n.Database = &cluster.NodeDatabase{}
-			}
-
-			n.Database.Name, n.Database.User, n.Database.RotatedAt = creds.Name, creds.User, creds.RotatedAt
-			n.Database.Driver = creds.Driver
-		}
-
-		if err = regy.Put(n); err != nil {
 			event.AuditErr([]string{clientIp, string(acl.ResourceCluster), "register", "persist", status.Error(err)})
 			AbortUnexpectedError(c)
 			return
 		}
 
+		// Force rotation at the create path to return a password.
+		if shouldProvisionDB {
+			if creds, _, err = provisioner.EnsureCredentials(c, conf, n.UUID, name, true); err == nil {
+				n.Database.RotatedAt = creds.RotatedAt
+				persistJoinedDatabase(clientIp, regy, n)
+			} else if errors.Is(err, provisioner.ErrIncomplete) {
+				// The node can complete the database it is registered with later.
+				event.AuditWarn([]string{clientIp, string(acl.ResourceCluster), "register", "ensure database", "node %s", status.Error(err)}, clean.Log(name))
+				dbIncomplete = true
+			} else {
+				// No database was created, so the registration is removed and the node may retry.
+				event.AuditWarn([]string{clientIp, string(acl.ResourceCluster), "register", "ensure database", "node %s", status.Error(err)}, clean.Log(name))
+				purgeJoinedNode(clientIp, n)
+				code, reason := registerProvisionError(err)
+				c.JSON(code, gin.H{"error": reason})
+				return
+			}
+		}
+
 		resp := cluster.RegisterResponse{
 			UUID:               conf.ClusterUUID(),
 			ClusterCIDR:        conf.ClusterCIDR(),
-			Node:               reg.BuildClusterNode(*n, reg.NodeOptsForSession(nil)),
+			Node:               reg.BuildClusterNode(*n, reg.NodeOptsForSelf()),
 			Secrets:            &cluster.RegisterSecrets{ClientSecret: n.ClientSecret, RotatedAt: n.RotatedAt},
 			JWKSUrl:            buildJWKSURL(conf),
+			PortalLoginUrl:     buildPortalLoginURL(conf),
 			AlreadyRegistered:  false,
-			AlreadyProvisioned: shouldProvisionDB,
+			AlreadyProvisioned: shouldProvisionDB && !dbIncomplete,
 		}
 
 		if portalTheme != "" {
@@ -434,9 +538,12 @@ func ClusterNodesRegister(router *gin.RouterGroup) {
 			log.Debugf("cluster: portal theme hint %s for instance %s", clean.Log(portalTheme), clean.Log(name))
 		}
 
-		// If DB provisioning is skipped, leave Database fields zero-value.
-		if shouldProvisionDB {
-			resp.Database = cluster.RegisterDatabase{Host: conf.DatabaseHost(), Port: conf.DatabasePort(), Name: creds.Name, User: creds.User, Driver: creds.Driver, Password: creds.Password, DSN: creds.DSN, RotatedAt: creds.RotatedAt}
+		// If DB provisioning is skipped, leave Database fields zero-value. An incomplete database is
+		// reported without its name and user, which clients save only together with a password.
+		if dbIncomplete {
+			resp.Database = cluster.RegisterDatabase{Host: provisioner.DatabaseHost, Port: provisioner.DatabasePort, Driver: creds.Driver, Incomplete: true}
+		} else if shouldProvisionDB {
+			resp.Database = cluster.RegisterDatabase{Host: provisioner.DatabaseHost, Port: provisioner.DatabasePort, Name: creds.Name, User: creds.User, Driver: creds.Driver, Password: creds.Password, DSN: creds.DSN, RotatedAt: creds.RotatedAt}
 		}
 
 		event.AuditInfo([]string{clientIp, string(acl.ResourceCluster), "node", "%s", status.Joined}, clean.Log(name))
@@ -534,10 +641,143 @@ func validateSiteURL(u string) bool {
 	}
 
 	if parsed.Scheme == "http" {
-		if host == "localhost" || host == "127.0.0.1" || host == "::1" || isClusterServiceHost(host) {
+		if dns.IsLoopbackHost(host) || isClusterServiceHost(host) {
 			return true
 		}
 		return false
+	}
+
+	return false
+}
+
+// applyRequestGroupConfig copies the instance-declared group admission config
+// from the registration request onto the node, normalizing identifiers and
+// dropping non-federatable roles. GroupsSrc is set to ClientGroupsSrcNode so
+// the registry applies admin-override-wins source precedence, and an instance
+// that declares nothing clears only values it previously declared.
+func applyRequestGroupConfig(n *reg.Node, req *cluster.RegisterRequest) {
+	n.AllowGroups = oidc.MergeGroups(req.AllowGroups)
+	n.AllowGroupRoles = sanitizeAllowGroupRoles(req.AllowGroupRoles)
+
+	if req.GroupsFullView {
+		v := true
+		n.GroupsFullView = &v
+	} else {
+		n.GroupsFullView = nil
+	}
+
+	n.GroupsSrc = entity.ClientGroupsSrcNode
+}
+
+// sanitizeAllowGroupRoles normalizes an instance-declared group → role mapping,
+// dropping malformed keys and non-instance roles instead of failing the
+// registration — declarative env config must not turn a typo into a boot loop.
+func sanitizeAllowGroupRoles(in map[string]string) map[string]string {
+	if len(in) == 0 {
+		return nil
+	}
+
+	out := make(map[string]string, len(in))
+
+	for group, roleName := range in {
+		g := oidc.NormalizeGroupID(group)
+
+		if g == "" {
+			continue
+		}
+
+		role, ok := acl.ClusterInstanceRole(roleName)
+
+		if !ok {
+			continue
+		}
+
+		out[g] = role.String()
+	}
+
+	if len(out) == 0 {
+		return nil
+	}
+
+	return out
+}
+
+// buildPortalLoginURL returns the Portal's browser-facing login page URL
+// (SiteUrl origin + login route) reported to nodes at registration, so an
+// instance can land cluster sign-outs on the Portal login without pinning a
+// return_to. A custom absolute LoginUri is returned as-is.
+func buildPortalLoginURL(conf *config.Config) string {
+	if conf == nil {
+		return ""
+	}
+
+	path := conf.LoginUri()
+
+	if strings.Contains(path, "://") {
+		return path
+	}
+
+	origin := scheme.OriginURL(conf.SiteUrl())
+
+	if origin == "" {
+		return ""
+	}
+
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+
+	return strings.TrimRight(origin, "/") + path
+}
+
+// normalizeRedirectURIs validates each entry and returns a deduplicated slice.
+// nil in = nil out ("no change"); non-nil in = non-nil out (replaces the persisted set).
+func normalizeRedirectURIs(in []string) ([]string, error) {
+	if in == nil {
+		return nil, nil
+	}
+
+	out := make([]string, 0, len(in))
+	seen := make(map[string]struct{}, len(in))
+
+	for _, raw := range in {
+		uri := strings.TrimSpace(raw)
+		if uri == "" {
+			continue
+		}
+		if !validateRedirectURI(uri) {
+			return nil, fmt.Errorf("invalid redirect uri: %s", clean.Log(uri))
+		}
+		if _, dup := seen[uri]; dup {
+			continue
+		}
+		seen[uri] = struct{}{}
+		out = append(out, uri)
+	}
+
+	return out, nil
+}
+
+// validateRedirectURI accepts HTTPS or loopback / cluster-internal HTTP, with a host and no fragment.
+func validateRedirectURI(u string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(u))
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return false
+	}
+	if parsed.Fragment != "" {
+		return false
+	}
+
+	host := strings.ToLower(parsed.Hostname())
+
+	if parsed.Scheme == "https" {
+		return true
+	}
+
+	if parsed.Scheme == "http" {
+		if dns.IsLoopbackHost(host) || isClusterServiceHost(host) {
+			return true
+		}
 	}
 
 	return false
@@ -565,16 +805,17 @@ func isClusterServiceHost(host string) bool {
 	return false
 }
 
+// clusterJoinTokenValid reports whether the request carries the configured join token as Bearer token.
+func clusterJoinTokenValid(c *gin.Context, joinToken string) bool {
+	expected := strings.TrimSpace(joinToken)
+	bearer := header.BearerToken(c)
+
+	return expected != "" && bearer != "" && subtle.ConstantTimeCompare([]byte(expected), []byte(bearer)) == 1
+}
+
 // clusterCIDRAllowsClientIP reports whether clientIP is within the configured cidr.
 func clusterCIDRAllowsClientIP(cidr, clientIP string) bool {
-	ip := net.ParseIP(clientIP)
-	_, block, err := net.ParseCIDR(cidr)
-
-	if err != nil || ip == nil || block == nil {
-		return false
-	}
-
-	return block.Contains(ip)
+	return cluster.CIDRsContain(cidr, clientIP)
 }
 
 // registerNameConflictError returns a clear operator-facing conflict message.
@@ -583,4 +824,92 @@ func registerNameConflictError(name string) string {
 		"node name %q is already registered; delete the stale registration first and retry join",
 		clean.DNSLabel(name),
 	)
+}
+
+// registerUUIDConflictError returns a clear operator-facing conflict message.
+func registerUUIDConflictError(uuid string) string {
+	return fmt.Sprintf(
+		"node uuid %q is already registered; delete the stale registration before retrying",
+		clean.Log(uuid),
+	)
+}
+
+// registerProvisionError returns the status and generic reason reported for a failed database provisioning.
+// Configuration errors are a conflict, while other failures may be retried.
+func registerProvisionError(err error) (int, string) {
+	switch {
+	case errors.Is(err, provisioner.ErrUnsupportedDriver):
+		return http.StatusConflict, "database auto-provisioning is not supported by the portal database configuration"
+	case errors.Is(err, provisioner.ErrNotConfigured):
+		return http.StatusConflict, "database auto-provisioning is not configured on the portal"
+	default:
+		return http.StatusServiceUnavailable, "database provisioning failed; check the portal logs"
+	}
+}
+
+// createJoiningNode registers a joining node, with the database it will be provisioned before any statement
+// runs, so the registry names every database that may exist. A configuration that cannot provision is refused first.
+func createJoiningNode(conf *config.Config, regy *reg.ClientRegistry, n *reg.Node, provisionDB bool) error {
+	if provisionDB {
+		if err := provisioner.CheckConfig(); err != nil {
+			return err
+		}
+
+		dbName, dbUser, _ := provisioner.GenerateCredentials(conf, n.UUID, n.Name)
+		n.Database = &cluster.NodeDatabase{Name: dbName, User: dbUser, Driver: strings.ToLower(provisioner.DatabaseDriver)}
+	}
+
+	return regy.Create(n)
+}
+
+// persistJoinedDatabase saves the rotation time of a newly provisioned database. The registry already
+// names the database, so a failure is recorded without failing the join.
+func persistJoinedDatabase(clientIp string, regy *reg.ClientRegistry, n *reg.Node) {
+	secret := n.ClientSecret
+	n.ClientSecret = ""
+	defer func() { n.ClientSecret = secret }()
+
+	if err := regy.Put(n); err != nil {
+		event.AuditErr([]string{clientIp, string(acl.ResourceCluster), "node", "%s", "persist database", status.Error(err)}, clean.Log(n.Name))
+	}
+}
+
+// purgeJoinedNode removes the registration a failed first join created, so its name and UUID remain free.
+func purgeJoinedNode(clientIp string, n *reg.Node) {
+	if n == nil || n.ClientID == "" {
+		return
+	}
+
+	if err := entity.FindClientByUID(n.ClientID).Purge(); err != nil {
+		event.AuditErr([]string{clientIp, string(acl.ResourceCluster), "node", "%s", "remove registration", status.Error(err)}, clean.Log(n.Name))
+	}
+}
+
+// recordIncompleteDatabase stores the database of an incomplete provisioning with a node that records none,
+// so removing the node also removes it.
+func recordIncompleteDatabase(clientIp string, regy *reg.ClientRegistry, node *reg.Node, creds provisioner.Credentials, err error) {
+	if node == nil || !errors.Is(err, provisioner.ErrIncomplete) {
+		return
+	}
+
+	if _, putErr := regy.RecordDatabase(node, cluster.NodeDatabase{Name: creds.Name, User: creds.User, Driver: creds.Driver}); putErr != nil {
+		event.AuditErr([]string{clientIp, string(acl.ResourceCluster), "node", "%s", "record database %s", status.Error(putErr)}, clean.Log(node.Name), clean.Log(creds.Name))
+	}
+}
+
+// nodeUUIDClaimedBy reports whether a node UUID is registered to a different client.
+// The UUID names a registration rather than proving ownership of one, so a request may carry
+// only an unassigned value or its own. The column is not unique, so every match is checked.
+func nodeUUIDClaimedBy(uuid, clientID string) bool {
+	if uuid == "" {
+		return false
+	}
+
+	for _, c := range entity.FindClientsByNodeUUID(uuid) {
+		if c.ClientUID != clientID {
+			return true
+		}
+	}
+
+	return false
 }

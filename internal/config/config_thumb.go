@@ -75,27 +75,36 @@ func (c *Config) ThumbUncached() bool {
 	return c.options.ThumbUncached
 }
 
-// ThumbSizePrecached returns the pre-cached thumbnail size limit in pixels (720-7680).
+// ThumbSizeLimit returns the effective thumbnail serving limit in pixels.
+func (c *Config) ThumbSizeLimit() int {
+	if c.ThumbUncached() {
+		return c.ThumbSizeUncached()
+	}
+
+	return c.ThumbSizePrecached()
+}
+
+// ThumbSizePrecached returns the pre-cached thumbnail size limit in pixels (720-15360).
 func (c *Config) ThumbSizePrecached() int {
 	size := c.options.ThumbSize
 
 	if size < 720 {
 		size = 720 // Mobile, TV
-	} else if size > 7680 {
-		size = 7680 // 8K Ultra HD
+	} else if size > 15360 {
+		size = 15360 // 16K, e.g. for 360° media
 	}
 
 	return size
 }
 
-// ThumbSizeUncached returns the on-demand rendering size limit in pixels (720-7680).
+// ThumbSizeUncached returns the on-demand rendering size limit in pixels (720-15360).
 func (c *Config) ThumbSizeUncached() int {
 	limit := c.options.ThumbSizeUncached
 
 	if limit < 720 {
 		limit = 720 // Mobile, TV
-	} else if limit > 7680 {
-		limit = 7680 // 8K Ultra HD
+	} else if limit > 15360 {
+		limit = 15360 // 16K, e.g. for 360° media
 	}
 
 	if c.ThumbSizePrecached() > limit {
@@ -103,4 +112,34 @@ func (c *Config) ThumbSizeUncached() int {
 	}
 
 	return limit
+}
+
+// ThumbSizeFace returns the size limit in pixels (720-15360) for the source rendition rendered on
+// demand when a face crop would otherwise be taken from too few pixels, or zero when that is off.
+//
+// It bounds the picture a crop is drawn from, not the crop itself: a face crop is face.CropSize,
+// and an aligned model warps its own template out of the source, so neither changes with this. It
+// is independent of the other thumbnail options because indexing renders at most one rendition per
+// file it already reads, where the on-demand limit prices a page rendering hundreds at once.
+//
+// What it writes stays: indexing skips a size above the pre-generated limit, "photoprism thumbs"
+// never refreshes one and nothing purges by size, so a ceiling above the shipped 4096 buys a face
+// nothing measurable and leaves a rung per file that no other pass maintains.
+func (c *Config) ThumbSizeFace() int {
+	if c == nil {
+		return 0
+	}
+
+	size := c.options.ThumbSizeFace
+
+	switch {
+	case size <= 0:
+		return 0
+	case size < 720:
+		return 720 // Mobile, TV
+	case size > 15360:
+		return 15360 // 16K, e.g. for 360° media
+	}
+
+	return size
 }

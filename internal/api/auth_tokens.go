@@ -1,24 +1,316 @@
 package api
 
 import (
+	"strconv"
+	"strings"
+
 	"github.com/gin-gonic/gin"
 
+	"github.com/photoprism/photoprism/internal/auth/acl"
+	"github.com/photoprism/photoprism/internal/auth/tokens"
 	"github.com/photoprism/photoprism/internal/entity"
+	"github.com/photoprism/photoprism/internal/event"
+	"github.com/photoprism/photoprism/internal/photoprism/get"
+	"github.com/photoprism/photoprism/internal/server/limiter"
+	"github.com/photoprism/photoprism/pkg/authn"
 	"github.com/photoprism/photoprism/pkg/clean"
+	"github.com/photoprism/photoprism/pkg/log/status"
 )
 
-// InvalidPreviewToken checks if the token found in the request is valid for image thumbnails and video streams.
-func InvalidPreviewToken(c *gin.Context) bool {
-	token := clean.UrlToken(c.Param("token"))
+// PreviewSignedSegment is the reserved :token path value of a preview URL that carries a signed preview
+// token in "?t=" instead.
+const PreviewSignedSegment = "signed"
 
-	if token == "" {
-		token = clean.UrlToken(c.Query("t"))
+// previewSessionKey is the gin context key under which the session of a signed preview token is memoized.
+const previewSessionKey = "preview_session"
+
+// InvalidPreviewToken checks if the request carries no token that authorizes previews of the resources.
+// A registered preview token and the coarse download token are matched by value; a signed download token
+// matches neither. A signed preview token must belong to an admitted session whose scope and client role
+// cover one of the resources.
+func InvalidPreviewToken(c *gin.Context, resources acl.Resources) bool {
+	if !entity.ValidateTokens {
+		return false
 	}
 
-	return entity.InvalidPreviewToken(token)
+	if signed, static := previewTokens(c); signed == "" {
+		return entity.InvalidPreviewToken(static) && !tokens.IsCoarseDownload(static)
+	}
+
+	sess := PreviewSession(c)
+
+	return sess == nil || downloadNotAdmitted(c, sess) || previewOutOfScope(sess, resources) || previewRoleDenied(sess, resources)
 }
 
-// InvalidDownloadToken checks if the token found in the request is valid for file downloads.
-func InvalidDownloadToken(c *gin.Context) bool {
-	return entity.InvalidDownloadToken(clean.UrlToken(c.Query("t")))
+// previewTokens returns the cleaned preview token of the request, either as one to verify as a signed
+// token or as one to match by value. "?t=" is read after the "signed" segment, where it must be a signed
+// token, and when the segment is empty, where it is matched by value.
+func previewTokens(c *gin.Context) (signed, static string) {
+	segment := clean.UrlToken(c.Param("token"))
+
+	switch {
+	case segment == PreviewSignedSegment && c.Query("t") != "":
+		if signed = clean.UrlToken(c.Query("t")); signed == "" {
+			return "", ""
+		}
+
+		return signed, ""
+	case segment == "":
+		return "", clean.UrlToken(c.Query("t"))
+	}
+
+	if _, _, _, ok := tokens.ParseCompact(segment); ok {
+		return segment, ""
+	}
+
+	return "", segment
+}
+
+// PreviewSession returns the session a signed preview token in the request is bound to, or nil if there
+// is none or it does not receive signed preview tokens. The result is memoized on the request context.
+func PreviewSession(c *gin.Context) *entity.Session {
+	if v, ok := c.Get(previewSessionKey); ok {
+		sess, _ := v.(*entity.Session)
+		return sess
+	}
+
+	var sess *entity.Session
+
+	if signed, _ := previewTokens(c); signed != "" {
+		if expires, sid, token, ok := tokens.ParseCompact(signed); !ok {
+			// Not a signed token.
+		} else if id, valid := tokens.VerifyPreview(expires, sid, token); !valid {
+			// Forged or expired.
+		} else if found, err := entity.FindSession(id); err == nil && found.SignedPreview() {
+			sess = found
+		}
+	}
+
+	c.Set(previewSessionKey, sess)
+
+	return sess
+}
+
+// previewRoleDenied reports whether the client role of the session may view none of the resources.
+func previewRoleDenied(sess *entity.Session, resources acl.Resources) bool {
+	role := sess.GetClientRole()
+
+	for _, resource := range resources {
+		if acl.Rules.AllowAny(resource, role, acl.Permissions{acl.ActionView}) {
+			return false
+		}
+	}
+
+	return true
+}
+
+// previewOutOfScope reports whether the session's authorization scope excludes viewing every one of the
+// resources.
+func previewOutOfScope(sess *entity.Session, resources acl.Resources) bool {
+	if !sess.HasScope() {
+		return false
+	}
+
+	for _, resource := range resources {
+		if sess.ValidateScope(resource, acl.Permissions{acl.ActionView}) {
+			return false
+		}
+	}
+
+	return true
+}
+
+// AuthDownload authorizes a download request for any of the specified resources and returns the session
+// it is scoped to together with whether the request is authorized. The session is nil for a coarse
+// capability, a configured static token, in which case the handler applies the by-design broad
+// (public, non-private) access. It merges the token gate and the session lookup, so a caller need not
+// call InvalidDownloadToken and DownloadSession separately.
+func AuthDownload(c *gin.Context, resources acl.Resources) (sess *entity.Session, valid bool) {
+	if sess = DownloadSession(c); sess != nil {
+		if downloadNotAdmitted(c, sess) {
+			event.AuditWarn([]string{ClientIP(c), "session %s", "download %s", status.Denied}, sess.RefID, resources.String())
+			return nil, false
+		}
+
+		if downloadOutOfScope(c, sess, resources) {
+			event.AuditErr([]string{ClientIP(c), "session %s", "download %s with scope %s", status.Error(authn.ErrInsufficientScope)},
+				sess.RefID, resources.String(), clean.Scope(sess.AuthScope))
+			return nil, false
+		}
+
+		return sess, true
+	}
+
+	// No bound session: a coarse (configured static or auto-generated instance) token still authorizes
+	// an unscoped download.
+	if tokens.IsCoarseDownload(clean.UrlToken(c.Query("t"))) {
+		return nil, true
+	}
+
+	// Audit the unauthorized request centrally, mirroring AuthAny, so the endpoints do not each log it.
+	event.AuditWarn([]string{ClientIP(c), resources.First().String(), "download", status.Denied})
+
+	return nil, false
+}
+
+// downloadOutOfScope reports whether the session's authorization scope excludes downloading every one of
+// the resources. A session pre-authorized by its request header is exempt: resolveDownloadSession admits
+// one only after authAnyJWT has matched the token scope against full file access.
+func downloadOutOfScope(c *gin.Context, sess *entity.Session, resources acl.Resources) bool {
+	if !sess.HasScope() || headerAuthorizedDownload(c) {
+		return false
+	}
+
+	for _, resource := range resources {
+		if sess.ValidateScope(resource, acl.Permissions{acl.ActionDownload}) {
+			return false
+		}
+	}
+
+	return true
+}
+
+// downloadNotAdmitted reports whether the credential or the account behind the session is currently
+// ineligible, applying the checks AuthAny performs. A session carrying no account of its own is
+// admitted unless it is an app password; public mode and a header-authorized session are exempt.
+func downloadNotAdmitted(c *gin.Context, sess *entity.Session) bool {
+	if get.Config().Public() || headerAuthorizedDownload(c) {
+		return false
+	}
+
+	// A session of a registered client requires the client to be enabled.
+	if sess.ClientDisabled() {
+		return true
+	}
+
+	// An app password depends on the feature flag and on its account's Web UI/API access.
+	if sess.IsApplication() && (get.Config().DisableAppPasswords() || sess.GetUser().DenyLogIn()) {
+		return true
+	}
+
+	if sess.NoUser() {
+		return false
+	}
+
+	u := sess.GetUser()
+
+	// A client session additionally requires an owner that permits client access, as AuthAny requires.
+	return u.IsUnknown() || u.IsDisabled() || sess.IsClient() && u.DenyClientAccess()
+}
+
+// InvalidDownloadToken checks if the request is not authorized to download any of the resources. It is a
+// thin wrapper around AuthDownload for callers that only need the yes/no gate; prefer AuthDownload when
+// the resolved session is needed to scope the response.
+func InvalidDownloadToken(c *gin.Context, resources acl.Resources) bool {
+	_, valid := AuthDownload(c, resources)
+	return !valid
+}
+
+// downloadSessionKey is the gin context key under which the resolved download session is memoized.
+const downloadSessionKey = "download_session"
+
+// downloadHeaderAuthKey is the gin context key marking a session that a request header authorized.
+const downloadHeaderAuthKey = "download_header_auth"
+
+// downloadRateLimitedKey is the gin context key marking a request header token that was not checked
+// because the client exceeded the authentication failure limit.
+const downloadRateLimitedKey = "download_rate_limited"
+
+// DownloadRateLimited reports whether a download request was not authorized because its client exceeded
+// the authentication failure limit, so the handler can answer 429 instead of 403.
+func DownloadRateLimited(c *gin.Context) bool {
+	v, _ := c.Get(downloadRateLimitedKey)
+	ok, _ := v.(bool)
+
+	return ok
+}
+
+// DownloadSession returns the session the request is bound to (a signed "?t=" token or a Portal JWT
+// header), the shared public session in public mode, or nil for a coarse/forged/expired token. The
+// result is memoized on the request context so the gate and the handler resolve it once.
+func DownloadSession(c *gin.Context) *entity.Session {
+	if v, ok := c.Get(downloadSessionKey); ok {
+		sess, _ := v.(*entity.Session)
+		return sess
+	}
+
+	sess := resolveDownloadSession(c)
+	c.Set(downloadSessionKey, sess)
+
+	return sess
+}
+
+// headerAuthorizedDownload reports whether resolveDownloadSession authorized this request through its
+// cluster JWT header rather than a "?t=" token.
+func headerAuthorizedDownload(c *gin.Context) bool {
+	v, _ := c.Get(downloadHeaderAuthKey)
+	ok, _ := v.(bool)
+
+	return ok
+}
+
+// resolveDownloadSession does the actual token → session resolution for DownloadSession.
+func resolveDownloadSession(c *gin.Context) *entity.Session {
+	if get.Config().Public() {
+		return get.Session().Public()
+	}
+
+	// The Portal authorizes a download with its cluster JWT in a request header (a transient JWT session
+	// can't back a "?t=" token). Restricted to JWTs (authAnyJWT rejects non-JWT tokens) granting access to
+	// all files, so only a trusted full-access principal qualifies; every other client presents a "?t=".
+	if AuthToken(c) != "" {
+		if s := authAnyJWT(c, ClientIP(c), AuthToken(c), acl.ResourceFiles, acl.Permissions{acl.ActionDownload, acl.AccessAll}); s != nil && s.Valid() {
+			c.Set(downloadHeaderAuthKey, true)
+			return s
+		} else if limiter.Auth.Reject(ClientIP(c)) {
+			c.Set(downloadRateLimitedKey, true)
+		}
+		// Not an all-photos cluster JWT: fall through to the "?t=" token path so a non-JWT header (a
+		// client that also sends a bearer) does not shadow a valid download token.
+	}
+
+	// Header-less browser context: a signed, session-bound "?t=" token (compact `<expires>.<sid>.<token>`
+	// or verbose `token=…`) binds the request to its session.
+	if sessionID, ok := signedDownloadSession(c); ok {
+		if sess, err := entity.FindSession(sessionID); err == nil {
+			return sess
+		}
+	}
+
+	// A coarse (static/instance) token or an unknown value resolves to no session: the handlers treat a
+	// nil session as an unscoped coarse capability (public/share access) or reject it as invalid.
+	return nil
+}
+
+// signedDownloadSession verifies a signed download token in the request and returns the bound session
+// ID. It accepts the compact origin form (`?t=<expires>.<sid>.<token>`) used by download URLs and the
+// verbose bunny.net edge form (`?token=…&expires=…&sid=…`), returning ok=false when neither is a valid
+// signed token. The compact form is tried first and falls through to the verbose form on any failure.
+func signedDownloadSession(c *gin.Context) (sessionID string, ok bool) {
+	// Compact origin form: t=<expires>.<sid>.<token>.
+	if t := c.Query("t"); strings.Count(t, ".") == 2 {
+		parts := strings.SplitN(t, ".", 3)
+
+		if id, valid := verifyDownloadParams(parts[0], parts[1], parts[2]); valid {
+			return id, true
+		}
+	}
+
+	// bunny.net edge form: token=…&expires=…&sid=….
+	if token := c.Query("token"); token != "" {
+		return verifyDownloadParams(c.Query("expires"), c.Query("sid"), token)
+	}
+
+	return "", false
+}
+
+// verifyDownloadParams parses the string expiry and verifies the signed download token, returning the
+// bound session ID. It is the shared tail of signedDownloadSession's compact and verbose forms.
+func verifyDownloadParams(expiresStr, sid, token string) (sessionID string, ok bool) {
+	expires, err := strconv.ParseInt(expiresStr, 10, 64)
+	if err != nil {
+		return "", false
+	}
+
+	return tokens.VerifyDownload(expires, sid, token)
 }

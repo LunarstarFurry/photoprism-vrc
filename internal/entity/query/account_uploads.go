@@ -3,15 +3,27 @@ package query
 import (
 	"github.com/photoprism/photoprism/internal/entity"
 	"github.com/photoprism/photoprism/pkg/fs"
+	"github.com/photoprism/photoprism/pkg/media"
 )
 
-// AccountUploads a list of files for uploading to a remote account.
+// AccountUploads returns the files to upload to a remote account: those without a sync record, and those whose
+// failed upload is tried again in this sync cycle.
 func AccountUploads(a entity.Service, limit int) (results entity.Files, err error) {
-	s := Db().Where("files.file_missing = 0").
-		Where("files.id NOT IN (SELECT file_id FROM files_sync WHERE file_id > 0 AND service_id = ?)", a.ID)
+	s := Db().Where("files.file_missing = FALSE").
+		Where("files.id NOT IN (SELECT file_id FROM files_sync WHERE file_id > 0 AND service_id = ? AND COALESCE(status, '') <> ?)",
+			a.ID, entity.FileSyncRetry)
 
 	if !a.SyncRaw {
-		s = s.Where("files.file_type <> ? OR files.file_type IS NULL", fs.ImageRaw)
+		// Hold back raw images and standalone videos, gating on the media type like the
+		// download direction. Live photos and animations stored as mp4/mov classify as
+		// "live"/"animated" and still upload. The file type is matched as well because
+		// media_type is not backfilled on rows indexed before it existed.
+		s = s.Where("(files.file_type NOT IN (?) OR files.file_type IS NULL) AND (files.media_type NOT IN (?) OR files.media_type IS NULL)",
+			media.FileTypeStrings(media.Raw), []string{media.Raw.String(), media.Video.String()})
+	}
+
+	if !a.SyncYamlEnabled() {
+		s = s.Where("(files.file_type <> ? OR files.file_type IS NULL)", fs.SidecarYaml.String())
 	}
 
 	s = s.Order("files.file_name ASC")

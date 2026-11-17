@@ -2,7 +2,6 @@ package photoprism
 
 import (
 	"bytes"
-	"errors"
 	"fmt"
 	"image"
 	"os/exec"
@@ -16,6 +15,8 @@ import (
 	"github.com/photoprism/photoprism/pkg/capture"
 	"github.com/photoprism/photoprism/pkg/clean"
 	"github.com/photoprism/photoprism/pkg/fs"
+	"github.com/photoprism/photoprism/pkg/fs/disk"
+	"github.com/photoprism/photoprism/pkg/proc"
 )
 
 // Bounds returns the media dimensions as image.Rectangle.
@@ -41,7 +42,7 @@ func (m *MediaFile) Thumbnail(path string, sizeName thumb.Name) (filename string
 	thumbName, err := size.FromFile(m.FileName(), m.Hash(), path, m.Orientation())
 
 	if err != nil {
-		err = fmt.Errorf("media: failed to create thumbnail for %s (%s)", clean.Log(m.BaseName()), err)
+		err = fmt.Errorf("media: failed to create thumbnail for %s (%w)", clean.Log(m.BaseName()), err)
 		log.Debug(err)
 		return "", err
 	}
@@ -68,9 +69,36 @@ func (m *MediaFile) SkipThumbnailSize(size thumb.Size) bool {
 	return thumb.Skip(size, m.Bounds())
 }
 
+// configBounds returns the media dimensions from the image header, without the orientation
+// correction that Bounds reads from the file metadata. An undecodable header yields the zero
+// rectangle, which thumb.Skip treats as a square source smaller than every size.
+func (m *MediaFile) configBounds() image.Rectangle {
+	cfg, err := m.DecodeConfig()
+
+	if err != nil {
+		return image.Rectangle{}
+	}
+
+	return image.Rectangle{Min: image.Point{}, Max: image.Point{X: cfg.Width, Y: cfg.Height}}
+}
+
 // GenerateThumbnails generates thumbnails in the specified storage path,
 // existing images are only replaced if the force flag is set to true.
 func (m *MediaFile) GenerateThumbnails(thumbPath string, force bool) (err error) {
+	return m.generateThumbnails(thumbPath, force, m.Bounds)
+}
+
+// GenerateAvatarThumbnails generates thumbnails for a user-provided avatar image, sizing them
+// from the image header so that the file metadata is not parsed. libvips applies the embedded
+// orientation itself; the fallback imaging library still reads it where it must rotate.
+func (m *MediaFile) GenerateAvatarThumbnails(thumbPath string, force bool) (err error) {
+	return m.generateThumbnails(thumbPath, force, m.configBounds)
+}
+
+// generateThumbnails generates the cached thumbnail sizes, skipping those the source bounds
+// make redundant. The bounds are resolved only once a size actually needs generating, because
+// resolving them reads the file.
+func (m *MediaFile) generateThumbnails(thumbPath string, force bool, srcBounds func() image.Rectangle) (err error) {
 	if !m.IsPreviewImage() {
 		// Skip.
 		return
@@ -78,6 +106,12 @@ func (m *MediaFile) GenerateThumbnails(thumbPath string, force bool) (err error)
 
 	count := 0
 	start := time.Now()
+
+	// Surface a disk-full write failure as the shared insufficient-storage sentinel,
+	// so the indexer and thumbs worker can abort the run instead of failing every file.
+	defer func() {
+		err = disk.AsInsufficientStorage(err)
+	}()
 
 	defer func() {
 		switch count {
@@ -103,13 +137,13 @@ func (m *MediaFile) GenerateThumbnails(thumbPath string, force bool) (err error)
 			// Exceeds the maximum size of thumbnails to be generated while indexing (--thumb-size).
 			continue
 		} else if fileName, err = size.FileName(hash, thumbPath); err != nil {
-			log.Errorf("media: failed to create %s (%s)", clean.Log(string(name)), err)
+			log.Errorf("media: failed to create %s thumbnail for %s (%s)", name, clean.Log(m.RootRelName()), clean.Error(err))
 			return err
 		} else if force || !fs.FileExists(fileName) {
 			// Use libvips to generate thumbnails?
 			if thumb.Library == thumb.LibVips {
 				// Only create a thumbnail if its size does not exceed the size of the original image.
-				if m.SkipThumbnailSize(size) {
+				if thumb.Skip(size, srcBounds()) {
 					continue
 				} else if size.Source != "" {
 					// Original image filename.
@@ -192,7 +226,7 @@ func (m *MediaFile) GenerateThumbnails(thumbPath string, force bool) (err error)
 
 			// Failed?
 			if err != nil {
-				log.Errorf("media: failed to create %s (%s)", name.String(), err)
+				log.Errorf("media: failed to create %s thumbnail for %s (%s)", name, clean.Log(m.RootRelName()), clean.Error(err))
 				return err
 			}
 
@@ -224,15 +258,17 @@ func (m *MediaFile) ChangeOrientation(val int) (err error) {
 	}...)
 
 	// Log exact command for debugging in trace mode.
-	log.Trace(cmd.String())
+	log.Trace(clean.Cmd(cmd))
 
 	// Run exiftool command.
-	if err = cmd.Run(); err != nil {
-		if stderr.String() != "" {
-			return errors.New(stderr.String())
-		} else {
-			return err
+	if err = proc.Run(cmd, cnf.ConvertTimeout()); err != nil {
+		if s := stderr.String(); s != "" {
+			err = fmt.Errorf("%w: %s", err, s)
 		}
+
+		LogConvertError(err, cmd, clean.Log(m.BaseName()))
+
+		return err
 	}
 
 	return nil

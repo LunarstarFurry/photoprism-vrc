@@ -7,6 +7,7 @@ import (
 
 	"github.com/photoprism/photoprism/internal/auth/acl"
 	"github.com/photoprism/photoprism/internal/entity/query"
+	"github.com/photoprism/photoprism/internal/entity/search"
 	"github.com/photoprism/photoprism/internal/form"
 	"github.com/photoprism/photoprism/internal/photoprism"
 	"github.com/photoprism/photoprism/internal/photoprism/get"
@@ -21,11 +22,11 @@ import (
 //	@Tags		Files
 //	@Accept		json
 //	@Produce	json
-//	@Success	200						{object}	entity.Photo
-//	@Failure	400,401,403,404,429,500	{object}	i18n.Response
-//	@Param		uid						path		string		true	"photo uid"
-//	@Param		fileuid					path		string		true	"file uid"
-//	@Param		file					body		form.File	true	"file orientation"
+//	@Success	200							{object}	entity.Photo
+//	@Failure	400,401,403,404,413,429,500	{object}	i18n.Response
+//	@Param		uid							path		string		true	"photo uid"
+//	@Param		fileuid						path		string		true	"file uid"
+//	@Param		file						body		form.File	true	"file orientation"
 //	@Router		/api/v1/photos/{uid}/files/{fileuid}/orientation [put]
 func ChangeFileOrientation(router *gin.RouterGroup) {
 	router.PUT("/photos/:uid/files/:file_uid/orientation", func(c *gin.Context) {
@@ -55,6 +56,14 @@ func ChangeFileOrientation(router *gin.RouterGroup) {
 			log.Errorf("files: %s (change orientation)", err)
 			AbortEntityNotFound(c)
 			return
+		}
+
+		// Limit the edit to the file's own photo within the session scope.
+		if !search.PhotoSessionSeesEverything(s) {
+			if visible, vErr := search.PhotoVisibleToSession(m.PhotoUID, s); vErr != nil || !visible {
+				AbortForbidden(c)
+				return
+			}
 		}
 
 		// Init form with model values
@@ -113,8 +122,9 @@ func ChangeFileOrientation(router *gin.RouterGroup) {
 			return
 		}
 
-		PublishPhotoEvent(StatusUpdated, m.PhotoUID, c)
+		PublishPhotoEvent(StatusUpdated, m.PhotoUID)
 
+		p.RedactForSession(s)
 		c.JSON(http.StatusOK, p)
 	})
 }

@@ -11,6 +11,9 @@ import (
 	"strings"
 )
 
+// ErrArchiveSymlink identifies an unsupported symbolic-link archive entry.
+var ErrArchiveSymlink = errors.New("archive symlinks are not supported")
+
 // MaxUnzipEntries caps the number of entries extracted by Unzip. It may be tuned via config/env later.
 var MaxUnzipEntries = 100000
 
@@ -102,9 +105,10 @@ func ZipFile(zipWriter *zip.Writer, fileName, fileAlias string, compress bool) (
 	return err
 }
 
-// Unzip extracts the contents of a zip file to the target directory.
-// totalSizeLimit: 0 means unlimited; -1 also means unlimited (reserved for backward compatibility).
-func Unzip(zipName, dir string, fileSizeLimit, totalSizeLimit int64) (files []string, skipped []string, err error) {
+// Unzip extracts the contents of a zip file to the target directory, and optional filters select entries.
+// A negative total size limit is unlimited and 0 leaves no budget. Each file must leave at least one byte
+// of the budget, and once one does not fit, no later file entry is extracted.
+func Unzip(zipName, dir string, fileSizeLimit, totalSizeLimit int64, filters ...func(string, bool) bool) (files []string, skipped []string, err error) {
 	zipReader, err := zip.OpenReader(zipName)
 
 	if err != nil {
@@ -115,11 +119,6 @@ func Unzip(zipName, dir string, fileSizeLimit, totalSizeLimit int64) (files []st
 		err = errors.Join(err, zipReader.Close())
 	}()
 
-	// Treat 0 as no limit; negative also unlimited.
-	if totalSizeLimit == 0 {
-		totalSizeLimit = -1
-	}
-
 	entryLimit := MaxUnzipEntries
 
 	for i, zipFile := range zipReader.File {
@@ -128,7 +127,14 @@ func Unzip(zipName, dir string, fileSizeLimit, totalSizeLimit int64) (files []st
 		}
 
 		// Skip directories like __OSX and potentially malicious file names containing "..".
-		skipEntry := strings.HasPrefix(zipFile.Name, "__") || strings.Contains(zipFile.Name, "..")
+		skipEntry := strings.HasPrefix(zipFile.Name, "__") || strings.Contains(zipFile.Name, "..") || HasReservedComponent(zipFile.Name) || zipFile.Mode()&os.ModeSymlink != 0
+
+		for _, filter := range filters {
+			if filter != nil && !filter(zipFile.Name, zipFile.FileInfo().IsDir()) {
+				skipEntry = true
+				break
+			}
+		}
 
 		if !skipEntry && fileSizeLimit > 0 {
 			if zipFile.UncompressedSize64 > uint64(math.MaxInt64) {
@@ -148,21 +154,33 @@ func Unzip(zipName, dir string, fileSizeLimit, totalSizeLimit int64) (files []st
 			continue
 		}
 
-		if totalSizeLimit > 0 {
-			entrySize := int64(zipFile.UncompressedSize64) //nolint:gosec // safe: capped by check above
+		writeLimit := fileSizeLimit
 
-			totalSizeLimit -= entrySize
-
-			if totalSizeLimit < 1 {
+		if totalSizeLimit >= 0 && !zipFile.FileInfo().IsDir() {
+			if int64(zipFile.UncompressedSize64) >= totalSizeLimit { //nolint:gosec // safe: capped by check above
 				skipped = append(skipped, zipFile.Name)
 				totalSizeLimit = 0
 				continue
 			}
+
+			if writeLimit <= 0 || writeLimit > totalSizeLimit-1 {
+				writeLimit = totalSizeLimit - 1
+			}
 		}
 
-		fileName, unzipErr := unzipFileWithLimit(zipFile, dir, fileSizeLimit)
+		fileName, written, unzipErr := unzipEntry(zipFile, dir, writeLimit)
+
+		if errors.Is(unzipErr, ErrReservedPath) || errors.Is(unzipErr, ErrArchiveSymlink) {
+			skipped = append(skipped, zipFile.Name)
+			continue
+		}
+
 		if unzipErr != nil {
 			return files, skipped, unzipErr
+		}
+
+		if totalSizeLimit > 0 {
+			totalSizeLimit -= written
 		}
 
 		files = append(files, fileName)
@@ -178,9 +196,34 @@ func UnzipFile(f *zip.File, dir string) (fileName string, err error) {
 
 // unzipFileWithLimit writes a file from a zip archive to the target destination while applying a size limit.
 func unzipFileWithLimit(f *zip.File, dir string, fileSizeLimit int64) (fileName string, err error) {
+	fileName, _, err = unzipEntry(f, dir, fileSizeLimit)
+	return fileName, err
+}
+
+// unzipEntry writes a file from a zip archive to the target destination and returns the number of bytes written.
+// A positive limit caps the write, otherwise the declared size does. An entry whose data is incomplete, exceeds
+// the limit, or does not match its checksum returns an error, and its file is removed. New files get ModeFile.
+func unzipEntry(f *zip.File, dir string, limit int64) (fileName string, written int64, err error) {
+	if HasReservedComponent(f.Name) {
+		return "", 0, ErrReservedPath
+	} else if f.Mode()&os.ModeSymlink != 0 {
+		return "", 0, ErrArchiveSymlink
+	}
+
+	var opened, complete bool
+
+	// Registered first so that it runs after the deferred closes below.
+	defer func() {
+		if opened && (!complete || err != nil) {
+			if removeErr := os.Remove(fileName); removeErr != nil && !os.IsNotExist(removeErr) {
+				err = errors.Join(err, removeErr)
+			}
+		}
+	}()
+
 	rc, err := f.Open()
 	if err != nil {
-		return fileName, err
+		return fileName, 0, err
 	}
 
 	defer func() {
@@ -188,13 +231,13 @@ func unzipFileWithLimit(f *zip.File, dir string, fileSizeLimit int64) (fileName 
 	}()
 
 	// Compose destination file or directory path with safety checks.
-	if fileName, err = safeJoin(dir, f.Name); err != nil {
-		return fileName, err
+	if fileName, err = SafeJoin(dir, f.Name); err != nil {
+		return fileName, 0, err
 	}
 
 	// Create destination path if it is a directory.
 	if f.FileInfo().IsDir() {
-		return fileName, MkdirAll(fileName)
+		return fileName, 0, MkdirAll(fileName)
 	}
 
 	// If it is a file, make sure its destination directory exists.
@@ -205,80 +248,53 @@ func unzipFileWithLimit(f *zip.File, dir string, fileSizeLimit int64) (fileName 
 	}
 
 	if err = MkdirAll(basePath); err != nil {
-		return fileName, err
+		return fileName, 0, err
 	}
 
-	fd, err := os.OpenFile(fileName, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, f.Mode()) //nolint:gosec // destination derived from safeJoin
+	fd, err := os.OpenFile(fileName, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, ModeFile) //nolint:gosec // destination derived from SafeJoin
+
 	if err != nil {
-		return fileName, err
+		return fileName, 0, err
 	}
+
+	opened = true
 
 	defer func() {
 		err = errors.Join(err, fd.Close())
 	}()
 
-	limit := fileSizeLimit
+	capped := limit > 0
 
-	if limit <= 0 {
+	if !capped {
 		switch {
 		case f.UncompressedSize64 == 0:
 			limit = math.MaxInt64
 		case f.UncompressedSize64 > uint64(math.MaxInt64):
-			return fileName, fmt.Errorf("zip entry too large")
+			return fileName, 0, fmt.Errorf("zip entry too large")
 		default:
 			limit = int64(f.UncompressedSize64) //nolint:gosec // safe: capped above
+			capped = true
 		}
 	}
 
 	written, copyErr := io.CopyN(fd, rc, limit)
-	if copyErr != nil && !errors.Is(copyErr, io.EOF) && !errors.Is(copyErr, io.ErrUnexpectedEOF) {
-		return fileName, copyErr
+
+	if copyErr != nil && !errors.Is(copyErr, io.EOF) {
+		return fileName, written, copyErr
 	}
 
-	// Abort if the entry exceeded the configured limit.
-	if written >= limit && (fileSizeLimit > 0 || f.UncompressedSize64 > 0) {
-		// Drain a single byte to see if more data remains (indicating truncation).
+	// Read past the limit to detect remaining data and to let the archive reader verify the entry.
+	if capped && written >= limit {
 		var b [1]byte
-		if _, extraErr := rc.Read(b[:]); extraErr == nil {
-			return fileName, fmt.Errorf("zip entry exceeds limit")
+
+		if n, extraErr := rc.Read(b[:]); n > 0 || extraErr == nil {
+			return fileName, written, fmt.Errorf("zip entry exceeds limit")
+		} else if !errors.Is(extraErr, io.EOF) {
+			return fileName, written, extraErr
 		}
 	}
 
-	return fileName, nil
-}
+	complete = true
 
-// safeJoin joins a base directory with a relative name and ensures
-// that the resulting path stays within the base directory. Absolute
-// paths and Windows-style volume names are rejected.
-func safeJoin(baseDir, name string) (string, error) {
-	if name == "" {
-		return "", fmt.Errorf("invalid zip path")
-	}
-
-	// Normalize separators so mixed '/' and '\\' are handled consistently.
-	name = strings.ReplaceAll(name, "\\", "/")
-
-	// Reject Windows-style volume names even on non-Windows platforms.
-	if len(name) >= 2 && name[1] == ':' && ((name[0] >= 'A' && name[0] <= 'Z') || (name[0] >= 'a' && name[0] <= 'z')) {
-		return "", fmt.Errorf("invalid zip path: absolute or volume path not allowed")
-	}
-
-	if filepath.IsAbs(name) || filepath.VolumeName(name) != "" {
-		return "", fmt.Errorf("invalid zip path: absolute or volume path not allowed")
-	}
-
-	cleaned := filepath.Clean(name)
-	base := filepath.Clean(baseDir)
-
-	dest := filepath.Join(base, cleaned)
-	rel, err := filepath.Rel(base, dest)
-	if err != nil {
-		return "", fmt.Errorf("invalid zip path: %w", err)
-	}
-
-	if rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
-		return "", fmt.Errorf("invalid zip path: outside target directory")
-	}
-
-	return dest, nil
+	return fileName, written, nil
 }

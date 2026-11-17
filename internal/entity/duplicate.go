@@ -6,14 +6,17 @@ import (
 	"github.com/photoprism/photoprism/pkg/clean"
 )
 
+// Duplicates represents a list of duplicate files.
 type Duplicates []Duplicate
+
+// DuplicatesMap indexes duplicate files by their name.
 type DuplicatesMap map[string]Duplicate
 
 // Duplicate represents an exact file duplicate.
 type Duplicate struct {
-	FileName string `gorm:"type:VARBINARY(755);primary_key;" json:"Name" yaml:"Name"`
-	FileRoot string `gorm:"type:VARBINARY(16);primary_key;default:'/';" json:"Root" yaml:"Root,omitempty"`
-	FileHash string `gorm:"type:VARBINARY(128);default:'';index" json:"Hash" yaml:"Hash,omitempty"`
+	FileName string `gorm:"type:bytes;size:755;primaryKey;" json:"Name" yaml:"Name"`
+	FileRoot string `gorm:"type:bytes;size:16;primaryKey;default:'/';" json:"Root" yaml:"Root,omitempty"`
+	FileHash string `gorm:"type:bytes;size:128;default:'';index" json:"Hash" yaml:"Hash,omitempty"`
 	FileSize int64  `json:"Size" yaml:"Size,omitempty"`
 	ModTime  int64  `json:"ModTime" yaml:"-"`
 }
@@ -60,7 +63,7 @@ func PurgeDuplicate(fileName, fileRoot string) error {
 		return fmt.Errorf("duplicate root must not be empty")
 	}
 
-	if err := UnscopedDb().Delete(Duplicate{}, "file_name = ? AND file_root = ?", fileName, fileRoot).Error; err != nil {
+	if err := UnscopedDb().Delete(&Duplicate{}, "file_name = ? AND file_root = ?", fileName, fileRoot).Error; err != nil {
 		log.Errorf("duplicate: %s in %s (purge)", err, clean.Log(fileName))
 		return err
 	}
@@ -93,7 +96,7 @@ func (m *Duplicate) Create() error {
 	return UnscopedDb().Create(m).Error
 }
 
-// Saves the duplicates in the database.
+// Save stores the duplicate in the database.
 func (m *Duplicate) Save() error {
 	if m.FileName == "" {
 		return fmt.Errorf("duplicate name must not be empty (save)")

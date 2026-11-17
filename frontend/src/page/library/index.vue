@@ -2,7 +2,7 @@
   <div class="p-tab p-tab-index">
     <v-form ref="form" class="p-form p-photo-index" validate-on="invalid-input" @submit.prevent="submit">
       <div class="form-header">
-        <span v-if="fileName" class="text-break">{{ action }} {{ fileName }}…</span>
+        <span v-if="fileName" class="text-break">{{ action }} <bdi dir="ltr">{{ $util.stripBidiControls(fileName) }}</bdi>…</span>
         <span v-else-if="action">{{ action }}…</span>
         <span v-else-if="busy">{{ $gettext(`Indexing media and sidecar files…`) }}</span>
         <span v-else-if="completed">{{ $gettext(`Done.`) }}</span>
@@ -82,6 +82,7 @@
 import $api from "common/api";
 import Axios from "axios";
 import $notify from "common/notify";
+import { $gettext } from "common/gettext";
 import Settings from "model/settings";
 import { Folder, RootOriginals } from "model/folder";
 
@@ -208,7 +209,7 @@ export default {
             return;
           }
 
-          $notify.error(ctx.$gettext("Indexing failed"));
+          $notify.error($gettext("Indexing failed"));
 
           ctx.busy = false;
           ctx.completed = 0;

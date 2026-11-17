@@ -2,28 +2,39 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
 	"testing"
 
+	"github.com/sirupsen/logrus"
+	"github.com/sirupsen/logrus/hooks/test"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"github.com/tidwall/gjson"
+	"gorm.io/gorm"
 
+	"github.com/photoprism/photoprism/internal/auth/acl"
 	"github.com/photoprism/photoprism/internal/config"
 	"github.com/photoprism/photoprism/internal/entity"
+	"github.com/photoprism/photoprism/internal/event"
 	"github.com/photoprism/photoprism/internal/form"
+	"github.com/photoprism/photoprism/internal/photoprism/get"
+	"github.com/photoprism/photoprism/pkg/log/status"
 )
 
 func TestUpdateUser(t *testing.T) {
 	t.Run("InvalidRequestBody", func(t *testing.T) {
+		// Body validation runs after the ownership check, so target the
+		// session user's own UID to exercise the BindJSON failure path.
 		app, router, conf := NewApiTest()
 		conf.SetAuthMode(config.AuthModePasswd)
 		defer conf.SetAuthMode(config.AuthModePublic)
 		UpdateUser(router)
 		sessId := AuthenticateUser(app, router, "alice", "Alice123!")
-		adminUid := entity.Admin.UserUID
-		reqUrl := fmt.Sprintf("/api/v1/users/%s", adminUid)
-		t.Logf("Request URL: %s", reqUrl)
+		aliceUid := "uqxetse3cy5eo9z2"
+		reqUrl := fmt.Sprintf("/api/v1/users/%s", aliceUid)
 		r := AuthenticatedRequestWithBody(app, "PUT", reqUrl, "{Email:\"admin@example.com\",Details:{Location:\"WebStorm\"}}", sessId)
 		assert.Equal(t, http.StatusBadRequest, r.Code)
 	})
@@ -46,7 +57,7 @@ func TestUpdateUser(t *testing.T) {
 			DisplayName: "New Name",
 		}
 
-		if userForm, err := json.Marshal(f); err != nil {
+		if userForm, err := json.Marshal(f); err != nil { //nolint:gosec // test marshals a form with a password field to build the request body
 			log.Fatal(err)
 		} else {
 			r := AuthenticatedRequestWithBody(app, "PUT", "/api/v1/users/uqxetse3cy5eo9z2",
@@ -59,6 +70,16 @@ func TestUpdateUser(t *testing.T) {
 		conf.SetAuthMode(config.AuthModePasswd)
 		defer conf.SetAuthMode(config.AuthModePublic)
 		UpdateUser(router)
+
+		// The display name and upload path are restored, so later tests see the fixture.
+		stored := entity.FindUserByUID("uqxetse3cy5eo9z2")
+		require.NotNil(t, stored)
+		t.Cleanup(func() {
+			assert.NoError(t, entity.Db().Model(&entity.User{}).Where("user_uid = ?", stored.UserUID).
+				UpdateColumns(entity.Values{"display_name": stored.DisplayName, "upload_path": stored.UploadPath}).Error)
+			entity.FlushUserSessionCache(stored.UserUID)
+		})
+
 		sessId := AuthenticateUser(app, router, "alice", "Alice123!")
 
 		f := form.User{
@@ -66,7 +87,7 @@ func TestUpdateUser(t *testing.T) {
 			UploadPath:  "uploads-alice",
 		}
 
-		if userForm, err := json.Marshal(f); err != nil {
+		if userForm, err := json.Marshal(f); err != nil { //nolint:gosec // test marshals a form with a password field to build the request body
 			log.Fatal(err)
 		} else {
 			r := AuthenticatedRequestWithBody(app, "PUT", "/api/v1/users/uqxetse3cy5eo9z2",
@@ -77,6 +98,8 @@ func TestUpdateUser(t *testing.T) {
 		}
 	})
 	t.Run("AliceChangeBob", func(t *testing.T) {
+		// Community Edition grants admins own-account user management only;
+		// full-access editions permit cross-account admin profile updates.
 		app, router, conf := NewApiTest()
 		conf.SetAuthMode(config.AuthModePasswd)
 		defer conf.SetAuthMode(config.AuthModePublic)
@@ -89,15 +112,60 @@ func TestUpdateUser(t *testing.T) {
 			UploadPath:  "uploads-bob",
 		}
 
-		if userForm, err := json.Marshal(f); err != nil {
+		if userForm, err := json.Marshal(f); err != nil { //nolint:gosec // test marshals a form with a password field to build the request body
 			log.Fatal(err)
 		} else {
 			r := AuthenticatedRequestWithBody(app, "PUT", "/api/v1/users/uqxc08w3d0ej2283",
 				string(userForm), sessId)
-			assert.Equal(t, http.StatusOK, r.Code)
-			assert.Contains(t, r.Body.String(), "\"DisplayName\":\"Bobby\"")
-			assert.Contains(t, r.Body.String(), "\"UploadPath\":\"uploads-bob\"")
+			assert.Equal(t, http.StatusForbidden, r.Code)
 		}
+	})
+	t.Run("GuestCannotEditOtherUser", func(t *testing.T) {
+		// Guest sessions may update their own profile, but not another account.
+		app, router, conf := NewApiTest()
+		conf.SetAuthMode(config.AuthModePasswd)
+		defer conf.SetAuthMode(config.AuthModePublic)
+		UpdateUser(router)
+
+		guestUsername := "guest_update_idor_test"
+		if err := entity.AddUser(form.User{
+			UserName: guestUsername,
+			UserRole: acl.RoleGuest.String(),
+			Password: "GuestPass123!",
+			CanLogin: true,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			if u := entity.FindUserByName(guestUsername); u != nil {
+				_ = u.Delete()
+			}
+		})
+
+		sessId := AuthenticateUser(app, router, guestUsername, "GuestPass123!")
+		if sessId == "" {
+			t.Fatal("guest authentication failed")
+		}
+
+		adminUid := entity.Admin.UserUID
+		body, err := json.Marshal(form.User{ //nolint:gosec // test marshals a form with a password field to build the request body
+			UserEmail:   "attacker@example.test",
+			DisplayName: "PWNED",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		r := AuthenticatedRequestWithBody(app, "PUT", fmt.Sprintf("/api/v1/users/%s", adminUid), string(body), sessId)
+		assert.Equal(t, http.StatusForbidden, r.Code)
+
+		// Confirm the admin record was not mutated.
+		fresh := entity.FindUserByUID(adminUid)
+		if fresh == nil {
+			t.Fatal("admin user not found after guest request")
+		}
+		assert.NotEqual(t, "attacker@example.test", fresh.UserEmail)
+		assert.NotEqual(t, "PWNED", fresh.DisplayName)
 	})
 	t.Run("BobChangeOwn", func(t *testing.T) {
 		app, router, conf := NewApiTest()
@@ -110,7 +178,7 @@ func TestUpdateUser(t *testing.T) {
 			DisplayName: "Bobo",
 		}
 
-		if userForm, err := json.Marshal(f); err != nil {
+		if userForm, err := json.Marshal(f); err != nil { //nolint:gosec // test marshals a form with a password field to build the request body
 			log.Fatal(err)
 		} else {
 			r := AuthenticatedRequestWithBody(app, "PUT", "/api/v1/users/uqxc08w3d0ej2283",
@@ -120,6 +188,8 @@ func TestUpdateUser(t *testing.T) {
 		}
 	})
 	t.Run("UserNotFound", func(t *testing.T) {
+		// Ownership is checked before lookup, so non-admin requests for
+		// unknown foreign UIDs return 403 without leaking account existence.
 		app, router, conf := NewApiTest()
 		conf.SetAuthMode(config.AuthModePasswd)
 		defer conf.SetAuthMode(config.AuthModePublic)
@@ -130,12 +200,12 @@ func TestUpdateUser(t *testing.T) {
 			DisplayName: "Bobby",
 		}
 
-		if userForm, err := json.Marshal(f); err != nil {
+		if userForm, err := json.Marshal(f); err != nil { //nolint:gosec // test marshals a form with a password field to build the request body
 			log.Fatal(err)
 		} else {
 			r := AuthenticatedRequestWithBody(app, "PUT", "/api/v1/users/uqxc08w3d0ej2555",
 				string(userForm), sessId)
-			assert.Equal(t, http.StatusNotFound, r.Code)
+			assert.Equal(t, http.StatusForbidden, r.Code)
 		}
 	})
 	t.Run("RequestTooLarge", func(t *testing.T) {
@@ -149,5 +219,312 @@ func TestUpdateUser(t *testing.T) {
 		r := AuthenticatedRequestWithBody(app, "PUT", "/api/v1/users/uqxetse3cy5eo9z2", body, sessId)
 
 		assert.Equal(t, http.StatusRequestEntityTooLarge, r.Code)
+	})
+}
+
+func TestUpdateUser_Guards(t *testing.T) {
+	t.Run("SelfRoleChangeForbidden", func(t *testing.T) {
+		app, router, conf := NewApiTest()
+		conf.SetAuthMode(config.AuthModePasswd)
+		defer conf.SetAuthMode(config.AuthModePublic)
+		UpdateUser(router)
+		sessId := AuthenticateUser(app, router, "alice", "Alice123!")
+		body, _ := json.Marshal(form.User{UserName: "alice", UserRole: "user"}) //nolint:gosec // test marshals a form with a password field to build the request body
+		r := AuthenticatedRequestWithBody(app, "PUT", "/api/v1/users/uqxetse3cy5eo9z2", string(body), sessId)
+		assert.Equal(t, http.StatusForbidden, r.Code)
+	})
+	t.Run("SelfSuperAdminDisableForbidden", func(t *testing.T) {
+		app, router, conf := NewApiTest()
+		conf.SetAuthMode(config.AuthModePasswd)
+		defer conf.SetAuthMode(config.AuthModePublic)
+		UpdateUser(router)
+		sessId := AuthenticateAdmin(app, router)
+		// Raw JSON so the explicit false survives marshaling (the form tags
+		// use omitempty, mirroring what the web UI sends).
+		body := `{"UserName":"admin","SuperAdmin":false}`
+		r := AuthenticatedRequestWithBody(app, "PUT", "/api/v1/users/"+entity.Admin.UserUID, body, sessId)
+		assert.Equal(t, http.StatusForbidden, r.Code)
+		assert.True(t, entity.FindUserByUID(entity.Admin.UserUID).SuperAdmin, "own super admin status must remain enabled")
+	})
+	t.Run("SelfWebLoginDisableForbidden", func(t *testing.T) {
+		app, router, conf := NewApiTest()
+		conf.SetAuthMode(config.AuthModePasswd)
+		defer conf.SetAuthMode(config.AuthModePublic)
+		UpdateUser(router)
+		sessId := AuthenticateAdmin(app, router)
+		body := `{"UserName":"admin","CanLogin":false}`
+		r := AuthenticatedRequestWithBody(app, "PUT", "/api/v1/users/"+entity.Admin.UserUID, body, sessId)
+		assert.Equal(t, http.StatusForbidden, r.Code)
+		assert.True(t, entity.FindUserByUID(entity.Admin.UserUID).CanLogin, "own web login must remain enabled")
+	})
+	t.Run("SelfProfileEditStillAllowed", func(t *testing.T) {
+		app, router, conf := NewApiTest()
+		conf.SetAuthMode(config.AuthModePasswd)
+		defer conf.SetAuthMode(config.AuthModePublic)
+		UpdateUser(router)
+		sessId := AuthenticateAdmin(app, router)
+		admin := entity.FindUserByUID(entity.Admin.UserUID)
+		body := `{"UserName":"admin","SuperAdmin":true,"CanLogin":true,"DisplayName":"` + admin.DisplayName + `"}`
+		r := AuthenticatedRequestWithBody(app, "PUT", "/api/v1/users/"+entity.Admin.UserUID, body, sessId)
+		assert.Equal(t, http.StatusOK, r.Code, "unchanged privilege flags must not block own-profile edits; body=%s", r.Body.String())
+	})
+	t.Run("MCPSetting", func(t *testing.T) {
+		// Revoking sessions and grants on a change is covered by the edition suites, where admins manage all accounts.
+		app, router, conf := NewApiTest()
+		conf.SetAuthMode(config.AuthModePasswd)
+		defer conf.SetAuthMode(config.AuthModePublic)
+		UpdateUser(router)
+		sessId := AuthenticateAdmin(app, router)
+		t.Cleanup(func() {
+			if m := entity.FindUserByUID(entity.Admin.UserUID); m != nil && m.MCP != 0 {
+				m.MCP = 0
+				_ = m.Save()
+			}
+		})
+
+		r := AuthenticatedRequestWithBody(app, "PUT", "/api/v1/users/"+entity.Admin.UserUID, `{"MCP":-1}`, sessId)
+		require.Equal(t, http.StatusOK, r.Code, r.Body.String())
+		assert.Equal(t, int64(-1), gjson.Get(r.Body.String(), "MCP").Int())
+		assert.Equal(t, -1, entity.FindUserByUID(entity.Admin.UserUID).MCP)
+
+		r = AuthenticatedRequestWithBody(app, "PUT", "/api/v1/users/"+entity.Admin.UserUID, `{"MCP":0}`, sessId)
+		require.Equal(t, http.StatusOK, r.Code, r.Body.String())
+		assert.Equal(t, 0, entity.FindUserByUID(entity.Admin.UserUID).MCP)
+	})
+	t.Run("SystemAccountForbidden", func(t *testing.T) {
+		app, router, conf := NewApiTest()
+		conf.SetAuthMode(config.AuthModePasswd)
+		defer conf.SetAuthMode(config.AuthModePublic)
+		UpdateUser(router)
+		sessId := AuthenticateUser(app, router, "alice", "Alice123!")
+		body, _ := json.Marshal(form.User{DisplayName: "Hacked"}) //nolint:gosec // test marshals a form with a password field to build the request body
+		r := AuthenticatedRequestWithBody(app, "PUT", "/api/v1/users/"+entity.UnknownUser.UserUID, string(body), sessId)
+		assert.Equal(t, http.StatusForbidden, r.Code)
+	})
+	// The super-admin-protection guard only takes effect in full-access editions where
+	// admins manage all accounts; CE grants own-account management only, so it is
+	// unreachable here and covered by the edition suites with cross-account management.
+}
+
+func TestUpdateUser_ClusterJWT(t *testing.T) {
+	// A Portal cluster JWT (GrantJwtBearer + users-manage scope) is a user-less
+	// service principal that UpdateUser authorizes like an admin so the Portal can
+	// sync instance user state: it bypasses the per-user owner check and applies
+	// the privilege-level fields (login, WebDAV, role) the form carries.
+	t.Run("ManagesAnotherUser", func(t *testing.T) {
+		fx := newPortalJWTFixture(t, "users-update-manage")
+		fx.nodeConf.Options().JWTScope = "cluster users"
+		get.SetConfig(fx.nodeConf)
+
+		username := "cluster-sync-target"
+		require.NoError(t, entity.AddUser(form.User{
+			UserName: username,
+			UserRole: acl.RoleGuest.String(),
+			Password: "ClusterSync123!",
+			CanLogin: false,
+			WebDAV:   false,
+		}))
+		target := entity.FindUserByName(username)
+		require.NotNil(t, target)
+		require.False(t, target.CanLogin, "precondition: target login is disabled")
+		require.False(t, target.WebDAV, "precondition: target WebDAV is disabled")
+		t.Cleanup(func() {
+			if u := entity.FindUserByName(username); u != nil {
+				_ = u.Delete()
+			}
+		})
+
+		app, router, _ := NewApiTest()
+		UpdateUser(router)
+
+		spec := fx.defaultClaimsSpec()
+		spec.Scope = []string{"cluster", "users"}
+		token := fx.issue(t, spec)
+
+		body, err := json.Marshal(form.User{ //nolint:gosec // test marshals a form with a password field to build the request body
+			UserName:    username,
+			DisplayName: "Synced By Portal",
+			CanLogin:    true,
+			WebDAV:      true,
+		})
+		require.NoError(t, err)
+
+		r := AuthenticatedRequestWithBody(app, "PUT", "/api/v1/users/"+target.UserUID, string(body), token)
+		assert.Equal(t, http.StatusOK, r.Code)
+
+		updated := entity.FindUserByUID(target.UserUID)
+		require.NotNil(t, updated)
+		assert.True(t, updated.CanLogin, "cluster JWT must apply the privilege-level CanLogin change")
+		assert.True(t, updated.WebDAV, "cluster JWT must apply the privilege-level WebDAV change")
+		assert.Equal(t, "Synced By Portal", updated.DisplayName)
+		assert.Equal(t, acl.RoleGuest.String(), updated.UserRole, "role stays unchanged when the form omits it")
+	})
+	t.Run("WithoutUsersScopeDenied", func(t *testing.T) {
+		fx := newPortalJWTFixture(t, "users-update-deny")
+		fx.nodeConf.Options().JWTScope = "cluster users"
+		get.SetConfig(fx.nodeConf)
+
+		username := "cluster-sync-denied"
+		require.NoError(t, entity.AddUser(form.User{
+			UserName: username,
+			UserRole: acl.RoleGuest.String(),
+			Password: "ClusterSync123!",
+			CanLogin: false,
+		}))
+		target := entity.FindUserByName(username)
+		require.NotNil(t, target)
+		t.Cleanup(func() {
+			if u := entity.FindUserByName(username); u != nil {
+				_ = u.Delete()
+			}
+		})
+
+		app, router, _ := NewApiTest()
+		UpdateUser(router)
+
+		spec := fx.defaultClaimsSpec()
+		spec.Scope = []string{"cluster"} // no users scope → not authorized to manage users
+		token := fx.issue(t, spec)
+
+		body, _ := json.Marshal(form.User{UserName: username, CanLogin: true}) //nolint:gosec // test marshals a form with a password field to build the request body
+		r := AuthenticatedRequestWithBody(app, "PUT", "/api/v1/users/"+target.UserUID, string(body), token)
+		assert.NotEqual(t, http.StatusOK, r.Code, "a JWT without the users scope must not manage users")
+
+		unchanged := entity.FindUserByUID(target.UserUID)
+		require.NotNil(t, unchanged)
+		assert.False(t, unchanged.CanLogin, "a denied request must not enable login")
+	})
+}
+
+func TestUpdateUserAuditFields(t *testing.T) {
+	// The segment list carries no value, so nothing but the argument order decides which field a
+	// value lands in, and a transposition compiles and renders a plausible line.
+	orig := event.AuditLog
+	logger, hook := test.NewNullLogger()
+	logger.SetLevel(logrus.TraceLevel)
+	event.AuditLog = logger
+
+	t.Cleanup(func() { event.AuditLog = orig })
+
+	app, router, conf := NewApiTest()
+	conf.SetAuthMode(config.AuthModePasswd)
+	defer conf.SetAuthMode(config.AuthModePublic)
+	UpdateUser(router)
+	sessId := AuthenticateUser(app, router, "alice", "Alice123!")
+	body, _ := json.Marshal(form.User{UserName: "alice", UserRole: "user"}) //nolint:gosec // test marshals a form with a password field to build the request body
+
+	hook.Reset()
+
+	r := AuthenticatedRequestWithBody(app, "PUT", "/api/v1/users/uqxetse3cy5eo9z2", string(body), sessId)
+	require.Equal(t, http.StatusForbidden, r.Code)
+
+	var fields []string
+
+	for _, entry := range hook.AllEntries() {
+		if strings.Contains(entry.Message, "update own role") {
+			fields = strings.Split(entry.Message, event.MessageSep)
+		}
+	}
+
+	require.Len(t, fields, 6)
+	assert.True(t, strings.HasPrefix(fields[1], "session sess"), fields[1])
+	assert.Equal(t, "'alice'", fields[3])
+	assert.Equal(t, status.Denied, fields[5])
+}
+
+func TestUpdateUserSharedEmail(t *testing.T) {
+	audit := captureAuditLog(t)
+	app, router, conf := NewApiTest()
+	conf.SetAuthMode(config.AuthModePasswd)
+	defer conf.SetAuthMode(config.AuthModePublic)
+	UpdateUser(router)
+
+	alice := entity.FindUserByName("alice")
+	require.NotNil(t, alice)
+	other := newSharedEmailUser(t, "update-shared-email", "update-shared-email@example.com", false)
+	t.Cleanup(func() {
+		assert.NoError(t, entity.UnscopedDb().Model(&entity.User{}).Where("user_uid = ?", alice.UserUID).Updates(entity.Values{
+			"user_email":   alice.UserEmail,
+			"verified_at":  alice.VerifiedAt,
+			"verify_token": alice.VerifyToken,
+		}).Error)
+	})
+
+	sessId := AuthenticateUser(app, router, "alice", "Alice123!")
+
+	// reported returns whether the audit log reports the email address of alice as shared.
+	reported := func() (found bool) {
+		for _, entry := range audit.AllEntries() {
+			if strings.Contains(entry.Message, "'alice' › email is also assigned to 1 other account") {
+				found = entry.Level == logrus.InfoLevel
+			}
+		}
+
+		return found
+	}
+
+	body, _ := json.Marshal(form.User{UserName: "alice", UserEmail: other.UserEmail, UserRole: alice.UserRole}) //nolint:gosec // test marshals a form with a password field to build the request body
+	audit.Reset()
+
+	r := AuthenticatedRequestWithBody(app, "PUT", "/api/v1/users/"+alice.UserUID, string(body), sessId)
+	require.Equal(t, http.StatusOK, r.Code, r.Body.String())
+	assert.Equal(t, other.UserEmail, entity.FindUserByUID(alice.UserUID).UserEmail)
+	assert.True(t, reported(), "an email address another account holds is reported")
+
+	// Saving the account again without changing the address is not reported.
+	audit.Reset()
+
+	r = AuthenticatedRequestWithBody(app, "PUT", "/api/v1/users/"+alice.UserUID, string(body), sessId)
+	require.Equal(t, http.StatusOK, r.Code, r.Body.String())
+	assert.False(t, reported(), "an unchanged address is not reported again")
+}
+
+// TestUpdateUser_DetailsSaveFailed checks that a details change that was not stored is reported as a failure.
+func TestUpdateUser_DetailsSaveFailed(t *testing.T) {
+	app, router, conf := NewApiTest()
+	conf.SetAuthMode(config.AuthModePasswd)
+	defer conf.SetAuthMode(config.AuthModePublic)
+	UpdateUser(router)
+	sessId := AuthenticateUser(app, router, "alice", "Alice123!")
+
+	const aliceUid = "uqxetse3cy5eo9z2"
+	reqUrl := "/api/v1/users/" + aliceUid
+	location := entity.FindUserByUID(aliceUid).Details().UserLocation
+	displayName := entity.FindUserByUID(aliceUid).DisplayName
+
+	t.Cleanup(func() {
+		assert.NoError(t, entity.UnscopedDb().Model(&entity.UserDetails{}).Where("user_uid = ?", aliceUid).
+			UpdateColumn("user_location", location).Error)
+		assert.NoError(t, entity.UnscopedDb().Model(&entity.User{}).Where("user_uid = ?", aliceUid).
+			UpdateColumn("display_name", displayName).Error)
+		entity.FlushUserSessionCache(aliceUid)
+	})
+
+	t.Run("Success", func(t *testing.T) {
+		r := AuthenticatedRequestWithBody(app, "PUT", reqUrl, `{"Details":{"Location":"Berlin\u0000"}}`, sessId)
+		assert.Equal(t, http.StatusOK, r.Code)
+		assert.Equal(t, "Berlin", entity.FindUserByUID(aliceUid).Details().UserLocation)
+	})
+	t.Run("Failed", func(t *testing.T) {
+		name := "test:fail_update_user_details"
+		fail := func(db *gorm.DB) {
+			if db.Statement.Table == (entity.UserDetails{}).TableName() {
+				_ = db.AddError(errors.New("details write failed"))
+			}
+		}
+
+		require.NoError(t, entity.Db().Callback().Create().Before("gorm:create").Register(name, fail))
+		require.NoError(t, entity.Db().Callback().Update().Before("gorm:update").Register(name, fail))
+		t.Cleanup(func() {
+			_ = entity.Db().Callback().Create().Remove(name)
+			_ = entity.Db().Callback().Update().Remove(name)
+		})
+
+		before := entity.FindUserByUID(aliceUid)
+		r := AuthenticatedRequestWithBody(app, "PUT", reqUrl, `{"DisplayName":"Not Stored","Details":{"Location":"Hamburg"}}`, sessId)
+		assert.Equal(t, http.StatusInternalServerError, r.Code)
+		after := entity.FindUserByUID(aliceUid)
+		assert.Equal(t, before.Details().UserLocation, after.Details().UserLocation)
+		assert.Equal(t, before.DisplayName, after.DisplayName)
 	})
 }

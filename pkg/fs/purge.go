@@ -5,21 +5,57 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
-// PurgeTestDbFiles removes temporary SQLite-related test files in dir.
-//
-// Patterns (case-insensitive), aligned with `make reset-sqlite`:
-//   - '.*.db'          (hidden SQLite database files)
-//   - '.*.db-journal'  (SQLite journal files)
-//   - '.test.*'        (generic hidden test artifacts)
-//
-// If recursive is true, it traverses dir recursively. If false, it only checks
-// files directly within dir so TestMain in a parent package won't affect
-// sub-packages that may run in parallel.
-//
-// Errors from removing individual files are ignored; this is a best-effort
-// cleanup helper for tests and local tooling.
+// PurgeExpired removes regular files in dir that end with ext and are older than maxAge, and reports how
+// many were removed, how many matching files are left on disk (including any that could not be deleted),
+// and how many deletions failed. It is not recursive, an empty ext matches every regular file, and a
+// maxAge of zero or less or an unreadable dir removes nothing and reports zeros.
+func PurgeExpired(dir, ext string, maxAge time.Duration) (removed, remaining, failed int) {
+	if dir == "" || maxAge <= 0 {
+		return 0, 0, 0
+	}
+
+	entries, err := os.ReadDir(dir)
+
+	if err != nil {
+		return 0, 0, 0
+	}
+
+	ext = strings.ToLower(ext)
+	cutoff := time.Now().Add(-maxAge)
+
+	for _, entry := range entries {
+		if entry.IsDir() || ext != "" && !strings.HasSuffix(strings.ToLower(entry.Name()), ext) {
+			continue
+		}
+
+		info, infoErr := entry.Info()
+
+		if infoErr != nil || !info.Mode().IsRegular() {
+			continue
+		}
+
+		if info.ModTime().After(cutoff) {
+			remaining++
+			continue
+		}
+
+		if os.Remove(filepath.Join(dir, entry.Name())) != nil {
+			failed++
+			remaining++
+		} else {
+			removed++
+		}
+	}
+
+	return removed, remaining, failed
+}
+
+// PurgeTestDbFiles removes hidden SQLite test artifacts (`.*.db`,
+// `.*.db-journal`, `.test.*`) from dir, optionally recursively. Aligned with
+// `make reset-sqlite`. Removal errors are ignored — best-effort cleanup.
 func PurgeTestDbFiles(dir string, recursive bool) {
 	if dir == "" {
 		return

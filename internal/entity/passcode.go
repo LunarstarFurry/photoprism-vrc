@@ -2,6 +2,7 @@ package entity
 
 import (
 	"bytes"
+	"crypto/subtle"
 	"errors"
 	"fmt"
 	"image"
@@ -18,8 +19,8 @@ import (
 
 // Passcode represents a two-factor authentication key.
 type Passcode struct {
-	UID          string     `gorm:"type:VARBINARY(255);primary_key;" json:"UID"`
-	KeyType      string     `gorm:"size:64;default:'';primary_key;" json:"Type" yaml:"Type"`
+	UID          string     `gorm:"type:bytes;size:255;primaryKey;" json:"UID"`
+	KeyType      string     `gorm:"size:64;default:'';primaryKey;" json:"Type" yaml:"Type"`
 	KeyURL       string     `gorm:"size:2048;default:'';column:key_url;" json:"-" yaml:"-"`
 	key          *otp.Key   `gorm:"-" yaml:"-"`
 	RecoveryCode string     `gorm:"size:255;default:'';" json:"-" yaml:"-"`
@@ -254,8 +255,9 @@ func (m *Passcode) Valid(code string) (valid bool, recovery bool, err error) {
 		return false, false, authn.ErrInvalidPasscodeKey
 	}
 
-	// Check if recovery code has been used.
-	if m.RecoveryCode == code {
+	// Check if recovery code has been used, comparing in constant time so the
+	// stored secret does not leak through response timing.
+	if m.RecoveryCode != "" && subtle.ConstantTimeCompare([]byte(m.RecoveryCode), []byte(code)) == 1 {
 		return true, true, nil
 	}
 

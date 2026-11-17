@@ -3,11 +3,11 @@ package commands
 import (
 	"fmt"
 
-	"github.com/manifoldco/promptui"
 	"github.com/urfave/cli/v2"
 
 	"github.com/photoprism/photoprism/internal/config"
 	"github.com/photoprism/photoprism/internal/entity"
+	"github.com/photoprism/photoprism/pkg/authn"
 	"github.com/photoprism/photoprism/pkg/clean"
 	"github.com/photoprism/photoprism/pkg/rnd"
 )
@@ -20,7 +20,7 @@ var UsersModCommand = &cli.Command{
 	Flags: append(UserFlags, &cli.BoolFlag{
 		Name:  "disable-2fa",
 		Usage: UserDisable2FA,
-	}),
+	}, UserRestoreFlag(), UserUsernameFlag()),
 	Action: usersModAction,
 }
 
@@ -33,7 +33,13 @@ func usersModAction(ctx *cli.Context) error {
 
 		// Name or UID provided?
 		if id == "" {
-			return cli.ShowSubcommandHelp(ctx)
+			return ShowUsageError(ctx)
+		}
+
+		// Reject flags placed after the username; the stdlib flag parser
+		// would silently drop them and report "user updated" with no changes.
+		if err := RejectTrailingFlags(ctx); err != nil {
+			return err
 		}
 
 		// Find user record.
@@ -42,7 +48,7 @@ func usersModAction(ctx *cli.Context) error {
 		if rnd.IsUID(id, entity.UserUID) {
 			m = entity.FindUserByUID(id)
 		} else {
-			m = entity.FindUserByName(id)
+			m = entity.FindUserByExactName(id)
 		}
 
 		if m == nil {
@@ -50,22 +56,34 @@ func usersModAction(ctx *cli.Context) error {
 		}
 
 		// Check if account exists but is deleted.
+		restored := false
+
 		if m.IsDeleted() {
-			prompt := promptui.Prompt{
-				Label:     fmt.Sprintf("Restore user %s?", m.String()),
-				IsConfirm: true,
+			if err := m.CheckRestore(); err != nil {
+				return err
+			} else if restore, err := ConfirmRestore(ctx.Bool("restore"), fmt.Sprintf("Restore user %s", m.String()), "--restore"); err != nil {
+				return err
+			} else if !restore {
+				return authn.ErrUserAlreadyExists
 			}
 
-			if _, err := prompt.Run(); err != nil {
-				return fmt.Errorf("user already exists")
-			}
-
-			m.DeletedAt = nil
+			m.DeletedAt = entity.DeletedAt{}
+			restored = true
 			log.Infof("user %s will be restored", m.String())
+		} else if ctx.Bool("restore") {
+			log.Infof("user %s is not deleted, nothing to restore", m.String())
+		}
+
+		// Set the new username before the other values, so that a refused name changes nothing.
+		previousEmail := m.UserEmail
+		oldName, err := PrepareUserRename(ctx, m)
+
+		if err != nil {
+			return err
 		}
 
 		// Set values.
-		if err := m.SetValuesFromCli(ctx); err != nil {
+		if err = m.SetValuesFromCli(ctx); err != nil {
 			return err
 		}
 
@@ -81,11 +99,13 @@ func usersModAction(ctx *cli.Context) error {
 		}
 
 		// Save values.
-		if err := m.Save(); err != nil {
+		if err = SaveUserRename(ctx, conf, m, oldName, false); err != nil {
 			return err
 		}
 
-		log.Infof("user %s has been updated", m.String())
+		if restored || m.UserEmail != previousEmail {
+			AuditSharedEmail(m, restored)
+		}
 
 		return nil
 	})

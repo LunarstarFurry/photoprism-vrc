@@ -1,13 +1,16 @@
 package photoprism
 
 import (
+	"image"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/photoprism/photoprism/internal/config"
+	"github.com/photoprism/photoprism/internal/meta"
 	"github.com/photoprism/photoprism/internal/thumb"
 	"github.com/photoprism/photoprism/pkg/fs"
 )
@@ -322,4 +325,155 @@ func TestMediaFile_ChangeOrientation(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
+}
+
+func TestMediaFile_configBounds(t *testing.T) {
+	c := config.TestConfig()
+
+	t.Run("Image", func(t *testing.T) {
+		m, err := NewMediaFile(filepath.Join(c.SamplesPath(), "elephants.jpg"))
+
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		b := m.configBounds()
+		cfg, cfgErr := m.DecodeConfig()
+
+		if cfgErr != nil {
+			t.Fatal(cfgErr)
+		}
+
+		assert.Equal(t, cfg.Width, b.Max.X)
+		assert.Equal(t, cfg.Height, b.Max.Y)
+		assert.False(t, b.Empty())
+	})
+	t.Run("NotAnImage", func(t *testing.T) {
+		m, err := NewMediaFile(filepath.Join(c.SamplesPath(), "blue-go-video.mp4"))
+
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		assert.True(t, m.configBounds().Empty())
+	})
+}
+
+// TestMediaFile_GenerateAvatarThumbnails covers that avatar thumbnails are written without
+// consulting the file metadata, which an avatar does not need.
+func TestMediaFile_GenerateAvatarThumbnails(t *testing.T) {
+	c := config.TestConfig()
+
+	thumbsPath, err := filepath.Abs("./.test_mediafile_avatarthumbnails")
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	defer func() {
+		_ = os.RemoveAll(thumbsPath)
+	}()
+
+	if err = c.CreateDirectories(); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("Success", func(t *testing.T) {
+		m, mErr := NewMediaFile(filepath.Join(c.SamplesPath(), "elephants.jpg"))
+
+		if mErr != nil {
+			t.Fatal(mErr)
+		}
+
+		if genErr := m.GenerateAvatarThumbnails(thumbsPath, true); genErr != nil {
+			t.Fatal(genErr)
+		}
+
+		thumbFilename, fErr := thumb.FileName(m.Hash(), thumbsPath, thumb.Sizes[thumb.Tile50].Width, thumb.Sizes[thumb.Tile50].Height, thumb.Sizes[thumb.Tile50].Options...)
+
+		if fErr != nil {
+			t.Fatal(fErr)
+		}
+
+		assert.FileExists(t, thumbFilename)
+		// The point of the avatar path: the file metadata is never read.
+		assert.Equal(t, meta.Data{}, m.metaData)
+	})
+	t.Run("RegularPathReadsMetadata", func(t *testing.T) {
+		m, mErr := NewMediaFile(filepath.Join(c.SamplesPath(), "elephants.jpg"))
+
+		if mErr != nil {
+			t.Fatal(mErr)
+		}
+
+		if genErr := m.GenerateThumbnails(thumbsPath, true); genErr != nil {
+			t.Fatal(genErr)
+		}
+
+		assert.NotEqual(t, meta.Data{}, m.metaData)
+	})
+	t.Run("CachedRunReadsNothing", func(t *testing.T) {
+		m, mErr := NewMediaFile(filepath.Join(c.SamplesPath(), "elephants.jpg"))
+
+		if mErr != nil {
+			t.Fatal(mErr)
+		}
+
+		// Every size is already cached by the subtests above, so no size needs generating
+		// and the source bounds are never resolved.
+		if genErr := m.GenerateThumbnails(thumbsPath, false); genErr != nil {
+			t.Fatal(genErr)
+		}
+
+		assert.Equal(t, meta.Data{}, m.metaData)
+	})
+}
+
+// TestMediaFileEagerLabelThumbnails verifies UI tiles and on-demand side crops.
+func TestMediaFileEagerLabelThumbnails(t *testing.T) {
+	previous, library := Config(), thumb.Library
+	cfg := config.NewMinimalTestConfig(t.TempDir())
+	require.NoError(t, cfg.CreateDirectories())
+	SetConfig(cfg)
+	t.Cleanup(func() { SetConfig(previous); thumb.Library = library })
+	for _, backend := range []thumb.Lib{thumb.LibVips, thumb.LibAuto} {
+		t.Run(string(backend), func(t *testing.T) {
+			thumb.Library = backend
+			source := filepath.Join(t.TempDir(), "source.png")
+			require.NoError(t, thumb.Save(image.NewNRGBA(image.Rect(0, 0, 600, 400)), source))
+			m, err := NewMediaFile(source)
+			require.NoError(t, err)
+			cache := t.TempDir()
+			require.NoError(t, m.GenerateThumbnails(cache, false))
+			tile, err := thumb.SizeTile224.FileName(m.Hash(), cache)
+			require.NoError(t, err)
+			require.FileExists(t, tile)
+			cfg, _, err := fs.DecodeImageConfigFile(tile)
+			require.NoError(t, err)
+			assert.Equal(t, 224, cfg.Width)
+			for _, name := range []thumb.Name{thumb.Left224, thumb.Right224} {
+				size, ok := thumb.Sizes[name]
+				require.True(t, ok)
+				path, err := size.FileName(m.Hash(), cache)
+				require.NoError(t, err)
+				require.NoFileExists(t, path, "side crop must not be generated eagerly")
+				requested, err := m.Thumbnail(cache, name)
+				require.NoError(t, err)
+				require.Equal(t, path, requested)
+				require.FileExists(t, path)
+				decoded, _, err := fs.DecodeImageConfigFile(path)
+				require.NoError(t, err)
+				assert.Equal(t, 224, decoded.Width)
+				assert.Equal(t, 224, decoded.Height)
+				before, err := os.ReadFile(path) //nolint:gosec // Read the isolated thumbnail fixture.
+				require.NoError(t, err)
+				before = append(before, []byte("existing side cache")...)
+				require.NoError(t, os.WriteFile(path, before, fs.ModeFile)) //nolint:gosec // Mark the isolated side-cache fixture.
+				require.NoError(t, m.GenerateThumbnails(cache, true))
+				after, err := os.ReadFile(path) //nolint:gosec // Read the isolated thumbnail fixture.
+				require.NoError(t, err)
+				assert.Equal(t, before, after, "existing side crops remain untouched")
+			}
+		})
+	}
 }

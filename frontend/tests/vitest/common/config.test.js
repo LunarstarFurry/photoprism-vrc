@@ -1,8 +1,9 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import "../fixtures";
 import Config from "common/config";
 import StorageShim from "node-storage-shim";
 import * as themes from "options/themes";
+import * as options from "options/options";
 
 const defaultConfig = new Config(new StorageShim(), window.__CONFIG__);
 
@@ -77,6 +78,19 @@ describe("common/config", () => {
     expect(cfg.values.settings.ui.language).toBe("en");
   });
 
+  it("should apply the server-configured default locale", () => {
+    const original = options.DefaultLocale;
+
+    try {
+      const cfg = new Config(new StorageShim(), { siteTitle: "Test" });
+      expect(options.DefaultLocale).toBe(original);
+      cfg.setValues({ defaultLocale: "de" });
+      expect(options.DefaultLocale).toBe("de");
+    } finally {
+      options.SetDefaultLocale(original);
+    }
+  });
+
   it("should test constructor with empty values", () => {
     const storage = new StorageShim();
     const values = {};
@@ -93,12 +107,12 @@ describe("common/config", () => {
     const values = {
       siteTitle: "Foo",
       baseUri: "/portal",
-      frontendUri: "/portal/admin/",
+      frontendUri: "/portal/",
     };
 
     const config = new Config(storage, values);
-    expect(config.frontendUri).toBe("/portal/admin");
-    expect(config.loginUri).toBe("/portal/admin/login");
+    expect(config.frontendUri).toBe("/portal");
+    expect(config.loginUri).toBe("/portal/login");
   });
 
   it("uses base uri fallback when frontend uri is missing", () => {
@@ -111,6 +125,88 @@ describe("common/config", () => {
     const config = new Config(storage, values);
     expect(config.frontendUri).toBe("/portal/library");
     expect(config.loginUri).toBe("/portal/library/login");
+  });
+
+  it("themeAssetUri resolves a bare basename into the theme dir", () => {
+    const config = new Config(new StorageShim(), { siteTitle: "Foo", baseUri: "/i/pro-1" });
+    expect(config.themeAssetUri("logo.svg")).toBe("/i/pro-1/_theme/logo.svg");
+    expect(config.themeAssetUri("icons/logo.svg")).toBe("/i/pro-1/_theme/icons/logo.svg");
+  });
+
+  it("themeAssetUri resolves a bare basename without a base uri", () => {
+    const config = new Config(new StorageShim(), { siteTitle: "Foo" });
+    expect(config.themeAssetUri("logo.svg")).toBe("/_theme/logo.svg");
+  });
+
+  it("themeAssetUri still prefixes a root-relative theme path with the base uri", () => {
+    const config = new Config(new StorageShim(), { siteTitle: "Foo", baseUri: "/i/pro-1" });
+    expect(config.themeAssetUri("/_theme/logo.svg")).toBe("/i/pro-1/_theme/logo.svg");
+  });
+
+  it("themeAssetUri returns the path unchanged without a base uri", () => {
+    const config = new Config(new StorageShim(), { siteTitle: "Foo" });
+    expect(config.themeAssetUri("/_theme/logo.svg")).toBe("/_theme/logo.svg");
+  });
+
+  it("themeAssetUri leaves absolute, protocol-relative, data, already-prefixed, and empty paths alone", () => {
+    const config = new Config(new StorageShim(), { siteTitle: "Foo", baseUri: "/i/pro-1" });
+    expect(config.themeAssetUri("https://cdn.example.com/logo.svg")).toBe("https://cdn.example.com/logo.svg");
+    expect(config.themeAssetUri("//cdn.example.com/logo.svg")).toBe("//cdn.example.com/logo.svg");
+    expect(config.themeAssetUri("data:image/svg+xml;base64,AAAA")).toBe("data:image/svg+xml;base64,AAAA");
+    expect(config.themeAssetUri("/i/pro-1/_theme/logo.svg")).toBe("/i/pro-1/_theme/logo.svg");
+    expect(config.themeAssetUri("")).toBe("");
+  });
+
+  it("getIcon resolves a theme-provided basename icon against the base uri", () => {
+    const config = new Config(new StorageShim(), {
+      siteTitle: "Foo",
+      baseUri: "/i/pro-1",
+      settings: { ui: { theme: "branded" } },
+    });
+    themes.Set("branded", { name: "branded", title: "Branded", colors: {}, variables: { icon: "logo.svg" } });
+    config.setTheme("branded");
+    expect(config.getIcon()).toBe("/i/pro-1/_theme/logo.svg");
+  });
+
+  it("getIcon still resolves a legacy /_theme path-style icon", () => {
+    const config = new Config(new StorageShim(), {
+      siteTitle: "Foo",
+      baseUri: "/i/pro-1",
+      settings: { ui: { theme: "legacy" } },
+    });
+    themes.Set("legacy", { name: "legacy", title: "Legacy", colors: {}, variables: { icon: "/_theme/logo.svg" } });
+    config.setTheme("legacy");
+    expect(config.getIcon()).toBe("/i/pro-1/_theme/logo.svg");
+  });
+
+  it("getIcon resolves a built-in appIcon name against the static uri", () => {
+    const config = new Config(new StorageShim(), { siteTitle: "Foo", baseUri: "/i/pro-1", appIcon: "bloom" });
+    expect(config.getIcon()).toBe("/i/pro-1/static/icons/bloom.svg");
+  });
+
+  it("getIcon resolves each selectable app-icon variant to its static svg", () => {
+    ["app", "crisp", "mint", "bold", "square", "bloom", "flower", "ring", "glass", "neon", "rainbow"].forEach((name) => {
+      const config = new Config(new StorageShim(), { siteTitle: "Foo", appIcon: name });
+      expect(config.getIcon()).toBe(`/static/icons/${name}.svg`);
+    });
+  });
+
+  it("getIcon falls back to the logo for an empty, logo, or unsafe app-icon name", () => {
+    expect(new Config(new StorageShim(), { siteTitle: "Foo", appIcon: "logo" }).getIcon()).toBe("/static/icons/logo.svg");
+    expect(new Config(new StorageShim(), { siteTitle: "Foo", appIcon: "../secret" }).getIcon()).toBe("/static/icons/logo.svg");
+    expect(new Config(new StorageShim(), { siteTitle: "Foo" }).getIcon()).toBe("/static/icons/logo.svg");
+  });
+
+  it("getIcon prefers a theme-provided icon over the appIcon setting", () => {
+    const config = new Config(new StorageShim(), {
+      siteTitle: "Foo",
+      baseUri: "/i/pro-1",
+      appIcon: "bloom",
+      settings: { ui: { theme: "branded-icon" } },
+    });
+    themes.Set("branded-icon", { name: "branded-icon", title: "Branded", colors: {}, variables: { icon: "logo.svg" } });
+    config.setTheme("branded-icon");
+    expect(config.getIcon()).toBe("/i/pro-1/_theme/logo.svg");
   });
 
   it("should store values", () => {
@@ -188,6 +284,25 @@ describe("common/config", () => {
   it("should return feature", () => {
     expect(defaultConfig.feature("places")).toBe(true);
     expect(defaultConfig.feature("download")).toBe(true);
+  });
+
+  it("featAppPasswords mirrors the appPasswords feature flag", () => {
+    const cfg = createTestConfig();
+    const settings = JSON.parse(JSON.stringify(cfg.getSettings()));
+    settings.features = { ...settings.features, appPasswords: true };
+    cfg.set("settings", settings);
+    expect(cfg.featAppPasswords()).toBe(true);
+    settings.features = { ...settings.features, appPasswords: false };
+    cfg.set("settings", settings);
+    expect(cfg.featAppPasswords()).toBe(false);
+  });
+
+  it("featOAuthApps follows the oauthApps value", () => {
+    const cfg = createTestConfig();
+    cfg.set("oauthApps", true);
+    expect(cfg.featOAuthApps()).toBe(true);
+    cfg.set("oauthApps", false);
+    expect(cfg.featOAuthApps()).toBe(false);
   });
 
   it("returns albums when library access is restricted", () => {
@@ -270,58 +385,117 @@ describe("common/config", () => {
     expect(cfg.getDefaultRoute()).toBe("browse");
   });
 
-  it("should test get name", () => {
-    const result = defaultConfig.getPerson("a");
-    expect(result).toBeNull();
-
-    const result2 = defaultConfig.getPerson("Andrea Sander");
-    expect(result2.UID).toBe("jr0jgyx2viicdnf7");
-
-    const result3 = defaultConfig.getPerson("Otto Sander");
-    expect(result3.UID).toBe("jr0jgyx2viicdn88");
-  });
-
-  it("should create, update and delete people", () => {
-    const storage = new StorageShim();
-    const values = { Debug: true, siteTitle: "Foo", country: "Germany", city: "Hamburg" };
-
-    const cfg = new Config(storage, values);
-    cfg.onPeople("people.created", { entities: {} });
-    expect(cfg.values.people).toEqual([]);
-    cfg.onPeople("people.created", {
-      entities: [
-        {
-          UID: "abc123",
-          Name: "Test Name",
-          Keywords: ["Test", "Name"],
-        },
-      ],
-    });
-    expect(cfg.values.people[0].Name).toBe("Test Name");
-    cfg.onPeople("people.updated", {
-      entities: [
-        {
-          UID: "abc123",
-          Name: "New Name",
-          Keywords: ["New", "Name"],
-        },
-      ],
-    });
-    expect(cfg.values.people[0].Name).toBe("New Name");
-    cfg.onPeople("people.deleted", {
-      entities: ["abc123"],
-    });
-    expect(cfg.values.people).toEqual([]);
-  });
-
   it("should return language locale", () => {
     const cfg = new Config(new StorageShim(), Object.assign({}, window.__CONFIG__));
     expect(cfg.getLanguageLocale()).toBe("en");
   });
 
+  describe("getLanguageLocale", () => {
+    const localeConfig = (mode, language) => new Config(new StorageShim(), { siteTitle: "Test", mode, settings: { ui: { language } } });
+    const originalUrl = window.location.href;
+
+    afterEach(() => {
+      vi.restoreAllMocks();
+      window.history.replaceState({}, "", originalUrl);
+    });
+
+    it("should use and mirror the browser language", () => {
+      vi.spyOn(navigator, "language", "get").mockReturnValue("en-US");
+      const cfg = localeConfig("public", "de");
+      expect(cfg.getLanguageLocale()).toBe("en");
+      expect(cfg.values.settings.ui.language).toBe("en");
+      expect(cfg.storage.getItem(cfg.storageKey + ".locale")).toBeFalsy();
+    });
+    it("should use and mirror the stored locale", () => {
+      vi.spyOn(navigator, "language", "get").mockReturnValue("en-US");
+      const cfg = localeConfig("public", "de");
+      cfg.storage.setItem(cfg.storageKey + ".locale", "fr");
+      expect(cfg.getLanguageLocale()).toBe("fr");
+      expect(cfg.values.settings.ui.language).toBe("fr");
+    });
+    it("should mirror the resolved browser locale", () => {
+      vi.spyOn(navigator, "language", "get").mockReturnValue("de-AT");
+      const cfg = localeConfig("public", "en");
+      expect(cfg.getLanguageLocale()).toBe("de");
+      expect(cfg.values.settings.ui.language).toBe("de");
+    });
+    it("should use, store, and mirror the query locale", () => {
+      vi.spyOn(navigator, "language", "get").mockReturnValue("en-US");
+      window.history.replaceState({}, "", "?locale=fr");
+      const cfg = localeConfig("public", "de");
+      expect(cfg.getLanguageLocale()).toBe("fr");
+      expect(cfg.values.settings.ui.language).toBe("fr");
+      expect(cfg.storage.getItem(cfg.storageKey + ".locale")).toBe("fr");
+    });
+    it("should keep the user language when signed in", () => {
+      vi.spyOn(navigator, "language", "get").mockReturnValue("en-US");
+      const cfg = localeConfig("user", "de");
+      cfg.storage.setItem(cfg.storageKey + ".locale", "fr");
+      expect(cfg.getLanguageLocale()).toBe("de");
+      expect(cfg.values.settings.ui.language).toBe("de");
+    });
+    it("should apply the query locale when signed in", () => {
+      vi.spyOn(navigator, "language", "get").mockReturnValue("en-US");
+      window.history.replaceState({}, "", "?locale=fr");
+      const cfg = localeConfig("user", "de");
+      expect(cfg.getLanguageLocale()).toBe("fr");
+      expect(cfg.values.settings.ui.language).toBe("fr");
+      expect(cfg.storage.getItem(cfg.storageKey + ".locale")).toBe("fr");
+    });
+    it("should not change the user language when signed in", () => {
+      vi.spyOn(navigator, "language", "get").mockReturnValue("en-US");
+      const cfg = localeConfig("user", "de-AT");
+      expect(cfg.getLanguageLocale()).toBe("de");
+      expect(cfg.values.settings.ui.language).toBe("de-AT");
+    });
+    it("should ignore other and invalid query parameters when signed in", () => {
+      vi.spyOn(navigator, "language", "get").mockReturnValue("en-US");
+      for (const query of ["?q=foo", "?locale=toolong"]) {
+        window.history.replaceState({}, "", query);
+        const cfg = localeConfig("user", "de");
+        expect(cfg.getLanguageLocale()).toBe("de");
+        expect(cfg.values.settings.ui.language).toBe("de");
+        expect(cfg.storage.getItem(cfg.storageKey + ".locale")).toBeFalsy();
+      }
+    });
+    it("should store and mirror the resolved query locale", () => {
+      window.history.replaceState({}, "", "?locale=pt-br");
+      const cfg = localeConfig("public", "de");
+      expect(cfg.getLanguageLocale()).toBe("pt_BR");
+      expect(cfg.values.settings.ui.language).toBe("pt_BR");
+      expect(cfg.storage.getItem(cfg.storageKey + ".locale")).toBe("pt_BR");
+    });
+    it("should return the browser language without settings", () => {
+      vi.spyOn(navigator, "language", "get").mockReturnValue("en-US");
+      const cfg = new Config(new StorageShim(), { siteTitle: "Test", mode: "public" });
+      expect(cfg.getLanguageLocale()).toBe("en");
+      expect(cfg.values.settings).toBeUndefined();
+    });
+  });
+
   it("should return user time zone", () => {
     const cfg = new Config(new StorageShim(), Object.assign({}, window.__CONFIG__));
     expect(cfg.getTimeZone()).toBe("Local");
+  });
+
+  it("should return supported user time zones and fall back to Local otherwise", () => {
+    const cfg = new Config(new StorageShim(), Object.assign({}, window.__CONFIG__));
+    const ui = cfg.values.settings.ui;
+    const saved = ui.timeZone;
+
+    try {
+      for (const zone of ["Europe/Berlin", "America/New_York", "UTC", "GMT", "UTC+1", "UTC-12"]) {
+        ui.timeZone = zone;
+        expect(cfg.getTimeZone()).toBe(zone);
+      }
+
+      for (const zone of ["Nowhere/Zone", "Europe/Berlin\u0000", "", null, 42]) {
+        ui.timeZone = zone;
+        expect(cfg.getTimeZone()).toBe("Local");
+      }
+    } finally {
+      ui.timeZone = saved;
+    }
   });
 
   it("should return if language is rtl", () => {
@@ -479,5 +653,133 @@ describe("common/config", () => {
     await cfg.setLanguage("en", true);
     expect(document.dir).toBe("ltr");
     expect(cfg.dir()).toBe("ltr");
+  });
+
+  // A10 contract: isPublic / isDemo / isPortal must return a Boolean for every
+  // input shape so that bindings like `:disabled="isDemo"` never pass undefined
+  // to a Vuetify Boolean prop. See #4966.
+  describe("isPublic / isDemo / isPortal Boolean contract", () => {
+    const make = (overrides) => new Config(new StorageShim(), { ...window.__CONFIG__, ...overrides });
+
+    it("return Boolean false when the underlying flag is missing", () => {
+      const cfg = make({ public: undefined, demo: undefined, portal: undefined });
+      for (const fn of ["isPublic", "isDemo", "isPortal"]) {
+        const result = cfg[fn]();
+        expect(typeof result, fn).toBe("boolean");
+        expect(result, fn).toBe(false);
+      }
+    });
+    it("return Boolean true when the underlying flag is true", () => {
+      const cfg = make({ public: true, demo: true, portal: true });
+      for (const fn of ["isPublic", "isDemo", "isPortal"]) {
+        const result = cfg[fn]();
+        expect(typeof result, fn).toBe("boolean");
+        expect(result, fn).toBe(true);
+      }
+    });
+    it("return Boolean false when `values` itself is missing", () => {
+      const cfg = new Config(new StorageShim(), null);
+      for (const fn of ["isPublic", "isDemo", "isPortal"]) {
+        const result = cfg[fn]();
+        expect(typeof result, fn).toBe("boolean");
+        expect(result, fn).toBe(false);
+      }
+    });
+  });
+
+  describe("cluster OIDC accessors", () => {
+    const make = (oidc) => new Config(new StorageShim(), { ...window.__CONFIG__, ext: { oidc } });
+
+    it("isClusterOidc reflects the ext.oidc.cluster flag as a Boolean", () => {
+      expect(make({ cluster: true }).isClusterOidc()).toBe(true);
+      expect(make({ cluster: false }).isClusterOidc()).toBe(false);
+      expect(make(undefined).isClusterOidc()).toBe(false);
+      expect(new Config(new StorageShim(), null).isClusterOidc()).toBe(false);
+    });
+
+    it("oidcLoginUri returns the ext.oidc.loginUri or an empty string", () => {
+      expect(make({ loginUri: "/library/api/v1/oidc/login" }).oidcLoginUri()).toBe("/library/api/v1/oidc/login");
+      expect(make({}).oidcLoginUri()).toBe("");
+      expect(new Config(new StorageShim(), null).oidcLoginUri()).toBe("");
+    });
+
+    it("portalLoginUri returns the ext.oidc.portalLoginUri or an empty string", () => {
+      expect(make({ portalLoginUri: "https://app.example.com/portal/login" }).portalLoginUri()).toBe("https://app.example.com/portal/login");
+      expect(make({}).portalLoginUri()).toBe("");
+      expect(new Config(new StorageShim(), null).portalLoginUri()).toBe("");
+    });
+
+    it("oidcLogout reflects the ext.oidc.logout flag as a Boolean", () => {
+      expect(make({ logout: true }).oidcLogout()).toBe(true);
+      expect(make({ logout: false }).oidcLogout()).toBe(false);
+      expect(make(undefined).oidcLogout()).toBe(false);
+      expect(new Config(new StorageShim(), null).oidcLogout()).toBe(false);
+    });
+  });
+
+  describe("storage availability", () => {
+    const make = (usage) => new Config(new StorageShim(), { ...window.__CONFIG__, usage });
+
+    it("filesQuotaReached returns true only when the files quota is reached or exceeded", () => {
+      expect(make({ filesUsedPct: 99 }).filesQuotaReached()).toBe(false);
+      expect(make({ filesUsedPct: 100 }).filesQuotaReached()).toBe(true);
+      expect(make({ filesUsedPct: 101 }).filesQuotaReached()).toBe(true);
+    });
+    it("storageLow mirrors the usage.storageLow flag as a Boolean", () => {
+      expect(make({ storageLow: true }).storageLow()).toBe(true);
+      expect(make({ storageLow: false }).storageLow()).toBe(false);
+      expect(make({}).storageLow()).toBe(false);
+    });
+    it("insufficientStorage is true when either the quota is reached or storage is low", () => {
+      expect(make({ filesUsedPct: 50, storageLow: false }).insufficientStorage()).toBe(false);
+      expect(make({ filesUsedPct: 100, storageLow: false }).insufficientStorage()).toBe(true);
+      expect(make({ filesUsedPct: 50, storageLow: true }).insufficientStorage()).toBe(true);
+    });
+    it("return Boolean false when usage info is missing", () => {
+      const cfg = new Config(new StorageShim(), null);
+      for (const fn of ["filesQuotaReached", "storageLow", "insufficientStorage"]) {
+        const result = cfg[fn]();
+        expect(typeof result, fn).toBe("boolean");
+        expect(result, fn).toBe(false);
+      }
+    });
+  });
+
+  describe("setReduceMotion", () => {
+    afterEach(() => {
+      document.documentElement.classList.remove("reduce-motion");
+    });
+
+    it("toggles the reduce-motion class on <html> based on the argument", () => {
+      const cfg = createTestConfig();
+      cfg.setReduceMotion(true);
+      expect(document.documentElement.classList.contains("reduce-motion")).toBe(true);
+      cfg.setReduceMotion(false);
+      expect(document.documentElement.classList.contains("reduce-motion")).toBe(false);
+    });
+    it("coerces truthy and falsy values and returns the config instance", () => {
+      const cfg = createTestConfig();
+      cfg.setReduceMotion("yes");
+      expect(document.documentElement.classList.contains("reduce-motion")).toBe(true);
+      cfg.setReduceMotion(undefined);
+      expect(document.documentElement.classList.contains("reduce-motion")).toBe(false);
+      expect(cfg.setReduceMotion(true)).toBe(cfg);
+    });
+    it("applies the class on construction when settings enable reduced motion", () => {
+      const values = JSON.parse(JSON.stringify(window.__CONFIG__));
+      values.settings.ui.reduceMotion = true;
+      new Config(new StorageShim(), values);
+      expect(document.documentElement.classList.contains("reduce-motion")).toBe(true);
+    });
+    it("updates the class when settings change via setSettings", () => {
+      const cfg = createTestConfig();
+      const settings = JSON.parse(JSON.stringify(cfg.getSettings()));
+      settings.ui.reduceMotion = true;
+      cfg.setSettings(settings);
+      expect(document.documentElement.classList.contains("reduce-motion")).toBe(true);
+      settings.ui.reduceMotion = false;
+      cfg.setSettings(settings);
+      expect(document.documentElement.classList.contains("reduce-motion")).toBe(false);
+    });
   });
 });

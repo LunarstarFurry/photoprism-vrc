@@ -29,8 +29,6 @@
           autocorrect="off"
           autocapitalize="none"
           autocomplete="off"
-          prepend-inner-icon="mdi-tune"
-          :append-inner-icon="filter.latlng ? 'mdi-map-marker-off' : ''"
           :placeholder="$gettext('Search')"
           class="input-search background-inherit elevation-0"
           :class="{ 'input-search--expanded': expanded }"
@@ -41,14 +39,24 @@
           "
           @keyup.enter="() => onUpdate()"
           @keyup.esc.exact="() => hideExpansionPanel()"
-          @click:prepend-inner.stop="toggleExpansionPanel"
-          @click:append-inner.stop="clearLocation"
           @click:clear="
             () => {
               onUpdate({ q: '' });
             }
           "
-        ></v-text-field>
+        >
+          <template #prepend-inner>
+            <p-input-action
+              icon="mdi-tune"
+              :label="$gettext('Search Filters')"
+              :aria-expanded="expanded ? 'true' : 'false'"
+              @click.stop="toggleExpansionPanel"
+            ></p-input-action>
+          </template>
+          <template v-if="filter.latlng" #append-inner>
+            <p-input-action icon="mdi-map-marker-off" :label="$gettext('Remove Location')" @click.stop="clearLocation"></p-input-action>
+          </template>
+        </v-text-field>
 
         <v-btn-toggle
           :model-value="settings.view"
@@ -93,7 +101,7 @@
       <v-expand-transition>
         <v-card v-show="expanded" flat color="secondary">
           <v-card-text class="dense">
-            <v-row align="center" dense>
+            <v-row class="align-center" density="compact">
               <v-col cols="12" sm="6" md="3" class="p-countries-select">
                 <v-select
                   :model-value="filter.country"
@@ -287,6 +295,7 @@ import * as options from "options/options";
 import $api from "common/api";
 import $notify from "common/notify";
 import links from "common/links";
+import Photo from "model/photo";
 import * as contexts from "options/contexts";
 
 import PActionMenu from "component/action/menu.vue";
@@ -371,8 +380,10 @@ export default {
     density() {
       return this.$vuetify.display.smAndDown ? "compact" : "comfortable";
     },
+    // countryOptions returns the country filter options, with a localized name for the "zz" code.
     countryOptions() {
-      return this.all.countries.concat(this.config.countries);
+      const countries = this.config.countries.map((c) => (c.ID === "zz" ? { ...c, Name: this.$gettext("Unknown") } : c));
+      return this.all.countries.concat(countries);
     },
     cameraOptions() {
       return this.all.cameras.concat(this.config.cameras);
@@ -397,40 +408,12 @@ export default {
     sortOptions() {
       switch (this.context) {
         case contexts.Archive:
-          return [
-            { value: "newest", text: this.$gettext("Newest First") },
-            { value: "oldest", text: this.$gettext("Oldest First") },
-            { value: "added", text: this.$gettext("Recently Added") },
-            { value: "archived", text: this.$gettext("Recently Archived") },
-            { value: "title", text: this.$gettext("Picture Title") },
-            { value: "name", text: this.$gettext("File Name") },
-            { value: "size", text: this.$gettext("File Size") },
-            { value: "duration", text: this.$gettext("Video Duration") },
-          ];
+          return options.SortOrderOptions(["newest", "oldest", "added", "archived", "title", "name", "size", "duration"]);
         case contexts.Hidden:
         case contexts.Review:
-          return [
-            { value: "newest", text: this.$gettext("Newest First") },
-            { value: "oldest", text: this.$gettext("Oldest First") },
-            { value: "added", text: this.$gettext("Recently Added") },
-            { value: "title", text: this.$gettext("Picture Title") },
-            { value: "name", text: this.$gettext("File Name") },
-            { value: "size", text: this.$gettext("File Size") },
-            { value: "duration", text: this.$gettext("Video Duration") },
-          ];
+          return options.SortOrderOptions(["newest", "oldest", "added", "title", "name", "size", "duration"]);
         default:
-          return [
-            { value: "newest", text: this.$gettext("Newest First") },
-            { value: "oldest", text: this.$gettext("Oldest First") },
-            { value: "added", text: this.$gettext("Recently Added") },
-            { value: "edited", text: this.$gettext("Recently Edited") },
-            { value: "title", text: this.$gettext("Picture Title") },
-            { value: "name", text: this.$gettext("File Name") },
-            { value: "size", text: this.$gettext("File Size") },
-            { value: "duration", text: this.$gettext("Video Duration") },
-            { value: "similar", text: this.$gettext("Visual Similarity") },
-            { value: "relevance", text: this.$gettext("Most Relevant") },
-          ];
+          return options.SortOrderOptions(["newest", "oldest", "added", "edited", "title", "name", "size", "duration", "similar", "relevance"]);
       }
     },
   },
@@ -547,6 +530,7 @@ export default {
     },
     onDeleted() {
       $notify.success(this.$gettext("Permanently deleted"));
+      Photo.clearCache();
       this.$clipboard.clear();
     },
   },

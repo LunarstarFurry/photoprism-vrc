@@ -45,7 +45,10 @@ func PublishUserEntities(channel, ev string, entities any, userUid string) {
 	})
 }
 
-// EntitiesUpdated publishes an update notification for the given channel.
+// EntitiesUpdated publishes an update notification for the given channel,
+// with the affected entity UIDs as the payload. Receivers refetch entity
+// details through the REST API, so batch mutations emit one event with
+// the full UID list instead of one event per entity.
 func EntitiesUpdated(channel string, entities any) {
 	PublishEntities(channel, EntityUpdated, entities)
 }

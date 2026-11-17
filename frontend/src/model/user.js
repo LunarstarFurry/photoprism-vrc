@@ -5,7 +5,7 @@ import $util from "common/util";
 import $api from "common/api";
 import { T, $gettext } from "common/gettext";
 import { Form } from "common/form";
-import { $config } from "app/session";
+import { $config, $session } from "app/session";
 
 export let BatchSize = 99999;
 export let WebDavRoles = ["admin", "manager", "user", "contributor"];
@@ -36,6 +36,7 @@ export class User extends RestModel {
       BasePath: "",
       UploadPath: "",
       WebDAV: false,
+      MCP: 0,
       Thumb: "",
       ThumbSrc: "",
       Settings: {
@@ -207,17 +208,116 @@ export class User extends RestModel {
     return "*";
   }
 
+  // isRemote returns true when the user is authenticated through a remote provider (currently LDAP).
   isRemote() {
-    return this.AuthProvider && this.AuthProvider === "ldap";
+    return this.AuthProvider === "ldap";
   }
 
-  requiresPassword() {
-    return !this.AuthProvider || this.AuthProvider === "default" || this.AuthProvider === "local";
+  // isAdmin returns true when the account holds an admin-tier role (admin or
+  // cluster_admin), mirroring the backend acl.IsAdminRole set. Role-based only
+  // (it ignores SuperAdmin) so it can gate controls such as the Super Admin toggle.
+  isAdmin() {
+    return this.Role === "admin" || this.Role === "cluster_admin";
   }
 
-  // Checks if WebDAV access is allowed for this user.
+  // isClusterAdmin returns true when the account holds the Portal operator role.
+  isClusterAdmin() {
+    return this.Role === "cluster_admin";
+  }
+
+  // isInitialAdmin returns true for the built-in super admin created at setup (ID 1).
+  // It is the lockout-recovery operator, so the admin UI locks its privileged controls.
+  isInitialAdmin() {
+    return this.ID === 1;
+  }
+
+  // isCurrentUser returns true when this account belongs to the signed-in user.
+  // The admin UI uses it to lock fields that would otherwise let an operator
+  // lock themselves out (own role, web login, and authentication provider); the
+  // backend rejects these self-changes regardless.
+  isCurrentUser() {
+    const current = $session.getUser();
+    return !!(current && current.UID && this.UID && current.UID === this.UID);
+  }
+
+  // showsPasswordField reports whether the local password input is shown.
+  // OIDC may keep a local password as a fallback; LDAP replaces it; "none" disables auth.
+  showsPasswordField() {
+    return ["default", "local", "oidc"].includes(this.AuthProvider);
+  }
+
+  // passwordIsRequired reports whether a local password must be set to create the account.
+  // "default" needs one unless an external identity can be supplied instead (OIDC/LDAP configured).
+  passwordIsRequired() {
+    if (this.AuthProvider === "local") {
+      return true;
+    }
+    if (this.AuthProvider === "default") {
+      return !this.showsAuthIdField();
+    }
+    return false;
+  }
+
+  // showsAuthIdField reports whether the external identity input (OIDC Subject ID or LDAP DN) is shown.
+  // "default" offers it only when OIDC or LDAP is configured, to pre-provision external accounts.
+  showsAuthIdField() {
+    const p = this.AuthProvider;
+    return p === "oidc" || p === "ldap" || (p === "default" && ($config.oidcEnabled() || $config.ldapEnabled()));
+  }
+
+  // authIdIsRequired reports whether the external identity must be set; only OIDC requires it up front.
+  authIdIsRequired() {
+    return this.AuthProvider === "oidc";
+  }
+
+  // authIdIsDn reports whether the external identity is an LDAP DN rather than an OIDC Subject ID.
+  authIdIsDn() {
+    const p = this.AuthProvider;
+    return p === "ldap" || (p === "default" && $config.ldapEnabled() && !$config.oidcEnabled());
+  }
+
+  // authIdFieldLabel returns the label for the external identity input.
+  authIdFieldLabel() {
+    return this.authIdIsDn() ? "Distinguished Name (DN)" : "Subject ID";
+  }
+
+  // hasLoginCredential reports whether the new account has enough to authenticate.
+  // Gates the Add button independently of lazy field validation, so it must hold on its
+  // own: it requires the credential each provider mandates rather than trusting form state.
+  hasLoginCredential() {
+    if (this.passwordIsRequired()) {
+      return !!this.Password;
+    }
+    if (this.authIdIsRequired()) {
+      return !!this.AuthID;
+    }
+    if (this.AuthProvider === "default" && this.showsAuthIdField()) {
+      return !!this.Password || !!this.AuthID;
+    }
+    return true;
+  }
+
+  // canEnableLogin reports whether web/API login can be enabled for this account.
+  // System users, role-less accounts, visitors, and deactivated accounts (provider
+  // "none") cannot log in regardless of the toggle. LDAP and OIDC accounts can.
+  canEnableLogin() {
+    if (this.ID < 1 || !this.Name || this.AuthProvider === "none") {
+      return false;
+    }
+
+    return !!this.Role && this.Role !== "visitor";
+  }
+
+  // canHavePassword reports whether a local password can be set and used for this account.
+  // Requires login eligibility plus a local provider — remote accounts (LDAP) have their
+  // credentials managed externally, so a local password would be inert.
+  canHavePassword() {
+    return this.canEnableLogin() && !this.isRemote();
+  }
+
+  // hasWebDAV returns true when WebDAV access is enabled for this user and the role permits it.
   hasWebDAV() {
-    return this.WebDAV && this.canEnableWebDAV();
+    return !!this.WebDAV && this.canEnableWebDAV();
   }
 
   // Checks if the user role permits WebDAV access.
@@ -227,6 +327,27 @@ export class User extends RestModel {
     }
 
     return WebDavRoles.includes(this.Role);
+  }
+
+  // canEnableMCP reports whether the account role may use MCP, based on the roles in the client config.
+  canEnableMCP() {
+    if (this.AuthProvider === "none" || !this.Name) {
+      return false;
+    }
+
+    const roles = $config.get("mcpRoles");
+
+    return Array.isArray(roles) && roles.includes(this.Role);
+  }
+
+  // hasMCP reports whether MCP is usable for the account: the setting allows it and the role permits it.
+  hasMCP() {
+    return this.flagEnabled("MCP", true) && this.canEnableMCP();
+  }
+
+  // setMCP switches the MCP setting, restoring the saved value when switched back.
+  setMCP(enabled) {
+    this.setFlag("MCP", enabled, true);
   }
 
   // Checks if the user role supports a custom base path.
@@ -345,6 +466,24 @@ export class User extends RestModel {
         params,
       })
       .then((response) => Promise.resolve(response.data));
+  }
+
+  // findGrants returns the apps connected to this account with the OAuth app flow.
+  findGrants() {
+    if (!this.UID) {
+      return Promise.reject();
+    }
+
+    return $api.get(this.getEntityResource() + "/grants").then((response) => Promise.resolve(response.data));
+  }
+
+  // revokeGrant disconnects an app from this account.
+  revokeGrant(grantUID) {
+    if (!this.UID || !grantUID) {
+      return Promise.reject();
+    }
+
+    return $api.delete(this.getEntityResource() + "/grants/" + encodeURIComponent(grantUID)).then((response) => Promise.resolve(response.data));
   }
 
   static batchSize() {

@@ -42,7 +42,7 @@
       <div ref="map" class="map-container" :class="{ 'map-loaded': loaded }"></div>
       <div v-if="showCluster" class="cluster-control">
         <v-card class="cluster-control-container">
-          <p-page-photos ref="cluster" :static-filter="cluster" :on-close="closeCluster" :embedded="true" />
+          <p-page-photos ref="cluster" :key="cluster.latlng" :static-filter="cluster" :on-close="closeCluster" :embedded="true" />
         </v-card>
       </div>
     </div>
@@ -50,10 +50,11 @@
 </template>
 
 <script>
+import { markRaw } from "vue";
 import $api from "common/api";
 import $fullscreen from "common/fullscreen";
 import * as sky from "common/sky";
-import * as map from "common/map";
+import * as maps from "common/map";
 import { getAppStorage } from "common/storage";
 import * as options from "options/options";
 import Thumb from "model/thumb";
@@ -143,9 +144,8 @@ export default {
       showCluster: false,
       config: this.$config.values,
       settings: settings.maps,
-      animate: settings.maps.animate,
+      animate: this.$util.mapAnimateDuration(settings),
       loaded: false,
-      skyRendered: false,
     };
   },
   watch: {
@@ -165,28 +165,29 @@ export default {
   },
   created() {
     this._mapDataHandler = null;
-    if (this.$config.has("mapKey")) {
-      this.mapStyles = options.MapsStyle(this.featExperimental);
-    } else {
-      this.mapStyles = options.MapsStyle(this.featExperimental).filter((s) => !s.Sponsor);
-    }
+    this._sky = null;
+    this._styleSky = null;
+    this.mapStyles = options.MapsStyle(this.featExperimental, this.$config.has("mapKey"));
   },
+  // mounted initializes the map and keeps renderer failures inside the Places view.
   mounted() {
     this.$view.enter(this);
-
-    map.load().then((m) => {
-      maplibregl = m;
-      this.initMap()
-        .then(() => {
-          this.renderMap();
-          this.openClusterFromUrl();
-        })
-        .catch((err) => {
-          this.mapError = err;
-        });
-    });
+    this._mapUnmounted = false;
+    this.initMap()
+      .then(() => maps.load())
+      .then((m) => {
+        if (this._mapUnmounted) {
+          return;
+        }
+        maplibregl = m;
+        this.renderMap();
+        this.openClusterFromUrl();
+      })
+      .catch(this.showMapError);
   },
+  // beforeUnmount releases map resources and prevents delayed initialization.
   beforeUnmount() {
+    this._mapUnmounted = true;
     // Exit fullscreen mode if enabled, has no effect otherwise.
     $fullscreen.exit();
     this.teardownMap();
@@ -195,8 +196,17 @@ export default {
     this.$view.leave(this);
   },
   methods: {
-    // Removes map event listeners and marker handlers before the component is disposed.
+    // teardownMap releases the map and the sky renderer before the component is disposed.
     teardownMap() {
+      this.removeMap();
+
+      if (this._sky) {
+        this._sky.destroy();
+        this._sky = null;
+      }
+    },
+    // removeMap removes the map with its event listeners and markers, and detaches the sky renderer from it.
+    removeMap() {
       if (!this.map) {
         return;
       }
@@ -211,6 +221,8 @@ export default {
         this.map.off("idle", this.updateMarkers);
       }
 
+      this._sky?.detach();
+      this._styleSky = null;
       this._mapDataHandler = null;
 
       this.clearAllMarkerClicks();
@@ -286,12 +298,55 @@ export default {
         this.clearMarkerClick(markerId, marker);
       });
     },
+    // renderSky shows the star map behind the globe, or CSS stars if it cannot be rendered.
     renderSky() {
-      if (!this.skyRendered && sky.render && this.$refs.background) {
-        this.$nextTick(() => {
-          sky.render(this.$refs.background, 320);
-          this.skyRendered = true;
+      const el = this.$refs.background;
+
+      if (!el || !this.map) {
+        return;
+      }
+
+      if (!this._sky) {
+        const fallback = () => {
+          if (!this._mapUnmounted) {
+            sky.render(el, 320);
+          }
+        };
+        const renderer = new sky.Sky(el, { onLost: fallback });
+        this._sky = renderer;
+        renderer.load(`${this.$config.staticUri}/img/sky/stars.avif`).catch((err) => {
+          if (this.$config.debug) {
+            console.debug("places: sky fallback", err);
+          }
+          renderer.destroy();
+          fallback();
         });
+      }
+
+      this._sky.attach(this.map);
+    },
+    // updateAtmosphere draws the atmosphere around the globe and restores the style sky otherwise.
+    updateAtmosphere() {
+      const map = this.map;
+
+      if (!map || typeof map.setSky !== "function") {
+        return;
+      }
+
+      // Setters throw while the style is loading; the next projection change or style load retries.
+      try {
+        if (this.getProjection() === ProjectionGlobe) {
+          if (this._styleSky?.map !== map) {
+            const styleSky = map.getSky();
+            map.setSky(sky.atmosphere());
+            this._styleSky = { map, sky: styleSky };
+          }
+        } else if (this._styleSky?.map === map) {
+          map.setSky(sky.styleSky(this._styleSky.sky));
+          this._styleSky = null;
+        }
+      } catch {
+        // Ignore.
       }
     },
     onKeyDown(ev) {
@@ -320,7 +375,7 @@ export default {
             }
             break;
         }
-      } else if (this.initialized) {
+      } else if (this.initialized && this.map) {
         // Use the arrow keys to move around the map with game-like controls.
         switch (ev.code) {
           case "ArrowUp":
@@ -353,7 +408,7 @@ export default {
       }
     },
     toggleProjection() {
-      if (!this.initialized || this.loading) {
+      if (!this.map || !this.initialized || this.loading) {
         return;
       }
 
@@ -414,6 +469,7 @@ export default {
         }
       }
     },
+    // onProjectionChange remembers the projection and shows the sky and atmosphere in globe view.
     onProjectionChange(ev) {
       // Update current projection.
       this.projection = ev.newProjection;
@@ -425,29 +481,19 @@ export default {
       if (ev.newProjection === ProjectionGlobe) {
         this.renderSky();
       }
-    },
-    noWebGlSupport() {
-      // see https://maplibre.org/maplibre-gl-js/docs/examples/check-for-support/
-      if (window.WebGLRenderingContext) {
-        const canvas = document.createElement("canvas");
-        try {
-          // Note that { failIfMajorPerformanceCaveat: true } can be passed as a second argument
-          // to canvas.getContext(), causing the check to fail if hardware rendering is not available. See
-          // https://developer.mozilla.org/en-US/docs/Web/API/HTMLCanvasElement/getContext
-          // for more details.
-          const context = canvas.getContext("webgl2") || canvas.getContext("webgl");
-          if (context && typeof context.getParameter == "function") {
-            return false;
-          }
-        } catch (e) {
-          // WebGL is supported, but disabled.
-        }
-        return this.$gettext("WebGL support is disabled in your browser");
-      }
 
-      // WebGL is not supported.
-      return this.$gettext("Your browser does not support WebGL");
+      this.updateAtmosphere();
     },
+    // showMapError provides a readable fallback for rendering and loading failures.
+    showMapError() {
+      this.mapError = this.$gettext("Maps are unavailable. Try another browser or device.");
+      this.loading = false;
+    },
+    // noWebGlSupport returns a message when the renderer's graphics requirement is unmet.
+    noWebGlSupport() {
+      return maps.supportsWebGL2() ? false : this.$gettext("Maps are unavailable. Try another browser or device.");
+    },
+    // initMap configures a style only when the browser can render it.
     initMap() {
       return this.$config.load().finally(() => {
         const err = this.noWebGlSupport();
@@ -458,6 +504,7 @@ export default {
         return Promise.resolve();
       });
     },
+    // setStyle replaces the map while keeping busy-state and error handling balanced.
     setStyle(style) {
       if (this.loading) {
         return false;
@@ -467,14 +514,20 @@ export default {
 
       this.lastFilter = {};
       this.initialized = false;
-      this.$refs.map.innerHTML = "";
 
-      this.configureMap(style);
-      this.renderMap();
-
-      this.$notify.unblockUI();
-
-      return true;
+      try {
+        this.removeMap();
+        this.$refs.map.innerHTML = "";
+        this.configureMap(style);
+        this.renderMap();
+        this.mapError = false;
+        return true;
+      } catch {
+        this.showMapError();
+        return false;
+      } finally {
+        this.$notify.unblockUI();
+      }
     },
     configureMap(style) {
       const filter = {
@@ -663,7 +716,7 @@ export default {
       }
 
       this.filter = filter;
-      this.options = mapOptions;
+      this.options = markRaw(mapOptions);
     },
     getClusterFromUrl() {
       const hasLatLng = this.$route.query.latlng !== undefined && this.$route.query.latlng !== "";
@@ -692,6 +745,8 @@ export default {
       this.openCluster(cluster);
     },
     selectClusterByCoords: function (latNorth, lngEast, latSouth, lngWest) {
+      // The :key on the embedded photo list (bound to latlng) remounts it for the new
+      // location, so an already-open panel re-runs its search instead of going stale.
       this.openCluster({
         q: this.filter.q,
         s: this.filter.s,
@@ -699,10 +754,6 @@ export default {
       });
     },
     selectClusterById: function (clusterId) {
-      if (this.showCluster) {
-        this.showCluster = false;
-      }
-
       this.getClusterFeatures(clusterId, -1, (clusterFeatures) => {
         let latNorth, lngEast, latSouth, lngWest;
 
@@ -835,6 +886,7 @@ export default {
 
       this.search(true);
     },
+    // reset clears the GeoJSON source and refreshes markers after the worker update.
     reset() {
       Object.assign(this.result, { features: [] });
       const map = this.map;
@@ -849,13 +901,17 @@ export default {
         return;
       }
 
-      source.setData(this.result);
-
-      this.updateMarkers();
+      return source.setData(this.result).then(() => {
+        if (this.map === map) {
+          this.updateMarkers();
+        }
+      }).catch(() => {});
     },
+    // search loads locations and waits for the active map source before updating markers.
+    // While busy, it returns the last search instead of starting another one.
     search(force) {
       if (this.loading) {
-        return;
+        return this._searchPromise;
       }
 
       // Do not query the same data more than once unless search results need to be updated.
@@ -877,9 +933,9 @@ export default {
       };
 
       // Fetch results from server.
-      return $api
+      this._searchPromise = $api
         .get("geo", options)
-        .then((response) => {
+        .then(async (response) => {
           if (!response.data.features || response.data.features.length === 0) {
             this.reset();
             this.initialized = true;
@@ -894,8 +950,8 @@ export default {
 
           const map = this.map;
 
+          // Without a map source, nothing is shown, so the search stays uninitialized and is repeated on load.
           if (!map || typeof map.getSource !== "function") {
-            this.initialized = true;
             this.loading = false;
             return;
           }
@@ -903,12 +959,16 @@ export default {
           const source = map.getSource("photos");
 
           if (!source || typeof source.setData !== "function") {
-            this.initialized = true;
             this.loading = false;
             return;
           }
 
-          source.setData(this.result);
+          await source.setData(this.result);
+
+          if (this.map !== map) {
+            this.loading = false;
+            return;
+          }
 
           if (this.filter.q || !this.initialized) {
             if (typeof map.fitBounds === "function") {
@@ -932,15 +992,22 @@ export default {
           this.initialized = true;
           this.loading = false;
         });
+
+      return this._searchPromise;
     },
     renderMap() {
       const lastProjection = this.getProjection(true);
 
-      this.map = new maplibregl.Map(this.options);
+      // MapLibre stays raw, since a reactive proxy breaks the read-only values it
+      // memoizes on its own objects, e.g. the channels of parsed style colors.
+      this.map = markRaw(new maplibregl.Map({ ...this.options, locale: maps.locale() }));
       this.map.setLanguage(this.$config.values.settings.ui.language.split("-")[0]);
 
       // Get informed about projection type changes.
       this.map.on("projectiontransition", (ev) => this.onProjectionChange(ev));
+
+      // Add the atmosphere to a style that loads in globe projection.
+      this.map.on("style.load", () => this.updateAtmosphere());
 
       // Restore last used projection type, if any.
       if (lastProjection) {
@@ -1044,6 +1111,99 @@ export default {
       }
       return value;
     },
+    // Renders a single photo marker that opens the picture and its surroundings in the viewer.
+    renderPhotoMarker(feature, token, newMarkers, map) {
+      const id = feature.id;
+      const props = feature.properties;
+      const coords = feature.geometry.coordinates;
+
+      let marker = this.markers[id];
+      if (!marker) {
+        const el = document.createElement("div");
+        el.className = "marker";
+        el.title = props.Title;
+        el.style.backgroundImage = `url(${this.$config.contentUri}/t/${props.Hash}/${token}/tile_50)`;
+        el.style.width = "50px";
+        el.style.height = "50px";
+
+        marker = this.markers[id] = markRaw(
+          new maplibregl.Marker({
+            element: el,
+          }).setLngLat(coords)
+        );
+      } else {
+        marker.setLngLat(coords);
+      }
+
+      const photoUid = props.UID;
+      this.ensureMarkerClick(id, marker, photoUid, () => () => this.openPhoto(photoUid));
+
+      newMarkers[id] = marker;
+
+      if (!this.markersOnScreen[id]) {
+        marker.addTo(map);
+      }
+    },
+    // Renders a stack marker for pictures sharing the same location and opens them as a
+    // group when clicked, so coincident photos no longer hide each other once zoomed in.
+    renderStackMarker(group, token, newMarkers, map) {
+      const count = group.features.length;
+      // Include the count in the cached marker id so a group whose size changes (pictures
+      // separating or merging as the map zooms) gets a fresh badge instead of a stale one.
+      const id = `s${group.key}:${count}`;
+      const bounds = group.bounds;
+      // Center the marker on the group's bounding box so a stack of near-coincident photos
+      // sits between them rather than on whichever picture happened to anchor the group.
+      const coords = [(bounds.lngW + bounds.lngE) / 2, (bounds.latS + bounds.latN) / 2];
+
+      let marker = this.markers[id];
+      if (!marker) {
+        const size = this.getClusterSizeFromItemCount(count);
+        const el = document.createElement("div");
+
+        el.style.width = `${size}px`;
+        el.style.height = `${size}px`;
+
+        const imageContainer = document.createElement("div");
+        imageContainer.className = "marker cluster-marker";
+
+        const previewImageCount = count >= 4 ? 4 : count > 1 ? 2 : 1;
+        const images = Array(previewImageCount)
+          .fill(null)
+          .map((a, i) => {
+            const feature = group.features[Math.floor((count * i) / previewImageCount)];
+            const image = document.createElement("div");
+            image.style.backgroundImage = `url(${this.$config.contentUri}/t/${feature.properties.Hash}/${token}/tile_${50})`;
+            return image;
+          });
+
+        imageContainer.append(...images);
+
+        const counterBubble = document.createElement("div");
+        counterBubble.className = "badge";
+        counterBubble.innerText = this.abbreviateCount(count);
+
+        el.append(imageContainer);
+        el.append(counterBubble);
+        marker = this.markers[id] = markRaw(
+          new maplibregl.Marker({
+            element: el,
+          }).setLngLat(coords)
+        );
+      } else {
+        marker.setLngLat(coords);
+      }
+
+      // Open the stack by its bounding box (padded server-side) so the panel lists every
+      // picture in the group, not just the one at the anchor coordinate.
+      this.ensureMarkerClick(id, marker, `${group.key}:${count}`, () => () => this.selectClusterByCoords(bounds.latN, bounds.lngE, bounds.latS, bounds.lngW));
+
+      newMarkers[id] = marker;
+
+      if (!this.markersOnScreen[id]) {
+        marker.addTo(map);
+      }
+    },
     updateMarkers() {
       // Busy loading data from the server?
       if (this.loading) {
@@ -1071,7 +1231,11 @@ export default {
       // Get API token required to show thumbnails.
       let token = this.$config.previewToken;
 
-      // Loop through photos and clusters.
+      // Collect un-clustered photo features so that pictures at the same location can be
+      // grouped into a single stack marker below.
+      const photoFeatures = [];
+
+      // Loop through clusters and collect photos for grouping.
       for (let i = 0; i < features.length; i++) {
         let coords = features[i].geometry.coordinates;
         let props = features[i].properties;
@@ -1120,9 +1284,11 @@ export default {
 
             el.append(imageContainer);
             el.append(counterBubble);
-            marker = this.markers[id] = new maplibregl.Marker({
-              element: el,
-            }).setLngLat(coords);
+            marker = this.markers[id] = markRaw(
+              new maplibregl.Marker({
+                element: el,
+              }).setLngLat(coords)
+            );
           } else {
             marker.setLngLat(coords);
           }
@@ -1136,33 +1302,20 @@ export default {
             marker.addTo(map);
           }
         } else {
-          // Update photo marker.
-          const id = features[i].id;
+          photoFeatures.push(features[i]);
+        }
+      }
 
-          let marker = this.markers[id];
-          if (!marker) {
-            const el = document.createElement("div");
-            el.className = "marker";
-            el.title = props.Title;
-            el.style.backgroundImage = `url(${this.$config.contentUri}/t/${props.Hash}/${token}/tile_50)`;
-            el.style.width = "50px";
-            el.style.height = "50px";
+      // Group un-clustered photos by on-screen proximity and render each group as a single
+      // marker, using a stack marker with a counter when several pictures share a spot. The
+      // projection keeps grouping zoom-aware so nearby pictures separate as the map zooms in.
+      const project = typeof map.project === "function" ? (coords) => map.project(coords) : null;
 
-            marker = this.markers[id] = new maplibregl.Marker({
-              element: el,
-            }).setLngLat(coords);
-          } else {
-            marker.setLngLat(coords);
-          }
-
-          const photoUid = props.UID;
-          this.ensureMarkerClick(id, marker, photoUid, () => () => this.openPhoto(photoUid));
-
-          newMarkers[id] = marker;
-
-          if (!this.markersOnScreen[id]) {
-            marker.addTo(map);
-          }
+      for (const group of maps.groupGeoFeatures(photoFeatures, project)) {
+        if (group.features.length > 1) {
+          this.renderStackMarker(group, token, newMarkers, map);
+        } else {
+          this.renderPhotoMarker(group.features[0], token, newMarkers, map);
         }
       }
 
@@ -1238,8 +1391,8 @@ export default {
       this.map.on("resize", this.updateMarkers);
       this.map.on("idle", this.updateMarkers);
 
-      // Load pictures.
-      this.search().finally(() => {
+      // Load pictures, or wait for the search that is already running.
+      Promise.resolve(this.search()).finally(() => {
         this.loaded = true;
       });
     },

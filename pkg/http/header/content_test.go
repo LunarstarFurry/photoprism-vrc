@@ -19,6 +19,7 @@ func TestContent(t *testing.T) {
 		assert.Equal(t, "Content-Language", ContentLanguage)
 		assert.Equal(t, "Content-Length", ContentLength)
 		assert.Equal(t, "Content-Range", ContentRange)
+		assert.Equal(t, "Range", Range)
 		assert.Equal(t, "Location", Location)
 		assert.Equal(t, "Origin", Origin)
 		assert.Equal(t, "Vary", Vary)
@@ -29,6 +30,7 @@ func TestContent(t *testing.T) {
 		assert.Equal(t, "application/manifest+json", ContentTypeManifest)
 		assert.Equal(t, "application/json", ContentTypeJson)
 		assert.Equal(t, "application/json; charset=utf-8", ContentTypeJsonUtf8)
+		assert.Equal(t, "text/event-stream", ContentTypeEventStream)
 		assert.Equal(t, "application/javascript", ContentTypeJavaScript)
 		assert.Equal(t, "text/css", ContentTypeCSS)
 		assert.Equal(t, "text/html; charset=utf-8", ContentTypeHtml)
@@ -40,6 +42,28 @@ func TestContent(t *testing.T) {
 		assert.Equal(t, "video/mp4; codecs=\"avc1.4d0028\"", ContentTypeMp4AvcMain)
 		assert.Equal(t, "video/mp4; codecs=\"avc1.640028\"", ContentTypeMp4AvcHigh)
 		assert.Equal(t, "video/mp4; codecs=\"hvc1\"", ContentTypeMp4Hvc)
+	})
+}
+
+func TestIsPngType(t *testing.T) {
+	t.Run("Png", func(t *testing.T) {
+		assert.True(t, IsPngType(ContentTypePng))
+	})
+	t.Run("APng", func(t *testing.T) {
+		assert.True(t, IsPngType(ContentTypeAPng))
+		assert.Equal(t, "image/apng", ContentTypeAPng)
+	})
+	t.Run("APngAlt", func(t *testing.T) {
+		assert.True(t, IsPngType(ContentTypeAPngAlt))
+		assert.Equal(t, "image/vnd.mozilla.apng", ContentTypeAPngAlt)
+	})
+	t.Run("OtherType", func(t *testing.T) {
+		assert.False(t, IsPngType(ContentTypeJpeg))
+		assert.False(t, IsPngType(ContentTypeGif))
+		assert.False(t, IsPngType(ContentTypeSVG))
+	})
+	t.Run("Empty", func(t *testing.T) {
+		assert.False(t, IsPngType(""))
 	})
 }
 

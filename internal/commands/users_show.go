@@ -28,7 +28,7 @@ func usersShowAction(ctx *cli.Context) error {
 
 		// Name or UID provided?
 		if id == "" {
-			return cli.ShowSubcommandHelp(ctx)
+			return ShowUsageError(ctx)
 		}
 
 		// Find user record.
@@ -37,7 +37,7 @@ func usersShowAction(ctx *cli.Context) error {
 		if rnd.IsUID(id, entity.UserUID) {
 			m = entity.FindUserByUID(id)
 		} else {
-			m = entity.FindUserByName(id)
+			m = entity.FindUserByExactName(id)
 		}
 
 		if m == nil {

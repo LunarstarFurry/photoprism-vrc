@@ -23,10 +23,10 @@ import (
 //	@Tags		Labels
 //	@Accept		json
 //	@Produce	json
-//	@Success	200				{object}	entity.Label
-//	@Failure	401,403,404,429	{object}	i18n.Response
-//	@Param		uid				path		string		true	"Label UID"
-//	@Param		label			body		form.Label	true	"Label Name"
+//	@Success	200					{object}	entity.Label
+//	@Failure	401,403,404,413,429	{object}	i18n.Response
+//	@Param		uid					path		string		true	"Label UID"
+//	@Param		label				body		form.Label	true	"Label Name"
 //	@Router		/api/v1/labels/{uid} [put]
 func UpdateLabel(router *gin.RouterGroup) {
 	router.PUT("/labels/:uid", func(c *gin.Context) {
@@ -80,7 +80,7 @@ func UpdateLabel(router *gin.RouterGroup) {
 
 		event.SuccessMsg(i18n.MsgLabelSaved)
 
-		PublishLabelEvent(StatusUpdated, id, c)
+		PublishLabelEvent(StatusUpdated, id)
 
 		c.JSON(http.StatusOK, m)
 	})
@@ -108,7 +108,7 @@ func LikeLabel(router *gin.RouterGroup) {
 		label, err := query.LabelByUID(id)
 
 		if err != nil {
-			c.AbortWithStatusJSON(http.StatusNotFound, gin.H{"error": txt.UpperFirst(err.Error())})
+			Abort(c, http.StatusNotFound, i18n.ErrLabelNotFound)
 			return
 		}
 
@@ -123,7 +123,7 @@ func LikeLabel(router *gin.RouterGroup) {
 			})
 		}
 
-		PublishLabelEvent(StatusUpdated, id, c)
+		PublishLabelEvent(StatusUpdated, id)
 
 		c.JSON(http.StatusOK, http.Response{})
 	})
@@ -151,7 +151,7 @@ func DislikeLabel(router *gin.RouterGroup) {
 		label, err := query.LabelByUID(id)
 
 		if err != nil {
-			c.AbortWithStatusJSON(http.StatusNotFound, gin.H{"error": txt.UpperFirst(err.Error())})
+			Abort(c, http.StatusNotFound, i18n.ErrLabelNotFound)
 			return
 		}
 
@@ -166,7 +166,7 @@ func DislikeLabel(router *gin.RouterGroup) {
 			})
 		}
 
-		PublishLabelEvent(StatusUpdated, id, c)
+		PublishLabelEvent(StatusUpdated, id)
 
 		c.JSON(http.StatusOK, http.Response{})
 	})

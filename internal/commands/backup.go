@@ -17,7 +17,13 @@ import (
 const backupDescription = `A custom filename for the database backup (or - to send the backup to stdout) can optionally be passed as argument.
 The --database flag can be omitted in this case. When using Docker, please run the docker command with the -T flag
 to prevent log messages from being sent to stdout. If nothing else is specified, the database and album backup paths
-will be automatically determined based on the current configuration.`
+will be automatically determined based on the current configuration.
+
+Backups to stdout (-) bypass the insufficient storage check, so dumps can be streamed even when the local storage is full.
+A backup file is replaced only once the new dump is complete. The filename must not be a symbolic link, even with --force,
+so use - rather than /dev/stdout to send the backup to stdout.
+
+A database backup can only be restored into the same kind of database it was created from.`
 
 // BackupCommand configures the command name, flags, and action.
 var BackupCommand = &cli.Command{
@@ -57,23 +63,33 @@ var backupFlags = []cli.Flag{
 		TakesFile: true,
 	},
 	&cli.IntFlag{
-		Name:    "retain",
-		Aliases: []string{"r"},
-		Usage:   "`NUMBER` of database backups to keep (-1 to keep all)",
-		Value:   config.DefaultBackupRetain,
+		Name:        "retain",
+		Aliases:     []string{"r"},
+		Usage:       "`NUMBER` of database backups to keep (-1 to keep all)",
+		DefaultText: "global value",
 	},
+}
+
+// backupRetain returns the number of database backups to keep. The command flag is an override,
+// so an unset flag takes the configured value that defaults.yml, options.yml and the environment
+// also set, rather than the flag's own zero value.
+func backupRetain(ctx *cli.Context, configured int) int {
+	if ctx.IsSet("retain") {
+		return ctx.Int("retain")
+	}
+
+	return configured
 }
 
 // backupAction creates a database backup.
 func backupAction(ctx *cli.Context) error {
 	// Use command argument as backup file name.
 	fileName := ctx.Args().First()
-	databasePath := ctx.String("database-path")
+	databasePath := absPathArg(ctx.String("database-path"))
 	backupDatabase := ctx.Bool("database") || fileName != "" || databasePath != ""
-	albumsPath := ctx.String("albums-path")
+	albumsPath := absPathArg(ctx.String("albums-path"))
 	backupAlbums := ctx.Bool("albums") || albumsPath != ""
 	force := ctx.Bool("force")
-	retain := ctx.Int("retain")
 
 	if !backupDatabase && !backupAlbums {
 		return cli.ShowSubcommandHelp(ctx)
@@ -87,30 +103,16 @@ func backupAction(ctx *cli.Context) error {
 	defer cancel()
 
 	if err != nil {
-		return err
+		return cli.Exit(err, 1)
 	}
 
 	defer conf.Shutdown()
 
+	retain := backupRetain(ctx, conf.BackupRetain())
+
 	if backupDatabase {
-		// Use default if no explicit filename was provided.
-		if fileName == "" {
-			if !fs.PathWritable(databasePath) {
-				if databasePath != "" {
-					log.Warnf("backup: specified database backup path is not writable, using default directory instead")
-				}
-
-				databasePath = conf.BackupDatabasePath()
-			}
-
-			backupFile := time.Now().UTC().Format("2006-01-02") + ".sql"
-			fileName = filepath.Join(databasePath, backupFile)
-		} else {
-			retain = 0
-		}
-
-		if err = backup.Database(databasePath, fileName, fileName == "-", force, retain); err != nil {
-			return fmt.Errorf("failed to create database backup: %w", err)
+		if err = backupIndex(conf, databasePath, fileName, force, retain); err != nil {
+			return err
 		}
 	}
 
@@ -124,7 +126,7 @@ func backupAction(ctx *cli.Context) error {
 		}
 
 		if count, backupErr := backup.Albums(albumsPath, true); backupErr != nil {
-			return backupErr
+			return cli.Exit(backupErr, 1)
 		} else {
 			log.Infof("backup: saved %s", english.Plural(count, "album backup", "album backups"))
 		}
@@ -133,6 +135,31 @@ func backupAction(ctx *cli.Context) error {
 	elapsed := time.Since(start)
 
 	log.Infof("completed in %s", elapsed)
+
+	return nil
+}
+
+// backupIndex creates an index database backup in fileName, or in the backup path with the date as
+// filename if fileName is empty, and sends it to stdout if fileName is -.
+func backupIndex(conf *config.Config, databasePath, fileName string, force bool, retain int) error {
+	if fileName == "" {
+		if !fs.PathWritable(databasePath) {
+			if databasePath != "" {
+				log.Warnf("backup: specified database backup path is not writable, using default directory instead")
+			}
+
+			databasePath = conf.BackupDatabasePath()
+		}
+
+		backupFile := time.Now().UTC().Format("2006-01-02") + ".sql"
+		fileName = filepath.Join(databasePath, backupFile)
+	} else {
+		retain = 0
+	}
+
+	if err := backup.Database(databasePath, fileName, fileName == "-", force, retain); err != nil {
+		return cli.Exit(fmt.Errorf("failed to create database backup: %w", err), 1)
+	}
 
 	return nil
 }

@@ -1,6 +1,6 @@
 /*
 
-Copyright (c) 2018 - 2025 PhotoPrism UG. All rights reserved.
+Copyright (c) 2018 - 2026 PhotoPrism UG. All rights reserved.
 
     This program is free software: you can redistribute it and/or modify
     it under Version 3 of the GNU Affero General Public License (the "AGPL"):
@@ -13,7 +13,7 @@ Copyright (c) 2018 - 2025 PhotoPrism UG. All rights reserved.
 
     The AGPL is supplemented by our Trademark and Brand Guidelines,
     which describe how our Brand Assets may be used:
-    <https://www.photoprism.app/trademark>
+    <https://www.photoprism.app/trademark/>
 
 Feel free to send an email to hello@photoprism.app if you have questions,
 want to support our work, or just want to say hello.
@@ -72,7 +72,7 @@ const sanitizeHtmlOptions = Object.freeze({
     "ul",
   ],
   allowedAttributes: {
-    a: ["href", "target", "rel"],
+    a: ["href", "target", "rel", "dir"],
     span: ["dir"],
   },
   allowedSchemes: ["http", "https", "mailto"],
@@ -95,18 +95,32 @@ const sanitizeHtmlOptions = Object.freeze({
 const debug = window.__CONFIG__?.debug || window.__CONFIG__?.trace;
 
 export default class $util {
-  static normalizeLabelTitle(s) {
-    if (s === null || s === undefined) return "";
-    return String(s)
-      .toLowerCase()
-      .replace(/&/g, "and")
-      .replace(/[+_\-]+/g, " ")
-      .replace(/[^a-z0-9 ]+/g, "")
-      .replace(/\s+/g, " ")
-      .trim();
+  // normalizeTitle returns the dedup-comparison form of a user-typed identifier:
+  // lowercased, `&` → `and`, non-letter/digit/emoji runs collapsed to single
+  // spaces and trimmed. Emoji sequences (ZWJ, skin tone, regional indicators)
+  // are preserved so emoji-only titles round-trip.
+  static normalizeTitle(s) {
+    if (s === null || s === undefined) {
+      return "";
+    }
+    return (
+      String(s)
+        .toLowerCase()
+        .replace(/&/g, "and")
+        // ZWJ (U+200D), VS-15/16 (U+FE0E/F), and the keycap combining mark (U+20E3) sit in this
+        // class on purpose so composite emoji sequences survive normalization; eslint flags them as
+        // a "misleading character class" because they only carry meaning when paired with the
+        // pictographic ranges already listed above.
+        // eslint-disable-next-line no-misleading-character-class
+        .replace(/[^\p{L}\p{N}\p{Extended_Pictographic}\p{Emoji_Component}\p{Regional_Indicator}\p{Emoji_Modifier}\u200d\ufe0e\ufe0f\u20e3 ]+/gu, " ")
+        .replace(/\s+/g, " ")
+        .trim()
+    );
   }
   static slugifyLabelTitle(s) {
-    if (s === null || s === undefined) return "";
+    if (s === null || s === undefined) {
+      return "";
+    }
     return String(s)
       .toLowerCase()
       .replace(/&/g, "and")
@@ -308,8 +322,9 @@ export default class $util {
       I: 1,
     };
     let a;
-    if (number < 1 || number > 3999) return "";
-    else {
+    if (number < 1 || number > 3999) {
+      return "";
+    } else {
       for (let key in romanNumList) {
         a = Math.floor(number / romanNumList[key]);
         if (a >= 0) {
@@ -322,6 +337,60 @@ export default class $util {
     }
 
     return roman;
+  }
+
+  // stripBidiControls removes C0 and C1 controls, DEL, line and paragraph separators, and explicit bidi
+  // controls from a name before it is displayed, since isolating an element does not neutralize them.
+  static stripBidiControls(s) {
+    if (typeof s !== "string" || s === "") {
+      return s;
+    }
+
+    // eslint-disable-next-line no-control-regex
+    return s.replace(/[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u2028-\u202e\u2066-\u2069]/g, "");
+  }
+
+  // balanceBidi prepares a title or name for an isolated element while keeping its bidi marks: CRLF becomes
+  // LF, other paragraph separators a space, unmatched isolate terminators are removed, and isolates are closed
+  // before each line break, which ends a paragraph where white space is preserved.
+  static balanceBidi(s) {
+    // eslint-disable-next-line no-control-regex
+    if (typeof s !== "string" || !/[\r\u001c-\u001e\u0085\u2029\u2066-\u2069]/.test(s)) {
+      return s;
+    }
+
+    let open = 0;
+    let result = "";
+
+    // eslint-disable-next-line no-control-regex
+    for (const c of s.replace(/\r\n/g, "\n").replace(/[\r\u001c-\u001e\u0085\u2029]/g, " ")) {
+      if (c === "\n") {
+        result += "\u2069".repeat(open);
+        open = 0;
+      } else if (c === "\u2069") {
+        if (open === 0) {
+          continue;
+        }
+
+        open--;
+      } else if (c >= "\u2066" && c <= "\u2068") {
+        open++;
+      }
+
+      result += c;
+    }
+
+    return result + "\u2069".repeat(open);
+  }
+
+  // isolate wraps a title or name in first-strong isolate characters for single-line strings that cannot
+  // contain an isolating element, such as messages and the document title.
+  static isolate(s) {
+    if (typeof s !== "string" || s === "") {
+      return s;
+    }
+
+    return "\u2068" + $util.balanceBidi(s).replace(/\n/g, " ") + "\u2069";
   }
 
   // truncate shortens a string and appends an ellipsis when it exceeds length.
@@ -389,13 +458,13 @@ export default class $util {
       // Ampersand characters (&) should generally be ok in the link URL (though it should already be stripped as it may only be part of the query).
       let url = matched.replace(/&amp;/g, "&");
 
-      // Make sure the URL starts with "http://" or "https://".
-      if (!url.startsWith("https")) {
-        url = "https://" + matched;
+      // Make sure the URL uses "https://".
+      if (url.startsWith("http://")) {
+        url = "https://" + url.substring(7);
       }
 
       // Return HTML link markup.
-      return `<a href="${url}" target="_blank" rel="noopener noreferrer">${matched}</a>`;
+      return `<a href="${url}" target="_blank" rel="noopener noreferrer" dir="ltr">${matched}</a>`;
     }
 
     // Escape HTML control characters.
@@ -455,12 +524,31 @@ export default class $util {
     return navigator.maxTouchPoints > 0;
   }
 
-  // isMobile performs a basic user-agent and capability check for mobile devices.
+  // shouldOpenOnHover reports whether menus should open on hover: the user's UI
+  // preference (default on) gated by the device having no touch input.
+  static shouldOpenOnHover() {
+    return ($config.getSettings()?.ui?.openOnHover ?? true) && !$util.hasTouch();
+  }
+
+  // mapAnimateDuration returns the map fly-to animation duration in milliseconds, forcing 0
+  // (no animation) when the Reduce Motion accessibility setting is enabled. A non-negative
+  // overrideMs takes precedence over the global Maps.Animate preference.
+  static mapAnimateDuration(settings, overrideMs = -1) {
+    if (settings?.ui?.reduceMotion) {
+      return 0;
+    }
+
+    if (overrideMs >= 0) {
+      return overrideMs;
+    }
+
+    return settings?.maps?.animate ?? 0;
+  }
+
+  // isMobile returns true when the current user agent or touch capability indicates a mobile device.
+  // The `> 2` touch check covers iPads in desktop mode, where the user agent omits the mobile hint.
   static isMobile() {
-    return (
-      /Android|webOS|iPhone|iPad|iPod|BlackBerry|Mobile|IEMobile|Opera Mini/i.test(navigator.userAgent) ||
-      (navigator.maxTouchPoints && navigator.maxTouchPoints > 2)
-    );
+    return /Android|webOS|iPhone|iPad|iPod|BlackBerry|Mobile|IEMobile|Opera Mini/i.test(navigator?.userAgent) || navigator?.maxTouchPoints > 2;
   }
 
   // isHttps returns true when the current page is served over HTTPS.
@@ -481,6 +569,8 @@ export default class $util {
         return "JPEG";
       case media.FormatJpegXL:
         return "JPEG XL";
+      case "cin":
+        return "Kodak Cineon";
       case "raw":
         return "Unprocessed Sensor Data (RAW)";
       case "mov":
@@ -497,6 +587,12 @@ export default class $util {
         return "TIFF";
       case "psd":
         return "Adobe Photoshop";
+      case "mpo":
+        return "Stereoscopic JPEG (3D)";
+      case "insp":
+        return "Insta360 Panoramic";
+      case "thm":
+        return "Thumbnail";
       case "gif":
         return "GIF";
       case "dng":
@@ -506,10 +602,18 @@ export default class $util {
         return "Advanced Video Coding (AVC) / H.264";
       case media.CodecAvc3:
         return "Advanced Video Coding (AVC) Bitstream";
-      case "avif":
+      case media.FormatAv1:
         return "AOMedia Video 1 (AV1)";
+      case "avif":
+        return "AV1 Image File Format (AVIF)";
       case "avifs":
         return "AVIF Image Sequence";
+      case "heic":
+      case "heif":
+        return "High Efficiency Image Container (HEIC)";
+      case "heics":
+      case "heifs":
+        return "HEIC Image Sequence";
       case "hev":
       case "hvc":
       case media.CodecHvc1:
@@ -521,8 +625,17 @@ export default class $util {
       case media.FormatEvc:
       case media.CodecEvc1:
         return "Essential Video Coding (MPEG-5 Part 1)";
+      case media.FormatVvc:
+      case media.CodecVvc1:
+        return "Versatile Video Coding (VVC) / H.266";
+      case media.FormatMp4:
+        return "MPEG-4 Multimedia Container";
       case "m4v":
         return "Apple iTunes Multimedia Container";
+      case "insv":
+        return "Insta360";
+      case "lrv":
+        return "Insta360 Proxy";
       case "mkv":
         return "Matroska Multimedia Container";
       case "mts":
@@ -544,6 +657,8 @@ export default class $util {
         return "Flash";
       case "mpg":
         return "MPEG";
+      case "mp2":
+        return "MPEG-2 (H.262)";
       case "mjpg":
         return "Motion JPEG";
       case "ogg":
@@ -551,6 +666,18 @@ export default class $util {
         return "Ogg Media";
       case "wmv":
         return "Windows Media";
+      case "asf":
+        return "Advanced Systems Format (ASF)";
+      case "avi":
+        return "Microsoft Audio Video Interleave (AVI)";
+      case "dv":
+        return "DV";
+      case "mxf":
+        return "Material Exchange Format (MXF)";
+      case "3gp":
+        return "Mobile Multimedia Container (3G)";
+      case "3g2":
+        return "Mobile Multimedia Container (CDMA2000)";
       case "svg":
         return "SVG";
       case "ai":
@@ -559,6 +686,10 @@ export default class $util {
         return "Adobe PostScript";
       case "eps":
         return "EPS";
+      case "xmp":
+        return "Adobe XMP";
+      case "aae":
+        return "Apple Image Edits";
       default:
         return value.toUpperCase();
     }
@@ -810,6 +941,35 @@ export default class $util {
     }
   }
 
+  // typeName returns the localized label for a media type value
+  // (the same `value` field used by options/options.js#PhotoTypes).
+  // Returns `defaultValue` (or the empty string) for unknown / missing
+  // types so callers can fall back to a generic label like "File".
+  static typeName(type, defaultValue) {
+    switch (type) {
+      case media.Image:
+        return $gettext("Image");
+      case media.Raw:
+        return $gettext("Raw");
+      case media.Live:
+        return $gettext("Live");
+      case media.Video:
+        return $gettext("Video");
+      case media.Audio:
+        return $gettext("Audio");
+      case media.Animated:
+        return $gettext("Animated");
+      case media.Vector:
+        return $gettext("Vector");
+      case media.Document:
+        return $gettext("Document");
+      case media.Sidecar:
+        return $gettext("Sidecar");
+      default:
+        return defaultValue !== undefined ? defaultValue : "";
+    }
+  }
+
   // sourceName returns the localized label for a metadata source.
   static sourceName(src, defaultValue) {
     switch (src) {
@@ -825,6 +985,8 @@ export default class $util {
         return $gettext("Estimate");
       case "file":
         return $gettext("File");
+      case "modified":
+        return $gettext("Modified");
       case "name":
         return $gettext("Name");
       case "image":
@@ -960,6 +1122,17 @@ export default class $util {
   // videoUrl resolves the best playable video URL for given codec hints.
   static videoUrl(hash, codec, mime) {
     return this.videoFormatUrl(hash, this.videoFormat(codec, mime));
+  }
+
+  // pdfUrl builds the inline PDF URL for a file hash. The bytes are served by the
+  // session-scoped /files/<hash>/file.pdf endpoint; pdf.js authenticates the request via the
+  // X-Auth-Token header (see loadPdfDocument), so no token is needed in the path.
+  static pdfUrl(hash) {
+    if (!hash) {
+      return "";
+    }
+
+    return `${$config.apiUri}/files/${hash}/file.pdf`;
   }
 
   // videoContentType returns the HTTP content type matching the chosen video format.

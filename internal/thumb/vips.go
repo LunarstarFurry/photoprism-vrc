@@ -1,9 +1,11 @@
 package thumb
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/davidbyttow/govips/v2/vips"
 
@@ -11,9 +13,15 @@ import (
 	"github.com/photoprism/photoprism/pkg/fs"
 )
 
+// vipsStackSep separates the libvips error buffer from the trace govips appends to it.
+const vipsStackSep = "\nStack:\n"
+
 // Vips generates a new thumbnail with the requested size and returns the file name and a buffer with the image bytes,
 // or an error if thumbnail generation failed. For more information on libvips, see https://github.com/libvips/libvips.
 func Vips(imageName string, imageBuffer []byte, hash, thumbPath string, width, height int, opts ...ResampleOption) (thumbName string, thumbBuffer []byte, err error) {
+	// Reduce libvips errors, which callers may log at info level or above.
+	defer func() { err = vipsErr(err) }()
+
 	if len(hash) < 4 {
 		return "", nil, fmt.Errorf("thumb: invalid file hash %s", clean.Log(hash))
 	}
@@ -33,8 +41,10 @@ func Vips(imageName string, imageBuffer []byte, hash, thumbPath string, width, h
 	// Get thumb cache filename.
 	thumbName, err = FileName(hash, thumbPath, width, height, opts...)
 
+	logName := clean.Log(filepath.Base(imageName))
+
 	if err != nil {
-		log.Debugf("thumb: %s in %s (filename)", err, clean.Log(filepath.Base(imageName)))
+		log.Debugf("thumb: %s in %s (filename)", err, logName)
 		return "", nil, err
 	}
 
@@ -46,14 +56,19 @@ func Vips(imageName string, imageBuffer []byte, hash, thumbPath string, width, h
 
 	if len(imageBuffer) == 0 {
 		if img, err = vips.LoadImageFromFile(imageName, VipsImportParams()); err != nil {
-			log.Debugf("vips: %s in %s (load image from file)", err, clean.Log(filepath.Base(imageName)))
+			log.Debugf("vips: %s in %s (load image from file)", vipsErr(err), logName)
 			return "", nil, err
 		}
 	} else if img, err = vips.LoadImageFromBuffer(imageBuffer, VipsImportParams()); err != nil {
-		log.Debugf("vips: %s in %s (load image from buffer)", err, clean.Log(filepath.Base(imageName)))
+		log.Debugf("vips: %s in %s (load image from buffer)", vipsErr(err), logName)
 		return "", nil, err
 	}
 	defer img.Close()
+
+	if err = vipsCheckPixels(img, logName); err != nil {
+		log.Debugf("vips: %s (check resolution)", err)
+		return "", nil, err
+	}
 
 	// Set resample options.
 	var method ResampleOption
@@ -81,43 +96,114 @@ func Vips(imageName string, imageBuffer []byte, hash, thumbPath string, width, h
 	}
 
 	// Embed an ICC profile when a JPEG declares its color space via the EXIF InteroperabilityIndex tag.
-	if err = vipsSetIccProfileForInteropIndex(img, clean.Log(filepath.Base(imageName))); err != nil {
-		log.Debugf("vips: %s in %s (set icc profile for interop index tag)", err, clean.Log(filepath.Base(imageName)))
+	if err = vipsSetIccProfileForInteropIndex(img, logName); err != nil {
+		log.Debugf("vips: %s in %s (set icc profile for interop index tag)", vipsErr(err), logName)
 	}
 
 	// Create thumbnail image.
 	if err = img.ThumbnailWithSize(width, height, crop, size); err != nil {
-		log.Debugf("vips: %s in %s (create thumbnail)", err, clean.Log(filepath.Base(imageName)))
+		log.Debugf("vips: %s in %s (create thumbnail)", vipsErr(err), logName)
+		return "", nil, err
+	}
+
+	// Guard against zero-dimension intermediates so callers see the real cause
+	// instead of an opaque libvips "unable to write to target" further downstream.
+	if w, h := img.Width(), img.Height(); w <= 0 || h <= 0 {
+		err = fmt.Errorf("vips: produced empty %dx%d image for %s", w, h, logName)
+		log.Debugf("%s (create thumbnail)", err)
 		return "", nil, err
 	}
 
 	// Remove metadata from thumbnail.
 	if err = img.RemoveMetadata(); err != nil {
-		log.Debugf("vips: %s in %s (remove metadata)", err, clean.Log(filepath.Base(imageName)))
+		log.Debugf("vips: %s in %s (remove metadata)", vipsErr(err), logName)
 		return "", nil, err
 	}
 
 	// Export to standard image format.
+	var format string
 	switch fs.FileType(thumbName) {
 	case fs.ImagePng:
-		thumbBuffer, _, err = img.ExportPng(VipsPngExportParams(width, height))
+		format = "png"
+		pngParams := VipsPngExportParams(width, height)
+		// If ResampleStripICC is set, remove the ICC profile.
+		if Options(opts).Contains(ResampleStripICC) && img.HasICCProfile() {
+			if iccErr := img.RemoveICCProfile(); iccErr != nil {
+				log.Debugf("vips: %s in %s (remove icc profile)", iccErr, logName)
+			}
+		}
+		// Try to export PNG thumbnail image.
+		thumbBuffer, _, err = img.ExportPng(pngParams)
+		// If that fails, try again without the ICC profile, since libpng may reject an invalid ICCP chunk (e.g. malformed profile length).
+		if err != nil && img.HasICCProfile() {
+			log.Tracef("vips: %s in %s (export png with icc)", vipsErr(err), logName)
+			if iccErr := img.RemoveICCProfile(); iccErr != nil {
+				log.Debugf("vips: %s in %s (remove icc profile)", iccErr, logName)
+			} else if thumbBuffer, _, err = img.ExportPng(pngParams); err != nil {
+				log.Debugf("vips: %s in %s (export png without icc)", vipsErr(err), logName)
+			}
+		}
 	default:
+		format = "jpeg"
 		thumbBuffer, _, err = img.ExportJpeg(VipsJpegExportParams(width, height))
 	}
 
 	// Check if export failed.
 	if err != nil {
-		log.Debugf("vips: %s in %s (export thumbnail)", err, clean.Log(filepath.Base(imageName)))
+		err = wrapVipsExportErr(format, width, height, err)
+		log.Debugf("%s (export thumbnail)", err)
 		return "", thumbBuffer, err
 	}
 
 	// Write thumbnail to file.
 	if err = os.WriteFile(thumbName, thumbBuffer, fs.ModeFile); err != nil {
-		log.Debugf("vips: %s in %s (write thumbnail to file)", err, clean.Log(filepath.Base(imageName)))
+		err = wrapVipsWriteErr(err)
+		log.Debugf("%s (write thumbnail to file)", err)
 		return "", thumbBuffer, err
 	}
 
 	return thumbName, thumbBuffer, nil
+}
+
+// wrapVipsExportErr annotates a libvips export error with the target format and dimensions. The target
+// is not named, so the text carries no file hash; callers name the original.
+func wrapVipsExportErr(format string, width, height int, err error) error {
+	return fmt.Errorf("vips: %s export failed at %dx%d (%w)", format, width, height, vipsErr(err))
+}
+
+// wrapVipsWriteErr annotates a thumbnail file-write error. The destination stays in the wrapped
+// *fs.PathError, which clean.Error masks, so callers that log with it show no file hash.
+func wrapVipsWriteErr(err error) error {
+	return fmt.Errorf("vips: failed to write thumbnail (%w)", vipsErr(err))
+}
+
+// vipsErr reduces a libvips error to the message govips collected for it, joining the
+// buffer lines because libvips puts the errno on one of its own and disk.IsNoSpace
+// matches it as text. Errors without the separator pass through, keeping errors.Is.
+func vipsErr(err error) error {
+	if err == nil {
+		return nil
+	}
+
+	buffer, _, found := strings.Cut(err.Error(), vipsStackSep)
+
+	if !found {
+		return err
+	}
+
+	lines := make([]string, 0, 4)
+
+	for _, line := range strings.Split(buffer, "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			lines = append(lines, line)
+		}
+	}
+
+	if len(lines) == 0 {
+		return errors.New("unknown libvips error")
+	}
+
+	return errors.New(strings.Join(lines, "; "))
 }
 
 // VipsImportParams provides parameters for opening files with libvips.

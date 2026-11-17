@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"fmt"
+	"hash/crc32"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -14,8 +15,11 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/photoprism/photoprism/internal/entity"
+	"github.com/photoprism/photoprism/internal/mutex"
+	"github.com/photoprism/photoprism/pkg/clean"
 	"github.com/photoprism/photoprism/pkg/http/header"
 )
 
@@ -113,7 +117,11 @@ func removeUploadDirsForToken(t *testing.T, base string, tokenSuffix string) {
 	}
 }
 
+// TestUploadUserFiles_Multipart_SingleJPEG verifies staging and expiry scan activation.
 func TestUploadUserFiles_Multipart_SingleJPEG(t *testing.T) {
+	flag := mutex.UserUploads.Load()
+	t.Cleanup(func() { mutex.UserUploads.Store(flag) })
+	mutex.UserUploads.Store(false)
 	app, router, conf := NewApiTest()
 	// Limit allowed upload extensions to ensure text files get rejected in tests
 	conf.Options().UploadAllow = "jpg"
@@ -157,6 +165,70 @@ func TestUploadUserFiles_Multipart_SingleJPEG(t *testing.T) {
 		}
 	}
 	assert.True(t, found, "uploaded JPEG not found")
+	assert.True(t, mutex.UserUploads.Load())
+}
+
+// TestUploadUserFiles_Multipart_SidecarAllowlist pins that the upload allowlist covers metadata
+// sidecars as well, so a media-only list rejects an .xmp while the default accepts it.
+func TestUploadUserFiles_Multipart_SidecarAllowlist(t *testing.T) {
+	jpg, err := os.ReadFile(filepath.Clean("../../pkg/fs/testdata/directory/example.jpg"))
+
+	if err != nil {
+		t.Skipf("missing example.jpg: %v", err)
+	}
+
+	xmp := []byte(`<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?>` +
+		`<x:xmpmeta xmlns:x="adobe:ns:meta/"></x:xmpmeta><?xpacket end="w"?>`)
+
+	upload := func(t *testing.T, allow, token string) []string {
+		app, router, conf := NewApiTest()
+		SetTestUploadAllow(t, allow)
+		UploadUserFiles(router)
+		authToken := AuthenticateAdmin(app, router)
+
+		adminUid := entity.Admin.UserUID
+		uploadBase := filepath.Join(conf.UserStoragePath(adminUid), "upload")
+
+		t.Cleanup(func() { removeUploadDirsForToken(t, uploadBase, token) })
+
+		body, ctype, buildErr := buildMultipartTwo("example.jpg", jpg, "example.jpg.xmp", xmp)
+
+		if buildErr != nil {
+			t.Fatal(buildErr)
+		}
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/users/"+adminUid+"/upload/"+token, body)
+		req.Header.Set("Content-Type", ctype)
+		header.SetAuthorization(req, authToken)
+		w := httptest.NewRecorder()
+		app.ServeHTTP(w, req)
+
+		// A rejected file is skipped rather than failing the request.
+		assert.Equal(t, http.StatusOK, w.Code, w.Body.String())
+
+		return findUploadedFilesForToken(t, uploadBase, token)
+	}
+
+	uploaded := func(files []string, suffix string) bool {
+		for _, f := range files {
+			if strings.HasSuffix(f, suffix) {
+				return true
+			}
+		}
+
+		return false
+	}
+
+	t.Run("MediaOnlyRejectsSidecar", func(t *testing.T) {
+		files := upload(t, "jpg", "sidecarjpg")
+		assert.True(t, uploaded(files, "example.jpg"), "the allowed JPEG must be saved")
+		assert.False(t, uploaded(files, ".xmp"), "an extension the allowlist omits must be rejected")
+	})
+	t.Run("BlankAllowlistAcceptsSidecar", func(t *testing.T) {
+		files := upload(t, "", "sidecarall")
+		assert.True(t, uploaded(files, "example.jpg"), "the JPEG must be saved")
+		assert.True(t, uploaded(files, ".xmp"), "the default accepts every supported format")
+	})
 }
 
 func TestUploadUserFiles_Multipart_ZipExtract(t *testing.T) {
@@ -260,18 +332,23 @@ func TestUploadUserFiles_Multipart_ArchivesDisabled(t *testing.T) {
 	assert.Empty(t, files, "no files should remain when archives disabled")
 }
 
+// TestUploadUserFiles_Multipart_PerFileLimitExceeded checks the per-file size bound.
 func TestUploadUserFiles_Multipart_PerFileLimitExceeded(t *testing.T) {
 	app, router, conf := NewApiTest()
+	options := *conf.Options()
+	t.Cleanup(func() { *conf.Options() = options })
 	conf.Options().UploadAllow = "jpg"
 	conf.Options().OriginalsLimit = 1 // 1 MiB per-file
+	conf.Options().UploadLimit = 10
+	conf.Options().UploadNSFW = true
 	UploadUserFiles(router)
 	token := AuthenticateAdmin(app, router)
 
 	adminUid := entity.Admin.UserUID
 	defer removeUploadDirsForToken(t, filepath.Join(conf.UserStoragePath(adminUid), "upload"), "size1")
 
-	// Build a 2MiB dummy payload (not a real JPEG; that's fine for pre-save size check)
-	big := bytes.Repeat([]byte("A"), 2*1024*1024)
+	// Keep the JPEG decodable so only the per-file limit can reject it.
+	big := append(NewTestJpeg(t, 160, 160), bytes.Repeat([]byte("A"), 2*1024*1024)...)
 	body, ctype, err := buildMultipart(map[string][]byte{"big.jpg": big})
 	if err != nil {
 		t.Fatal(err)
@@ -287,8 +364,11 @@ func TestUploadUserFiles_Multipart_PerFileLimitExceeded(t *testing.T) {
 	assert.Empty(t, files)
 }
 
+// TestUploadUserFiles_Multipart_TotalLimitExceeded checks the total upload bound.
 func TestUploadUserFiles_Multipart_TotalLimitExceeded(t *testing.T) {
 	app, router, conf := NewApiTest()
+	options := *conf.Options()
+	t.Cleanup(func() { *conf.Options() = options })
 	conf.Options().UploadAllow = "jpg"
 	conf.Options().UploadLimit = 1 // 1 MiB total
 	UploadUserFiles(router)
@@ -321,8 +401,11 @@ func TestUploadUserFiles_Multipart_TotalLimitExceeded(t *testing.T) {
 	assert.LessOrEqual(t, len(files), 1)
 }
 
+// TestUploadUserFiles_Multipart_RequestTooLarge checks oversized request rejection.
 func TestUploadUserFiles_Multipart_RequestTooLarge(t *testing.T) {
 	app, router, conf := NewApiTest()
+	options := *conf.Options()
+	t.Cleanup(func() { *conf.Options() = options })
 	conf.Options().UploadAllow = "jpg"
 	conf.Options().UploadLimit = 1
 	UploadUserFiles(router)
@@ -348,8 +431,11 @@ func TestUploadUserFiles_Multipart_RequestTooLarge(t *testing.T) {
 	assert.Empty(t, files)
 }
 
+// TestUploadUserFiles_Multipart_ZipPartialExtraction checks archive entry limits.
 func TestUploadUserFiles_Multipart_ZipPartialExtraction(t *testing.T) {
 	app, router, conf := NewApiTest()
+	options := *conf.Options()
+	t.Cleanup(func() { *conf.Options() = options })
 	conf.Options().UploadArchives = true
 	conf.Options().UploadAllow = "jpg,zip"
 	conf.Options().UploadLimit = 1     // 1 MiB total
@@ -689,4 +775,292 @@ func TestUploadUserFiles_Multipart_ZipAbsolutePathRejected(t *testing.T) {
 	base := filepath.Join(conf.UserStoragePath(adminUid), "upload")
 	files := findUploadedFilesForToken(t, base, "zipabs")
 	assert.Empty(t, files)
+}
+
+func TestUploadUserFiles_Multipart_SkippedEntryNames(t *testing.T) {
+	app, router, conf := NewApiTest()
+	conf.Options().UploadArchives = true
+	conf.Options().UploadAllow = "jpg,png,zip"
+	UploadUserFiles(router)
+	token := AuthenticateAdmin(app, router)
+
+	adminUid := entity.Admin.UserUID
+	uploadBase := filepath.Join(conf.UserStoragePath(adminUid), "upload")
+
+	// uploadSkippedZip uploads an archive whose entries Unzip skips and returns the log line naming them.
+	uploadSkippedZip := func(t *testing.T, uploadToken string, entries map[string][]byte) string {
+		t.Helper()
+
+		body, ctype, err := buildMultipart(map[string][]byte{"skipped.zip": buildZipWithDirsAndFiles(nil, entries)})
+
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		hook := captureLog(t)
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/users/"+adminUid+"/upload/"+uploadToken, body)
+		req.Header.Set("Content-Type", ctype)
+		header.SetAuthorization(req, token)
+		w := httptest.NewRecorder()
+		app.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+		}
+
+		for _, entry := range hook.AllEntries() {
+			if strings.Contains(entry.Message, "could not extract") {
+				return entry.Message
+			}
+		}
+
+		t.Fatal("expected a log entry naming the skipped entries")
+
+		return ""
+	}
+
+	t.Run("ControlCharactersRemoved", func(t *testing.T) {
+		defer removeUploadDirsForToken(t, uploadBase, "skipone")
+
+		// Unzip reports an entry whose name is not a plain relative path, so the name is logged.
+		name := "report\nsummary../x.jpg"
+		line := uploadSkippedZip(t, "skipone", map[string][]byte{name: []byte("x")})
+
+		assert.NotContains(t, line, "\n", "a log line must not carry a newline from an archive entry")
+		assert.NotContains(t, line, "\r")
+		assert.Contains(t, line, "report", "the entry name is still reported")
+		assert.Contains(t, line, "x.jpg")
+	})
+	t.Run("CountIsBounded", func(t *testing.T) {
+		defer removeUploadDirsForToken(t, uploadBase, "skipmany")
+
+		const skipped = clean.LogNamesLimit + 4
+
+		entries := make(map[string][]byte, skipped)
+
+		for i := 0; i < skipped; i++ {
+			entries[fmt.Sprintf("pad%d../y.jpg", i)] = []byte("y")
+		}
+
+		line := uploadSkippedZip(t, "skipmany", entries)
+
+		assert.Contains(t, line, fmt.Sprintf("and %d more", skipped-clean.LogNamesLimit))
+		assert.Equal(t, clean.LogNamesLimit, strings.Count(line, "../y.jpg"))
+	})
+}
+
+// uploadPart is a named file for buildMultipartParts.
+type uploadPart struct {
+	name string
+	data []byte
+}
+
+// buildMultipartParts builds a multipart form with the files in the given order, all in the "files" field.
+func buildMultipartParts(parts ...uploadPart) (body *bytes.Buffer, contentType string, err error) {
+	body = &bytes.Buffer{}
+	mw := multipart.NewWriter(body)
+
+	for _, part := range parts {
+		fw, createErr := mw.CreateFormFile("files", part.name)
+
+		if createErr != nil {
+			return nil, "", createErr
+		}
+
+		if _, writeErr := fw.Write(part.data); writeErr != nil {
+			return nil, "", writeErr
+		}
+	}
+
+	return body, mw.FormDataContentType(), mw.Close()
+}
+
+// TestUploadUserFiles_Multipart_ZipBudget checks that archives are extracted only within the remaining
+// total upload size budget of the request.
+func TestUploadUserFiles_Multipart_ZipBudget(t *testing.T) {
+	app, router, conf := NewApiTest()
+	options := *conf.Options()
+	t.Cleanup(func() { *conf.Options() = options })
+	conf.Options().UploadArchives = true
+	conf.Options().UploadAllow = "jpg,zip"
+	conf.Options().UploadLimit = 1 // 1 MiB total
+	conf.Options().UploadNSFW = true
+	UploadUserFiles(router)
+	token := AuthenticateAdmin(app, router)
+
+	adminUid := entity.Admin.UserUID
+	uploadBase := filepath.Join(conf.UserStoragePath(adminUid), "upload")
+
+	jpg, err := os.ReadFile(filepath.Clean("../../pkg/fs/testdata/directory/example.jpg"))
+	require.NoError(t, err)
+
+	// Each of these uses a little more than half of the budget.
+	half := bytes.Repeat(jpg, 9)
+	archive := buildZipWithDirsAndFiles(nil, map[string][]byte{"sub/inner.jpg": jpg})
+
+	// upload sends the parts and returns the log messages and the staged files relative to the batch folder.
+	upload := func(t *testing.T, uploadToken string, parts ...uploadPart) (messages, staged []string, batchDir string) {
+		t.Helper()
+
+		body, ctype, buildErr := buildMultipartParts(parts...)
+		require.NoError(t, buildErr)
+
+		hook := captureLog(t)
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/users/"+adminUid+"/upload/"+uploadToken, body)
+		req.Header.Set("Content-Type", ctype)
+		header.SetAuthorization(req, token)
+		w := httptest.NewRecorder()
+		app.ServeHTTP(w, req)
+		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+
+		for _, entry := range hook.AllEntries() {
+			messages = append(messages, entry.Message)
+		}
+
+		entries, _ := os.ReadDir(uploadBase)
+
+		for _, e := range entries {
+			if e.IsDir() && strings.HasSuffix(e.Name(), uploadToken) {
+				batchDir = filepath.Join(uploadBase, e.Name())
+			}
+		}
+
+		require.NotEmpty(t, batchDir)
+
+		for _, f := range findUploadedFilesForToken(t, uploadBase, uploadToken) {
+			rel, relErr := filepath.Rel(batchDir, f)
+			require.NoError(t, relErr)
+			staged = append(staged, filepath.ToSlash(rel))
+		}
+
+		return messages, staged, batchDir
+	}
+
+	t.Run("BudgetUsedUp", func(t *testing.T) {
+		defer removeUploadDirsForToken(t, uploadBase, "zipbudgetout")
+
+		messages, staged, batchDir := upload(t, "zipbudgetout",
+			uploadPart{"a.jpg", half}, uploadPart{"b.jpg", half}, uploadPart{"c.zip", archive})
+
+		assert.Equal(t, []string{"a.jpg"}, staged)
+		assert.NoDirExists(t, filepath.Join(batchDir, "sub"))
+
+		var archiveRejected bool
+
+		for _, m := range messages {
+			assert.NotContains(t, m, "inner.jpg")
+
+			if strings.Contains(m, "c.zip") && strings.Contains(m, "total upload size limit has been reached") {
+				archiveRejected = true
+			}
+		}
+
+		assert.True(t, archiveRejected, "expected the archive to be rejected for the total upload size limit: %v", messages)
+	})
+	t.Run("WithinBudget", func(t *testing.T) {
+		defer removeUploadDirsForToken(t, uploadBase, "zipbudgetin")
+
+		_, staged, _ := upload(t, "zipbudgetin", uploadPart{"a.jpg", half}, uploadPart{"c.zip", archive})
+
+		assert.ElementsMatch(t, []string{"a.jpg", "sub/inner.jpg"}, staged)
+	})
+}
+
+// TestUploadUserFiles_Multipart_ZipIncompleteEntry checks that an archive entry whose data ends before its
+// declared size is not staged, while complete entries before it are.
+func TestUploadUserFiles_Multipart_ZipIncompleteEntry(t *testing.T) {
+	app, router, conf := NewApiTest()
+	options := *conf.Options()
+	t.Cleanup(func() { *conf.Options() = options })
+	conf.Options().UploadArchives = true
+	conf.Options().UploadAllow = "jpg,zip"
+	conf.Options().UploadNSFW = true
+	UploadUserFiles(router)
+	token := AuthenticateAdmin(app, router)
+
+	adminUid := entity.Admin.UserUID
+	uploadBase := filepath.Join(conf.UserStoragePath(adminUid), "upload")
+	defer removeUploadDirsForToken(t, uploadBase, "zipincomplete")
+
+	jpg, err := os.ReadFile(filepath.Clean("../../pkg/fs/testdata/directory/example.jpg"))
+	require.NoError(t, err)
+
+	// The second entry holds the first half of the image but declares its full size.
+	half := jpg[:len(jpg)/2]
+
+	var zbuf bytes.Buffer
+
+	zw := zip.NewWriter(&zbuf)
+	w, err := zw.Create("complete.jpg")
+	require.NoError(t, err)
+	_, err = w.Write(jpg)
+	require.NoError(t, err)
+	w, err = zw.CreateRaw(&zip.FileHeader{
+		Name:               "incomplete.jpg",
+		Method:             zip.Store,
+		CRC32:              crc32.ChecksumIEEE(jpg),
+		CompressedSize64:   uint64(len(half)),
+		UncompressedSize64: uint64(len(jpg)),
+	})
+	require.NoError(t, err)
+	_, err = w.Write(half)
+	require.NoError(t, err)
+	require.NoError(t, zw.Close())
+
+	body, ctype, err := buildMultipartParts(uploadPart{"archive.zip", zbuf.Bytes()})
+	require.NoError(t, err)
+
+	hook := captureLog(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/users/"+adminUid+"/upload/zipincomplete", body)
+	req.Header.Set("Content-Type", ctype)
+	header.SetAuthorization(req, token)
+	w2 := httptest.NewRecorder()
+	app.ServeHTTP(w2, req)
+	require.Equal(t, http.StatusOK, w2.Code, w2.Body.String())
+
+	var staged []string
+
+	for _, f := range findUploadedFilesForToken(t, uploadBase, "zipincomplete") {
+		staged = append(staged, filepath.Base(f))
+	}
+
+	assert.Equal(t, []string{"complete.jpg"}, staged)
+
+	// Extraction itself must fail on the entry, independent of the checks applied to extracted files.
+	var extractFailed bool
+
+	for _, entry := range hook.AllEntries() {
+		if strings.Contains(entry.Message, "failed to extract files from archive.zip") && strings.Contains(entry.Message, "unexpected EOF") {
+			extractFailed = true
+		}
+	}
+
+	assert.True(t, extractFailed, "expected the archive extraction to fail on the incomplete entry")
+}
+
+func TestUploadUserFiles_Multipart_TokenTooLong(t *testing.T) {
+	app, router, conf := NewApiTest()
+	options := *conf.Options()
+	t.Cleanup(func() { *conf.Options() = options })
+	conf.Options().StoragePath = t.TempDir()
+	conf.Options().UploadAllow = "jpg"
+	UploadUserFiles(router)
+	token := AuthenticateAdmin(app, router)
+	adminUid := entity.Admin.UserUID
+
+	body, ctype, err := buildMultipart(map[string][]byte{"small.jpg": NewTestJpeg(t, 161, 111)})
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/users/"+adminUid+"/upload/"+strings.Repeat("a", clean.LengthLimit-4), body)
+	req.Header.Set("Content-Type", ctype)
+	header.SetAuthorization(req, token)
+	w := httptest.NewRecorder()
+	app.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+
+	// Nothing is written to the user's upload folder.
+	entries, _ := os.ReadDir(filepath.Join(conf.UserStoragePath(adminUid), "upload"))
+	assert.Empty(t, entries)
 }
