@@ -34,6 +34,8 @@ type Details struct {
 	LicenseSrc   string    `gorm:"type:bytes;size:8;" json:"LicenseSrc" yaml:"LicenseSrc,omitempty"`
 	Software     string    `gorm:"size:1024;" json:"Software" yaml:"Software,omitempty"`
 	SoftwareSrc  string    `gorm:"type:bytes;size:8;" json:"SoftwareSrc" yaml:"SoftwareSrc,omitempty"`
+	VRCWorldID   string    `gorm:"size:64;index;" json:"VRCWorldID,omitempty" yaml:"VRCWorldID,omitempty"`
+	VRCPlayers   string    `gorm:"type:TEXT;" json:"VRCPlayers,omitempty" yaml:"VRCPlayers,omitempty"`
 	CreatedAt    time.Time `json:"CreatedAt" yaml:"-"`
 	UpdatedAt    time.Time `json:"UpdatedAt" yaml:"-"`
 }

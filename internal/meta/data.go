@@ -83,6 +83,7 @@ type Data struct {
 	VRCWorldID       string        `meta:"WorldID,XMP-vrc:WorldID,vrc:WorldID"`
 	VRCWorldName     string        `meta:"WorldDisplayName,XMP-vrc:WorldDisplayName,vrc:WorldDisplayName"`
 	VRCAuthorID      string        `meta:"AuthorID,XMP-vrc:AuthorID,vrc:AuthorID"`
+	VRCPlayers       string        `meta:"-"`
 	Lat              float64       `meta:"-"`
 	Lng              float64       `meta:"-"`
 	Altitude         float64       `meta:"GlobalAltitude,GPSAltitude" xmp:"exif:GPSAltitude"`

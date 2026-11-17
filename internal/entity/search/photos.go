@@ -795,28 +795,73 @@ func searchPhotos(frm form.SearchPhotos, sess *entity.Session, resultCols string
 		}
 	}
 
-	// Filter by VRChat world name stored in photo_caption or details.notes using loose similarity matching.
+	// Filter by VRChat world ID (if wrld_... or matched via name) or fuzzy world name fallback.
 	if txt.NotEmpty(frm.World) {
 		type worldCandidate struct {
 			ID           uint
+			VRCWorldID   string
 			PhotoCaption string
 			Notes        string
 		}
 		var candidates []worldCandidate
 		if err := UnscopedDb().Table("photos").
-			Select("photos.id, photos.photo_caption, COALESCE(details.notes, '') AS notes").
+			Select("photos.id, COALESCE(details.vrc_world_id, '') AS vrc_world_id, photos.photo_caption, COALESCE(details.notes, '') AS notes").
 			Joins("LEFT JOIN details ON details.photo_id = photos.id").
 			Where("photos.deleted_at IS NULL").
-			Where("photos.photo_caption LIKE ? OR details.notes LIKE ?", "%"+VRCWorldPrefix+"%", "%"+VRCWorldPrefix+"%").
+			Where("photos.photo_caption LIKE ? OR details.notes LIKE ? OR COALESCE(details.vrc_world_id, '') <> ''", "%"+VRCWorldPrefix+"%", "%"+VRCWorldPrefix+"%").
 			Scan(&candidates).Error; err == nil {
+			query := strings.TrimSpace(frm.World)
+			isIDQuery := strings.HasPrefix(query, "wrld_")
+
+			matchedIDsSet := make(map[string]bool)
+			knownNames := make([]string, 0)
+			if isIDQuery {
+				matchedIDsSet[query] = true
+				for _, cand := range candidates {
+					if cand.VRCWorldID == query {
+						w := ExtractVRCWorld(cand.PhotoCaption)
+						if w == "" {
+							w = ExtractVRCWorld(cand.Notes)
+						}
+						if w != "" {
+							knownNames = append(knownNames, w)
+						}
+					}
+				}
+			} else {
+				knownNames = append(knownNames, query)
+				for _, cand := range candidates {
+					if cand.VRCWorldID != "" {
+						w := ExtractVRCWorld(cand.PhotoCaption)
+						if w == "" {
+							w = ExtractVRCWorld(cand.Notes)
+						}
+						if w != "" && MatchVRCWorld(w, query) {
+							matchedIDsSet[cand.VRCWorldID] = true
+						}
+					}
+				}
+			}
+
 			var matchedIDs []uint
 			for _, cand := range candidates {
-				w := ExtractVRCWorld(cand.PhotoCaption)
-				if w == "" {
-					w = ExtractVRCWorld(cand.Notes)
-				}
-				if w != "" && MatchVRCWorld(w, frm.World) {
+				if cand.VRCWorldID != "" && matchedIDsSet[cand.VRCWorldID] {
 					matchedIDs = append(matchedIDs, cand.ID)
+					continue
+				}
+				if cand.VRCWorldID == "" {
+					w := ExtractVRCWorld(cand.PhotoCaption)
+					if w == "" {
+						w = ExtractVRCWorld(cand.Notes)
+					}
+					if w != "" {
+						for _, kn := range knownNames {
+							if MatchVRCWorld(w, kn) {
+								matchedIDs = append(matchedIDs, cand.ID)
+								break
+							}
+						}
+					}
 				}
 			}
 			if len(matchedIDs) > 0 {
@@ -827,25 +872,69 @@ func searchPhotos(frm form.SearchPhotos, sess *entity.Session, resultCols string
 		}
 	}
 
-	// Filter by VRChat player display name stored in photo_caption or details.notes.
+	// Filter by VRChat player ID (usr_...) or display name stored in details.vrc_players / caption / notes.
 	if txt.NotEmpty(frm.Player) {
 		type playerCandidate struct {
 			ID           uint
+			VRCPlayers   string
 			PhotoCaption string
 			Notes        string
 		}
 		var candidates []playerCandidate
 		if err := UnscopedDb().Table("photos").
-			Select("photos.id, photos.photo_caption, COALESCE(details.notes, '') AS notes").
+			Select("photos.id, COALESCE(details.vrc_players, '') AS vrc_players, photos.photo_caption, COALESCE(details.notes, '') AS notes").
 			Joins("LEFT JOIN details ON details.photo_id = photos.id").
 			Where("photos.deleted_at IS NULL").
-			Where("photos.photo_caption LIKE ? OR details.notes LIKE ?", "%VRChat - %", "%VRChat - %").
+			Where("photos.photo_caption LIKE ? OR details.notes LIKE ? OR COALESCE(details.vrc_players, '') <> ''", "%VRChat - %", "%VRChat - %").
 			Scan(&candidates).Error; err == nil {
-			var matchedIDs []uint
+			query := strings.TrimSpace(frm.Player)
+			isIDQuery := strings.HasPrefix(query, "usr_")
+
+			type parsedCandidate struct {
+				id      uint
+				entries []VRCPlayerEntry
+			}
+			parsed := make([]parsedCandidate, 0, len(candidates))
+			matchedPlayerIDs := make(map[string]bool)
+			knownNames := make(map[string]bool)
+
+			if isIDQuery {
+				matchedPlayerIDs[query] = true
+			} else {
+				knownNames[strings.ToLower(query)] = true
+			}
+
 			for _, cand := range candidates {
-				players := ExtractVRCPlayers(cand.PhotoCaption, cand.Notes)
-				if MatchVRCPlayer(players, frm.Player) {
-					matchedIDs = append(matchedIDs, cand.ID)
+				entries := ExtractVRCPlayerEntries(cand.VRCPlayers, cand.PhotoCaption, cand.Notes)
+				parsed = append(parsed, parsedCandidate{id: cand.ID, entries: entries})
+				for _, e := range entries {
+					if isIDQuery && e.ID == query && e.Name != "" {
+						knownNames[strings.ToLower(e.Name)] = true
+					} else if !isIDQuery && e.Name != "" && strings.EqualFold(e.Name, query) && e.ID != "" {
+						matchedPlayerIDs[e.ID] = true
+					}
+				}
+			}
+
+			var matchedIDs []uint
+			for _, pc := range parsed {
+				matched := false
+				for _, e := range pc.entries {
+					if e.ID != "" && matchedPlayerIDs[e.ID] {
+						matched = true
+						break
+					}
+					if e.ID == "" && e.Name != "" && knownNames[strings.ToLower(e.Name)] {
+						matched = true
+						break
+					}
+					if !isIDQuery && e.Name != "" && strings.EqualFold(e.Name, query) {
+						matched = true
+						break
+					}
+				}
+				if matched {
+					matchedIDs = append(matchedIDs, pc.id)
 				}
 			}
 			if len(matchedIDs) > 0 {

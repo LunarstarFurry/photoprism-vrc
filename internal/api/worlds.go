@@ -16,6 +16,7 @@ import (
 
 // WorldResult represents an aggregated VRChat world entry returned by GET /api/v1/worlds.
 type WorldResult struct {
+	WorldID    string    `json:"WorldID,omitempty"`
 	Name       string    `json:"Name"`
 	PhotoCount int       `json:"PhotoCount"`
 	Thumb      string    `json:"Thumb"`
@@ -23,6 +24,7 @@ type WorldResult struct {
 }
 
 type worldPhotoRow struct {
+	VRCWorldID   string
 	PhotoCaption string
 	Notes        string
 	FileHash     string
@@ -30,6 +32,7 @@ type worldPhotoRow struct {
 }
 
 // GetWorlds finds and returns VRChat worlds extracted from photo metadata as JSON.
+// Groups by VRCWorldID when available, falling back to fuzzy name matching for older photos.
 //
 // GET /api/v1/worlds
 func GetWorlds(router *gin.RouterGroup) {
@@ -56,11 +59,11 @@ func GetWorlds(router *gin.RouterGroup) {
 
 		db := entity.Db().
 			Table("photos").
-			Select("photos.photo_caption, COALESCE(details.notes, '') AS notes, files.file_hash, photos.taken_at").
+			Select("COALESCE(details.vrc_world_id, '') AS vrc_world_id, photos.photo_caption, COALESCE(details.notes, '') AS notes, files.file_hash, photos.taken_at").
 			Joins("JOIN files ON files.photo_id = photos.id AND files.file_primary = 1 AND files.deleted_at IS NULL").
 			Joins("LEFT JOIN details ON details.photo_id = photos.id").
 			Where("photos.deleted_at IS NULL").
-			Where("photos.photo_caption LIKE ? OR details.notes LIKE ?", "%"+search.VRCWorldPrefix+"%", "%"+search.VRCWorldPrefix+"%").
+			Where("photos.photo_caption LIKE ? OR details.notes LIKE ? OR COALESCE(details.vrc_world_id, '') <> ''", "%"+search.VRCWorldPrefix+"%", "%"+search.VRCWorldPrefix+"%").
 			Order("photos.taken_at DESC")
 
 		if acl.Rules.Deny(acl.ResourcePhotos, s.GetUserRole(), acl.AccessPrivate) {
@@ -75,37 +78,59 @@ func GetWorlds(router *gin.RouterGroup) {
 		}
 
 		var groups []*WorldResult
+		byWorldID := make(map[string]*WorldResult)
+
 		for _, row := range rows {
 			rawName := search.ExtractVRCWorld(row.PhotoCaption)
 			if rawName == "" {
 				rawName = search.ExtractVRCWorld(row.Notes)
 			}
 			normName := search.NormalizeVRCWorld(rawName)
-			if normName == "" {
+			wid := strings.TrimSpace(row.VRCWorldID)
+
+			if normName == "" && wid == "" {
 				continue
 			}
 
 			var target *WorldResult
-			for _, g := range groups {
-				if search.MatchVRCWorld(g.Name, normName) {
-					target = g
-					break
+			if wid != "" {
+				target = byWorldID[wid]
+			}
+			if target == nil && normName != "" {
+				for _, g := range groups {
+					// Merge into an existing group if it has no conflicting WorldID.
+					if (wid == "" || g.WorldID == "" || g.WorldID == wid) && search.MatchVRCWorld(g.Name, normName) {
+						target = g
+						break
+					}
 				}
 			}
 
 			if target == nil {
-				groups = append(groups, &WorldResult{
-					Name:       normName,
+				displayName := normName
+				if displayName == "" {
+					displayName = wid
+				}
+				target = &WorldResult{
+					WorldID:    wid,
+					Name:       displayName,
 					PhotoCount: 1,
 					Thumb:      row.FileHash,
 					TakenAt:    row.TakenAt,
-				})
+				}
+				groups = append(groups, target)
+				if wid != "" {
+					byWorldID[wid] = target
+				}
 				continue
 			}
 
 			target.PhotoCount++
-			// Prefer the shorter/cleaner display name for the group label.
-			if len(normName) < len(target.Name) {
+			if target.WorldID == "" && wid != "" {
+				target.WorldID = wid
+				byWorldID[wid] = target
+			}
+			if normName != "" && (target.Name == target.WorldID || len(normName) < len(target.Name)) {
 				target.Name = normName
 			}
 			if target.Thumb == "" && row.FileHash != "" {
@@ -115,7 +140,7 @@ func GetWorlds(router *gin.RouterGroup) {
 
 		results := make([]WorldResult, 0, len(groups))
 		for _, g := range groups {
-			if q != "" && !strings.Contains(strings.ToLower(g.Name), q) {
+			if q != "" && !strings.Contains(strings.ToLower(g.Name), q) && !strings.Contains(strings.ToLower(g.WorldID), q) {
 				continue
 			}
 			results = append(results, *g)

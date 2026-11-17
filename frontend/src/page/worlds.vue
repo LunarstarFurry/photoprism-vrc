@@ -120,7 +120,8 @@ export default {
       return `${$config.contentUri}/svg/label`;
     },
     openWorld(world) {
-      const escaped = String(world.Name || "").replace(/"/g, '\\"');
+      const target = world.WorldID || world.Name || "";
+      const escaped = String(target).replace(/"/g, '\\"');
       this.$router.push({
         name: "photos",
         query: { q: `world:"${escaped}"` },
