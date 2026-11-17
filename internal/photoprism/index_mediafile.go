@@ -609,6 +609,13 @@ func (ind *Index) UserMediaFile(m *MediaFile, o IndexOptions, originalName, phot
 				details.SetSoftware(data.Software, entity.SrcXmp)
 			}
 
+			if data.VRCWorldID != "" {
+				details.VRCWorldID = data.VRCWorldID
+			}
+			if data.VRCPlayers != "" {
+				details.VRCPlayers = data.VRCPlayers
+			}
+
 			// Adopt the XMP DocumentID as the photo UUID. SrcXmp wins
 			// over an auto-generated UUID assigned in the SrcMeta branch.
 			// Real-world XMP DocumentIDs are often non-canonical (no dashes,
@@ -678,6 +685,13 @@ func (ind *Index) UserMediaFile(m *MediaFile, o IndexOptions, originalName, phot
 			details.SetCopyright(data.Copyright, entity.SrcMeta)
 			details.SetLicense(data.License, entity.SrcMeta)
 			details.SetSoftware(data.Software, entity.SrcMeta)
+
+			if data.VRCWorldID != "" {
+				details.VRCWorldID = data.VRCWorldID
+			}
+			if data.VRCPlayers != "" {
+				details.VRCPlayers = data.VRCPlayers
+			}
 
 			if data.HasDocumentID() && photo.UUID == "" {
 				log.Infof("index: %s has document_id %s", logName, clean.Log(data.DocumentID))
@@ -784,6 +798,13 @@ func (ind *Index) UserMediaFile(m *MediaFile, o IndexOptions, originalName, phot
 			details.SetLicense(data.License, entity.SrcMeta)
 			details.SetSoftware(data.Software, entity.SrcMeta)
 
+			if data.VRCWorldID != "" {
+				details.VRCWorldID = data.VRCWorldID
+			}
+			if data.VRCPlayers != "" {
+				details.VRCPlayers = data.VRCPlayers
+			}
+
 			if data.HasDocumentID() && photo.UUID == "" {
 				log.Infof("index: %s has document_id %s", logName, clean.Log(data.DocumentID))
 
@@ -831,6 +852,13 @@ func (ind *Index) UserMediaFile(m *MediaFile, o IndexOptions, originalName, phot
 			details.SetLicense(data.License, entity.SrcMeta)
 			details.SetSoftware(data.Software, entity.SrcMeta)
 
+			if data.VRCWorldID != "" {
+				details.VRCWorldID = data.VRCWorldID
+			}
+			if data.VRCPlayers != "" {
+				details.VRCPlayers = data.VRCPlayers
+			}
+
 			if data.HasDocumentID() && photo.UUID == "" {
 				log.Infof("index: %s has document_id %s", logName, clean.Log(data.DocumentID))
 
@@ -877,6 +905,13 @@ func (ind *Index) UserMediaFile(m *MediaFile, o IndexOptions, originalName, phot
 			details.SetCopyright(data.Copyright, entity.SrcMeta)
 			details.SetLicense(data.License, entity.SrcMeta)
 			details.SetSoftware(data.Software, entity.SrcMeta)
+
+			if data.VRCWorldID != "" {
+				details.VRCWorldID = data.VRCWorldID
+			}
+			if data.VRCPlayers != "" {
+				details.VRCPlayers = data.VRCPlayers
+			}
 
 			if data.HasDocumentID() && photo.UUID == "" {
 				log.Infof("index: %s has document_id %s", logName, clean.Log(data.DocumentID))
@@ -1020,6 +1055,13 @@ func (ind *Index) UserMediaFile(m *MediaFile, o IndexOptions, originalName, phot
 			details.SetCopyright(data.Copyright, entity.SrcMeta)
 			details.SetLicense(data.License, entity.SrcMeta)
 			details.SetSoftware(data.Software, entity.SrcMeta)
+
+			if data.VRCWorldID != "" {
+				details.VRCWorldID = data.VRCWorldID
+			}
+			if data.VRCPlayers != "" {
+				details.VRCPlayers = data.VRCPlayers
+			}
 
 			if data.HasDocumentID() && photo.UUID == "" {
 				log.Debugf("index: %s has document_id %s", logName, clean.Log(data.DocumentID))

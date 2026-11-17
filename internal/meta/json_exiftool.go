@@ -585,6 +585,18 @@ func (data *Data) Exiftool(jsonData []byte, originalName string) (err error) {
 		data.AddKeywords(KeywordPanorama)
 	}
 
+	// Extract immutable VRChat WorldID and Player IDs before SanitizeCaption/SanitizeString
+	// converts the raw VRCX JSON into a human-readable string.
+	var vrcPlayers []VRCPlayerMeta
+	for _, rawSrc := range []string{data.Caption, data.Notes} {
+		if wid, pls := ExtractVRCXMeta(rawSrc); wid != "" || len(pls) > 0 {
+			if data.VRCWorldID == "" && wid != "" {
+				data.VRCWorldID = wid
+			}
+			vrcPlayers = append(vrcPlayers, pls...)
+		}
+	}
+
 	if data.Caption != "" {
 		data.AutoAddKeywords(data.Caption)
 		data.Caption = SanitizeCaption(data.Caption)
@@ -594,6 +606,11 @@ func (data *Data) Exiftool(jsonData []byte, originalName string) (err error) {
 	data.Subject = SanitizeMeta(data.Subject)
 	data.Artist = SanitizeMeta(data.Artist)
 	data.Notes = SanitizeString(data.Notes)
+	data.VRCWorldID = strings.TrimSpace(data.VRCWorldID)
+	data.VRCAuthorID = strings.TrimSpace(data.VRCAuthorID)
+	if len(vrcPlayers) > 0 || data.VRCAuthorID != "" {
+		data.VRCPlayers = EncodeVRCPlayersJSON(vrcPlayers, data.VRCAuthorID, data.Artist)
+	}
 
 	// Fallback for native VRChat metadata
 	if data.VRCWorldName != "" || data.VRCWorldID != "" || data.VRCAuthorID != "" {

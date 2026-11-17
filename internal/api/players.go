@@ -17,6 +17,7 @@ import (
 
 // PlayerResult represents an aggregated VRChat player entry returned by GET /api/v1/players.
 type PlayerResult struct {
+	PlayerID   string    `json:"PlayerID,omitempty"`
 	Name       string    `json:"Name"`
 	PhotoCount int       `json:"PhotoCount"`
 	Thumb      string    `json:"Thumb"`
@@ -24,6 +25,7 @@ type PlayerResult struct {
 }
 
 type playerPhotoRow struct {
+	VRCPlayers   string
 	PhotoCaption string
 	Notes        string
 	FileHash     string
@@ -31,6 +33,7 @@ type playerPhotoRow struct {
 }
 
 // GetPlayers finds and returns VRChat players extracted from photo metadata as JSON.
+// Groups by usr_... ID when available, falling back to display-name matching for older photos.
 //
 // GET /api/v1/players
 func GetPlayers(router *gin.RouterGroup) {
@@ -58,11 +61,11 @@ func GetPlayers(router *gin.RouterGroup) {
 
 		db := entity.Db().
 			Table("photos").
-			Select("photos.photo_caption, COALESCE(details.notes, '') AS notes, files.file_hash, photos.taken_at").
+			Select("COALESCE(details.vrc_players, '') AS vrc_players, photos.photo_caption, COALESCE(details.notes, '') AS notes, files.file_hash, photos.taken_at").
 			Joins("JOIN files ON files.photo_id = photos.id AND files.file_primary = 1 AND files.deleted_at IS NULL").
 			Joins("LEFT JOIN details ON details.photo_id = photos.id").
 			Where("photos.deleted_at IS NULL").
-			Where("photos.photo_caption LIKE ? OR details.notes LIKE ?", "%VRChat - %", "%VRChat - %").
+			Where("photos.photo_caption LIKE ? OR details.notes LIKE ? OR COALESCE(details.vrc_players, '') <> ''", "%VRChat - %", "%VRChat - %").
 			Order("photos.taken_at DESC")
 
 		if acl.Rules.Deny(acl.ResourcePhotos, s.GetUserRole(), acl.AccessPrivate) {
@@ -77,67 +80,118 @@ func GetPlayers(router *gin.RouterGroup) {
 		}
 
 		type playerAgg struct {
-			result PlayerResult
-			thumbs []string
+			result     PlayerResult
+			thumbs     []string
+			knownNames map[string]struct{}
 		}
 
-		byKey := make(map[string]*playerAgg)
+		var aggs []*playerAgg
+		byID := make(map[string]*playerAgg)
+		byName := make(map[string]*playerAgg)
+
 		for _, row := range rows {
-			players := search.ExtractVRCPlayers(row.PhotoCaption, row.Notes)
-			for _, name := range players {
-				key := strings.ToLower(name)
-				if q != "" && !strings.Contains(key, q) {
-					continue
+			entries := search.ExtractVRCPlayerEntries(row.VRCPlayers, row.PhotoCaption, row.Notes)
+			seenInPhoto := make(map[*playerAgg]struct{}, len(entries))
+
+			for _, entry := range entries {
+				id := strings.TrimSpace(entry.ID)
+				name := strings.TrimSpace(entry.Name)
+				nameKey := strings.ToLower(name)
+
+				var target *playerAgg
+				if id != "" {
+					target = byID[id]
+				}
+				if target == nil && nameKey != "" {
+					if candidate, ok := byName[nameKey]; ok {
+						if id == "" || candidate.result.PlayerID == "" || candidate.result.PlayerID == id {
+							target = candidate
+						}
+					}
 				}
 
-				existing, ok := byKey[key]
-				if !ok {
-					agg := &playerAgg{
+				if target == nil {
+					displayName := name
+					if displayName == "" {
+						displayName = id
+					}
+					target = &playerAgg{
 						result: PlayerResult{
-							Name:       name,
-							PhotoCount: 1,
+							PlayerID:   id,
+							Name:       displayName,
+							PhotoCount: 0,
 							TakenAt:    row.TakenAt,
 						},
+						knownNames: make(map[string]struct{}),
 					}
-					if row.FileHash != "" {
-						agg.thumbs = append(agg.thumbs, row.FileHash)
+					aggs = append(aggs, target)
+				}
+
+				if id != "" {
+					if target.result.PlayerID == "" {
+						target.result.PlayerID = id
 					}
-					byKey[key] = agg
+					byID[id] = target
+				}
+				if nameKey != "" {
+					target.knownNames[nameKey] = struct{}{}
+					if _, exists := byName[nameKey]; !exists {
+						byName[nameKey] = target
+					}
+				}
+
+				if _, alreadyCounted := seenInPhoto[target]; alreadyCounted {
 					continue
 				}
+				seenInPhoto[target] = struct{}{}
 
-				existing.result.PhotoCount++
+				target.result.PhotoCount++
 				if row.FileHash != "" {
-					existing.thumbs = append(existing.thumbs, row.FileHash)
+					target.thumbs = append(target.thumbs, row.FileHash)
 				}
 			}
 		}
 
-		aggs := make([]*playerAgg, 0, len(byKey))
-		for _, agg := range byKey {
-			// When not searching and not explicitly requesting all, hide 1-photo passersby
-			// so large group instances don't flood the grid.
-			if q == "" && !showAll && agg.result.PhotoCount < 2 {
+		filtered := make([]*playerAgg, 0, len(aggs))
+		for _, agg := range aggs {
+			if q != "" {
+				matched := strings.Contains(strings.ToLower(agg.result.Name), q) ||
+					strings.Contains(strings.ToLower(agg.result.PlayerID), q)
+				if !matched {
+					for kn := range agg.knownNames {
+						if strings.Contains(kn, q) {
+							matched = true
+							break
+						}
+					}
+				}
+				if !matched {
+					continue
+				}
+			} else if !showAll && agg.result.PhotoCount < 2 {
 				continue
 			}
-			aggs = append(aggs, agg)
+			filtered = append(filtered, agg)
 		}
 
-		sort.Slice(aggs, func(i, j int) bool {
-			if aggs[i].result.PhotoCount != aggs[j].result.PhotoCount {
-				return aggs[i].result.PhotoCount > aggs[j].result.PhotoCount
+		sort.Slice(filtered, func(i, j int) bool {
+			if filtered[i].result.PhotoCount != filtered[j].result.PhotoCount {
+				return filtered[i].result.PhotoCount > filtered[j].result.PhotoCount
 			}
-			return strings.ToLower(aggs[i].result.Name) < strings.ToLower(aggs[j].result.Name)
+			return strings.ToLower(filtered[i].result.Name) < strings.ToLower(filtered[j].result.Name)
 		})
 
-		// Pick a distinct, deterministic cover thumbnail per player so cards don't all
-		// display the same newest group photo.
-		usedThumbs := make(map[string]bool, len(aggs))
-		results := make([]PlayerResult, 0, len(aggs))
-		for _, agg := range aggs {
+		// Pick a distinct, deterministic cover thumbnail per player.
+		usedThumbs := make(map[string]bool, len(filtered))
+		results := make([]PlayerResult, 0, len(filtered))
+		for _, agg := range filtered {
 			if n := len(agg.thumbs); n > 0 {
+				seed := agg.result.PlayerID
+				if seed == "" {
+					seed = strings.ToLower(agg.result.Name)
+				}
 				h := fnv.New32a()
-				_, _ = h.Write([]byte(strings.ToLower(agg.result.Name)))
+				_, _ = h.Write([]byte(seed))
 				start := int(h.Sum32()) % n
 
 				chosen := agg.thumbs[start]

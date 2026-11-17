@@ -1,8 +1,15 @@
 package search
 
 import (
+	"encoding/json"
 	"strings"
 )
+
+// VRCPlayerEntry represents a VRChat player's optional user ID and display name.
+type VRCPlayerEntry struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
 
 const (
 	vrcAuthorTag  = "Author: "
@@ -81,4 +88,45 @@ func MatchVRCPlayer(players []string, query string) bool {
 	}
 
 	return false
+}
+
+// ExtractVRCPlayerEntries returns deduplicated player entries from stored VRCPlayers JSON
+// when available, falling back to parsing display names from Caption and Notes for older photos.
+func ExtractVRCPlayerEntries(vrcPlayersJSON, caption, notes string) []VRCPlayerEntry {
+	if strings.TrimSpace(vrcPlayersJSON) != "" {
+		var parsed []VRCPlayerEntry
+		if err := json.Unmarshal([]byte(vrcPlayersJSON), &parsed); err == nil && len(parsed) > 0 {
+			seen := make(map[string]struct{}, len(parsed))
+			out := make([]VRCPlayerEntry, 0, len(parsed))
+			for _, p := range parsed {
+				id := strings.TrimSpace(p.ID)
+				name := strings.TrimSpace(p.Name)
+				if name == "" && isUnresolvedVRCUserID(id) {
+					continue
+				}
+				if name == "" && id == "" {
+					continue
+				}
+				key := id
+				if key == "" {
+					key = "name:" + strings.ToLower(name)
+				}
+				if _, ok := seen[key]; ok {
+					continue
+				}
+				seen[key] = struct{}{}
+				out = append(out, VRCPlayerEntry{ID: id, Name: name})
+			}
+			if len(out) > 0 {
+				return out
+			}
+		}
+	}
+
+	names := ExtractVRCPlayers(caption, notes)
+	out := make([]VRCPlayerEntry, 0, len(names))
+	for _, n := range names {
+		out = append(out, VRCPlayerEntry{Name: n})
+	}
+	return out
 }

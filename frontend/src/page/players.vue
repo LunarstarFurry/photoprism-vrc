@@ -143,7 +143,8 @@ export default {
       return `${$config.contentUri}/svg/label`;
     },
     openPlayer(player) {
-      const escaped = String(player.Name || "").replace(/"/g, '\\"');
+      const target = player.PlayerID || player.Name || "";
+      const escaped = String(target).replace(/"/g, '\\"');
       this.$router.push({
         name: "photos",
         query: { q: `player:"${escaped}"` },
