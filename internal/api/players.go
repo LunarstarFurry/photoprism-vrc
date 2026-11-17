@@ -1,6 +1,7 @@
 package api
 
 import (
+	"hash/fnv"
 	"net/http"
 	"sort"
 	"strconv"
@@ -75,7 +76,12 @@ func GetPlayers(router *gin.RouterGroup) {
 			return
 		}
 
-		byKey := make(map[string]*PlayerResult)
+		type playerAgg struct {
+			result PlayerResult
+			thumbs []string
+		}
+
+		byKey := make(map[string]*playerAgg)
 		for _, row := range rows {
 			players := search.ExtractVRCPlayers(row.PhotoCaption, row.Notes)
 			for _, name := range players {
@@ -86,38 +92,67 @@ func GetPlayers(router *gin.RouterGroup) {
 
 				existing, ok := byKey[key]
 				if !ok {
-					byKey[key] = &PlayerResult{
-						Name:       name,
-						PhotoCount: 1,
-						Thumb:      row.FileHash,
-						TakenAt:    row.TakenAt,
+					agg := &playerAgg{
+						result: PlayerResult{
+							Name:       name,
+							PhotoCount: 1,
+							TakenAt:    row.TakenAt,
+						},
 					}
+					if row.FileHash != "" {
+						agg.thumbs = append(agg.thumbs, row.FileHash)
+					}
+					byKey[key] = agg
 					continue
 				}
 
-				existing.PhotoCount++
-				if existing.Thumb == "" && row.FileHash != "" {
-					existing.Thumb = row.FileHash
+				existing.result.PhotoCount++
+				if row.FileHash != "" {
+					existing.thumbs = append(existing.thumbs, row.FileHash)
 				}
 			}
 		}
 
-		results := make([]PlayerResult, 0, len(byKey))
-		for _, p := range byKey {
+		aggs := make([]*playerAgg, 0, len(byKey))
+		for _, agg := range byKey {
 			// When not searching and not explicitly requesting all, hide 1-photo passersby
 			// so large group instances don't flood the grid.
-			if q == "" && !showAll && p.PhotoCount < 2 {
+			if q == "" && !showAll && agg.result.PhotoCount < 2 {
 				continue
 			}
-			results = append(results, *p)
+			aggs = append(aggs, agg)
 		}
 
-		sort.Slice(results, func(i, j int) bool {
-			if results[i].PhotoCount != results[j].PhotoCount {
-				return results[i].PhotoCount > results[j].PhotoCount
+		sort.Slice(aggs, func(i, j int) bool {
+			if aggs[i].result.PhotoCount != aggs[j].result.PhotoCount {
+				return aggs[i].result.PhotoCount > aggs[j].result.PhotoCount
 			}
-			return strings.ToLower(results[i].Name) < strings.ToLower(results[j].Name)
+			return strings.ToLower(aggs[i].result.Name) < strings.ToLower(aggs[j].result.Name)
 		})
+
+		// Pick a distinct, deterministic cover thumbnail per player so cards don't all
+		// display the same newest group photo.
+		usedThumbs := make(map[string]bool, len(aggs))
+		results := make([]PlayerResult, 0, len(aggs))
+		for _, agg := range aggs {
+			if n := len(agg.thumbs); n > 0 {
+				h := fnv.New32a()
+				_, _ = h.Write([]byte(strings.ToLower(agg.result.Name)))
+				start := int(h.Sum32()) % n
+
+				chosen := agg.thumbs[start]
+				for i := 0; i < n; i++ {
+					cand := agg.thumbs[(start+i)%n]
+					if !usedThumbs[cand] {
+						chosen = cand
+						break
+					}
+				}
+				usedThumbs[chosen] = true
+				agg.result.Thumb = chosen
+			}
+			results = append(results, agg.result)
+		}
 
 		if offset >= len(results) {
 			results = []PlayerResult{}
