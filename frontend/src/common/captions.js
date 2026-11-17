@@ -484,7 +484,8 @@ class PhotoSwipeDynamicCaption {
     let html = "";
 
     if (model.Title) {
-      html += `<h4>${$util.encodeHTML(model.Title.trim())}</h4>`;
+      const title = typeof model.getLocalizedTitle === "function" ? model.getLocalizedTitle() : model.Title.trim();
+      html += `<h4>${$util.encodeHTML(title)}</h4>`;
     }
 
     let text = typeof model.Caption === "string" ? model.Caption.trim() : "";

@@ -86,10 +86,10 @@
                 </td>
                 <td
                   class="meta-data meta-title col-auto text-start clickable"
-                  :title="m.Title"
+                  :title="m.getLocalizedTitle()"
                   @click.exact="isSharedView ? openPhoto(index) : editPhoto(index)"
                 >
-                  <div class="text-truncate"><bdi :dir="showTitles && m.Title ? 'auto' : 'ltr'">{{ showTitles && m.Title ? $util.balanceBidi(m.Title) : m.getOriginalName() }}</bdi></div>
+                  <div class="text-truncate"><bdi :dir="showTitles && m.Title ? 'auto' : 'ltr'">{{ showTitles && m.Title ? $util.balanceBidi(m.getLocalizedTitle()) : m.getOriginalName() }}</bdi></div>
                   <div v-if="context === contexts.Hidden && hiddenReason(m)" :title="hiddenReason(m)" class="meta-error text-truncate">
                     {{ hiddenReason(m) }}
                   </div>

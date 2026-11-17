@@ -57,7 +57,7 @@ type Data struct {
 	FacesPartial     bool          `meta:"-"`
 	Favorite         bool          `meta:"Favorite" xmp:"fstop:favorite"`
 	Notes            string        `meta:"Comment,UserComment" xmp:"exif:UserComment"`
-	Artist           string        `meta:"Artist,Creator,By-line,OwnerName,Owner" xmp:"dc:creator" dc:"creator"`
+	Artist           string        `meta:"Artist,Creator,Author,XMP-xmp:Author,By-line,OwnerName,Owner" xmp:"dc:creator" dc:"creator"`
 	Copyright        string        `meta:"Rights,Copyright,CopyrightNotice,WebStatement" xmp:"dc:rights,tiff:Copyright,xmpRights:WebStatement" dc:"rights,rights.Alt"`
 	License          string        `meta:"UsageTerms,License" xmp:"xmpRights:UsageTerms"`
 	Projection       string        `meta:"ProjectionType" xmp:"GPano:ProjectionType"`
@@ -80,6 +80,9 @@ type Data struct {
 	GPSPosition      string        `meta:"GPSPosition"`
 	GPSLatitude      string        `meta:"GPSLatitude" xmp:"exif:GPSLatitude"`
 	GPSLongitude     string        `meta:"GPSLongitude" xmp:"exif:GPSLongitude"`
+	VRCWorldID       string        `meta:"WorldID,XMP-vrc:WorldID,vrc:WorldID"`
+	VRCWorldName     string        `meta:"WorldDisplayName,XMP-vrc:WorldDisplayName,vrc:WorldDisplayName"`
+	VRCAuthorID      string        `meta:"AuthorID,XMP-vrc:AuthorID,vrc:AuthorID"`
 	Lat              float64       `meta:"-"`
 	Lng              float64       `meta:"-"`
 	Altitude         float64       `meta:"GlobalAltitude,GPSAltitude" xmp:"exif:GPSAltitude"`

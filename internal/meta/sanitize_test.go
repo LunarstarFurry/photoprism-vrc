@@ -95,6 +95,18 @@ func TestSanitizeTitle(t *testing.T) {
 }
 
 func TestSanitizeCaption(t *testing.T) {
+	t.Run("VRCX_Formatting", func(t *testing.T) {
+		raw := `{application:VRCX,version:1,author:{id:usr_b124255b-f0de-441d-a019-5e8a690c7d29,displayName:LunarstarFurry},world:{name:SlashCo VR,id:wrld_41efe3b1-9931-40ab-a15d-6946d22481b5,instanceId:wrld_41efe3b1-9931-40ab-a15d-6946d22481b5:54309~group(grp_63f20923-a536-4330-a137-dadf2ebac45a)~groupAccessType(public)~region(use)},players:[{id:usr_7deb0523-fec8-452a-bb13-413b02ed4337,displayName:Delboy},{id:usr_4dbe9c53-3c1e-4b8d-974b-e50da280c628,displayName:Riletin},{id:usr_b124255b-f0de-441d-a019-5e8a690c7d29,displayName:LunarstarFurry},{id:usr_41c22689-82ce-4075-9cf5-a38805803b83,displayName:Ivy},{id:usr_6fdd431f-def0-40ad-a28d-feba46df123e,displayName:ThatWinterBoi},{id:usr_c04da893-7953-4ddf-a29c-abe0cf3b0833,displayName:FishbonesX2},{id:usr_54f7d04c-b7ec-4902-a7f3-e6b9eabf8820,displayName:Tengoku Hoshi},{id:usr_55ff07e1-4545-4ea3-a9a1-2c4365e1441a,displayName:SolaceSeen}]}`
+		expected := "VRChat - World: SlashCo VR | Author: LunarstarFurry | Players: Delboy, Riletin, LunarstarFurry, Ivy, ThatWinterBoi, FishbonesX2, Tengoku Hoshi, SolaceSeen"
+		result := SanitizeCaption(raw)
+		assert.Equal(t, expected, result)
+	})
+	t.Run("VRCX_Formatting_Quotes", func(t *testing.T) {
+		raw := `{"application":"VRCX","version":1,"author":{"id":"usr_123","displayName":"LunarstarFurry"},"world":{"name":"SlashCo VR","id":"wrld_123"},"players":[{"id":"usr_456","displayName":"Delboy"}]}`
+		expected := "VRChat - World: SlashCo VR | Author: LunarstarFurry | Players: Delboy"
+		result := SanitizeCaption(raw)
+		assert.Equal(t, expected, result)
+	})
 	t.Run("ImgNum0599", func(t *testing.T) {
 		result := SanitizeCaption("IMG_0599")
 
