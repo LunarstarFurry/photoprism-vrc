@@ -399,6 +399,32 @@
             </v-list-item>
 
             <v-list-item
+              v-if="isMini && $config.allow('photos', 'search')"
+              :to="{ name: 'players' }"
+              variant="text"
+              class="nav-players"
+              :ripple="false"
+              @click.stop=""
+            >
+              <v-icon class="ma-auto">mdi-account-group</v-icon>
+            </v-list-item>
+            <v-list-item
+              v-else-if="!isMini && $config.allow('photos', 'search')"
+              :to="{ name: 'players' }"
+              variant="text"
+              class="nav-players"
+              :ripple="false"
+              @click.stop=""
+            >
+              <v-list-item-title class="nav-menu-item">
+                <v-icon>mdi-account-group</v-icon>
+                <p class="nav-item-title">
+                  {{ $gettext(`Players`) }}
+                </p>
+              </v-list-item-title>
+            </v-list-item>
+
+            <v-list-item
               v-if="isMini && $config.feature('calendar')"
               :to="{ name: 'calendar' }"
               variant="text"

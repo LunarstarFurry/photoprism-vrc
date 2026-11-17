@@ -827,6 +827,35 @@ func searchPhotos(frm form.SearchPhotos, sess *entity.Session, resultCols string
 		}
 	}
 
+	// Filter by VRChat player display name stored in photo_caption or details.notes.
+	if txt.NotEmpty(frm.Player) {
+		type playerCandidate struct {
+			ID           uint
+			PhotoCaption string
+			Notes        string
+		}
+		var candidates []playerCandidate
+		if err := UnscopedDb().Table("photos").
+			Select("photos.id, photos.photo_caption, COALESCE(details.notes, '') AS notes").
+			Joins("LEFT JOIN details ON details.photo_id = photos.id").
+			Where("photos.deleted_at IS NULL").
+			Where("photos.photo_caption LIKE ? OR details.notes LIKE ?", "%VRChat - %", "%VRChat - %").
+			Scan(&candidates).Error; err == nil {
+			var matchedIDs []uint
+			for _, cand := range candidates {
+				players := ExtractVRCPlayers(cand.PhotoCaption, cand.Notes)
+				if MatchVRCPlayer(players, frm.Player) {
+					matchedIDs = append(matchedIDs, cand.ID)
+				}
+			}
+			if len(matchedIDs) > 0 {
+				s = s.Where("photos.id IN (?)", matchedIDs)
+			} else {
+				s = s.Where("1 = 0")
+			}
+		}
+	}
+
 	// Filter by file hash.
 	if txt.NotEmpty(frm.Hash) {
 		s = s.Where("files.file_hash IN (?)", SplitOr(strings.ToLower(frm.Hash)))
